@@ -1,0 +1,1672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MiniOS v3.0 Ultimate Terminal</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #1a1a2e;
+            --bg-tertiary: #16213e;
+            --accent-primary: #00ff00;
+            --accent-secondary: #00ffff;
+            --text-primary: #ffffff;
+            --text-secondary: #aaaaaa;
+            --error: #ff0044;
+            --warning: #ffaa00;
+            --success: #00ff00;
+        }
+
+        body {
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+            color: var(--accent-primary);
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        body.theme-matrix {
+            --bg-primary: #000000;
+            --bg-secondary: #001a00;
+            --accent-primary: #00ff00;
+            --accent-secondary: #00cc00;
+        }
+
+        body.theme-cyberpunk {
+            --bg-primary: #0a0e27;
+            --bg-secondary: #1a1f3a;
+            --accent-primary: #ff00ff;
+            --accent-secondary: #00ffff;
+        }
+
+        body.theme-retro {
+            --bg-primary: #2b1b17;
+            --bg-secondary: #3d2b1f;
+            --accent-primary: #ff8c00;
+            --accent-secondary: #ffa500;
+        }
+
+        .container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: linear-gradient(to right, var(--bg-secondary), var(--bg-tertiary), #0f3460);
+            padding: 12px 20px;
+            border-bottom: 3px solid var(--accent-primary);
+            box-shadow: 0 2px 10px rgba(0, 255, 0, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: var(--accent-primary);
+            font-size: 22px;
+            text-shadow: 0 0 10px var(--accent-primary), 0 0 20px var(--accent-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .logo {
+            font-size: 28px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .system-stats {
+            display: flex;
+            gap: 25px;
+            font-size: 13px;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 12px;
+            background: rgba(0, 255, 0, 0.1);
+            border-radius: 5px;
+            border: 1px solid rgba(0, 255, 0, 0.3);
+            transition: all 0.3s;
+        }
+
+        .stat:hover {
+            background: rgba(0, 255, 0, 0.2);
+            transform: translateY(-2px);
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+        }
+
+        .stat-value {
+            color: var(--accent-primary);
+            font-weight: bold;
+        }
+
+        .terminal {
+            flex: 1;
+            background: #000;
+            padding: 20px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.6;
+            box-shadow: inset 0 0 20px rgba(0, 255, 0, 0.1);
+            position: relative;
+        }
+
+        .terminal::-webkit-scrollbar {
+            width: 12px;
+        }
+
+        .terminal::-webkit-scrollbar-track {
+            background: #111;
+            border-left: 1px solid var(--accent-primary);
+        }
+
+        .terminal::-webkit-scrollbar-thumb {
+            background: var(--accent-primary);
+            border-radius: 6px;
+        }
+
+        .terminal::-webkit-scrollbar-thumb:hover {
+            background: var(--accent-secondary);
+        }
+
+        .output-line {
+            margin: 2px 0;
+            animation: fadeIn 0.3s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .prompt {
+            color: var(--accent-secondary);
+            font-weight: bold;
+        }
+
+        .input-line {
+            display: flex;
+            align-items: center;
+            margin-top: 5px;
+        }
+
+        #command-input {
+            background: transparent;
+            border: none;
+            color: var(--accent-primary);
+            font-family: inherit;
+            font-size: inherit;
+            outline: none;
+            flex: 1;
+            padding: 0 5px;
+            caret-color: var(--accent-primary);
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 18px;
+            background: var(--accent-primary);
+            animation: blink 1s infinite;
+            margin-left: 2px;
+        }
+
+        @keyframes blink {
+            0%, 49% { opacity: 1; }
+            50%, 100% { opacity: 0; }
+        }
+
+        .error { color: var(--error); }
+        .success { color: var(--success); }
+        .info { color: var(--accent-secondary); }
+        .warning { color: var(--warning); }
+        .highlight { color: #ff00ff; }
+
+        .ascii-art {
+            color: var(--accent-primary);
+            white-space: pre;
+            font-size: 9px;
+            line-height: 1.1;
+            text-shadow: 0 0 5px rgba(0, 255, 0, 0.5);
+        }
+
+        .progress-bar {
+            width: 300px;
+            height: 20px;
+            background: #111;
+            border: 2px solid var(--accent-primary);
+            border-radius: 3px;
+            margin: 10px 0;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
+            transition: width 0.3s;
+            box-shadow: 0 0 10px var(--accent-primary);
+        }
+
+        .menu {
+            background: rgba(26, 26, 46, 0.9);
+            border: 2px solid var(--accent-primary);
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+        }
+
+        .menu-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-radius: 3px;
+        }
+
+        .menu-item:hover {
+            background: rgba(0, 255, 0, 0.2);
+            padding-left: 20px;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: var(--bg-secondary);
+            border: 2px solid var(--accent-primary);
+            border-radius: 10px;
+            padding: 30px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 0 30px var(--accent-primary);
+        }
+
+        .modal-header {
+            font-size: 24px;
+            color: var(--accent-primary);
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .modal-body {
+            color: var(--text-primary);
+            line-height: 1.8;
+        }
+
+        .btn {
+            background: var(--accent-primary);
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+            margin: 5px;
+        }
+
+        .btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 15px var(--accent-primary);
+        }
+
+        .editor {
+            width: 100%;
+            min-height: 400px;
+            background: #1a1a1a;
+            color: var(--accent-primary);
+            border: 2px solid var(--accent-primary);
+            border-radius: 5px;
+            padding: 10px;
+            font-family: inherit;
+            resize: vertical;
+        }
+
+        .notification {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.9);
+            border: 2px solid var(--accent-primary);
+            padding: 15px 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
+            animation: slideIn 0.3s;
+            max-width: 300px;
+            z-index: 999;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        .loading {
+            display: inline-block;
+            color: var(--accent-primary);
+            animation: pulse 1s infinite;
+        }
+
+        .tree-line {
+            color: var(--accent-primary);
+            padding-left: 20px;
+        }
+
+        .file-icon { color: var(--accent-secondary); }
+        .dir-icon { color: var(--warning); }
+
+        .game-canvas {
+            border: 2px solid var(--accent-primary);
+            background: #000;
+        }
+
+        .autocomplete {
+            position: absolute;
+            background: rgba(26, 26, 46, 0.95);
+            border: 2px solid var(--accent-primary);
+            border-radius: 5px;
+            padding: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+            z-index: 100;
+        }
+
+        .autocomplete-item {
+            padding: 5px 10px;
+            cursor: pointer;
+            border-radius: 3px;
+        }
+
+        .autocomplete-item:hover,
+        .autocomplete-item.selected {
+            background: rgba(0, 255, 0, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <span class="logo">⚡</span>
+                MiniOS v3.0 Ultimate Terminal
+            </h1>
+            <div class="system-stats">
+                <div class="stat">
+                    <span class="stat-label">CPU:</span>
+                    <span class="stat-value" id="cpu-usage">0%</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">MEM:</span>
+                    <span class="stat-value" id="mem-usage">0%</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">DISK:</span>
+                    <span class="stat-value" id="disk-usage">0%</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">NET:</span>
+                    <span class="stat-value" id="net-status">ONLINE</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">UPTIME:</span>
+                    <span class="stat-value" id="uptime">00:00:00</span>
+                </div>
+            </div>
+        </div>
+        <div class="terminal" id="terminal">
+            <div id="output"></div>
+            <div class="autocomplete" id="autocomplete"></div>
+            <div class="input-line">
+                <span class="prompt">MiniOS:/$</span>
+                <input type="text" id="command-input" autofocus autocomplete="off">
+                <span class="cursor"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div class="modal" id="editor-modal">
+        <div class="modal-content">
+            <div class="modal-header">File Editor</div>
+            <div class="modal-body">
+                <input type="text" id="editor-filename" placeholder="Filename" style="width: 100%; padding: 10px; margin-bottom: 10px; background: #1a1a1a; border: 2px solid #00ff00; color: #00ff00; border-radius: 5px;">
+                <textarea class="editor" id="editor-content"></textarea>
+                <div style="margin-top: 10px; text-align: center;">
+                    <button class="btn" onclick="terminal.saveFile()">Save</button>
+                    <button class="btn" onclick="terminal.closeEditor()">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class MiniOSTerminal {
+            constructor() {
+                this.output = document.getElementById('output');
+                this.input = document.getElementById('command-input');
+                this.terminal = document.getElementById('terminal');
+                this.autocomplete = document.getElementById('autocomplete');
+                this.history = [];
+                this.historyIndex = -1;
+                this.currentDir = '/';
+                this.fileSystem = this.initFileSystem();
+                this.processes = this.initProcesses();
+                this.startTime = Date.now();
+                this.systemStats = { cpu: 0, mem: 0, disk: 0, net: 100 };
+                this.theme = 'default';
+                this.aliases = {
+                    'll': 'ls -l',
+                    'la': 'ls -a',
+                    'cls': 'clear'
+                };
+                this.networkDevices = this.initNetwork();
+                this.users = this.initUsers();
+                this.currentUser = 'root';
+                this.envVars = {
+                    PATH: '/bin:/usr/bin:/usr/local/bin',
+                    HOME: '/root',
+                    USER: 'root',
+                    SHELL: '/bin/bash'
+                };
+                
+                this.init();
+                this.showWelcome();
+                this.startSystemMonitor();
+            }
+
+            init() {
+                this.input.addEventListener('keydown', (e) => this.handleKeyDown(e));
+                this.terminal.addEventListener('click', () => this.input.focus());
+                
+                this.input.addEventListener('input', () => this.handleAutocomplete());
+                document.addEventListener('click', (e) => {
+                    if (!this.autocomplete.contains(e.target)) {
+                        this.autocomplete.style.display = 'none';
+                    }
+                });
+            }
+
+            initFileSystem() {
+                return {
+                    '/': {
+                        type: 'dir',
+                        permissions: 'drwxr-xr-x',
+                        owner: 'root',
+                        group: 'root',
+                        modified: new Date(),
+                        children: {
+                            'bin': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                'bash': { type: 'file', size: 1024, permissions: '-rwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), content: '#!/bin/bash\n# Bash shell executable\n' },
+                                'ls': { type: 'file', size: 512, permissions: '-rwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), content: '#!/bin/bash\nls $@\n' },
+                                'cat': { type: 'file', size: 256, permissions: '-rwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), content: '#!/bin/bash\ncat $@\n' },
+                                'nano': { type: 'file', size: 2048, permissions: '-rwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), content: '#!/bin/bash\n# Nano text editor\n' }
+                            }},
+                            'etc': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                'config.sys': { type: 'file', size: 256, permissions: '-rw-r--r--', owner: 'root', group: 'root', modified: new Date(), content: 'KERNEL_MODE=protected\nMEMORY_SIZE=256MB\nFILESYSTEM=ext2\nDEVICE_DRIVERS=keyboard,disk,timer,rtc\nBOOT_TIMEOUT=5\n' },
+                                'passwd': { type: 'file', size: 128, permissions: '-rw-r--r--', owner: 'root', group: 'root', modified: new Date(), content: 'root:x:0:0:root:/root:/bin/bash\nuser:x:1000:1000:User:/home/user:/bin/bash\nguest:x:1001:1001:Guest:/home/guest:/bin/bash\n' },
+                                'hosts': { type: 'file', size: 64, permissions: '-rw-r--r--', owner: 'root', group: 'root', modified: new Date(), content: '127.0.0.1 localhost\n192.168.1.100 minios\n' },
+                                'fstab': { type: 'file', size: 128, permissions: '-rw-r--r--', owner: 'root', group: 'root', modified: new Date(), content: '/dev/sda1 / ext2 defaults 0 1\n/dev/sda2 /home ext2 defaults 0 2\n' }
+                            }},
+                            'home': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                'user': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'user', group: 'user', modified: new Date(), children: {
+                                    'documents': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'user', group: 'user', modified: new Date(), children: {
+                                        'notes.txt': { type: 'file', size: 256, permissions: '-rw-r--r--', owner: 'user', group: 'user', modified: new Date(), content: 'Personal notes...\n' }
+                                    } },
+                                    'downloads': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'user', group: 'user', modified: new Date(), children: {} },
+                                    '.bashrc': { type: 'file', size: 512, permissions: '-rw-r--r--', owner: 'user', group: 'user', modified: new Date(), content: '# User bash configuration\nPS1="\\u@\\h:\\w\\$ "\nalias ll="ls -la"\n' }
+                                }},
+                                'guest': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'guest', group: 'guest', modified: new Date(), children: {} }
+                            }},
+                            'usr': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                'bin': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {} },
+                                'lib': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {} },
+                                'share': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                    'doc': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {} }
+                                } }
+                            }},
+                            'var': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                'log': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                    'syslog': { type: 'file', size: 1024, permissions: '-rw-r--r--', owner: 'root', group: 'root', modified: new Date(), content: 'System log entries...\n' }
+                                } },
+                                'tmp': { type: 'dir', permissions: 'drwxrwxrwt', owner: 'root', group: 'root', modified: new Date(), children: {} }
+                            }},
+                            'dev': { type: 'dir', permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                'null': { type: 'file', size: 0, permissions: 'crw-rw-rw-', owner: 'root', group: 'root', modified: new Date(), content: '' },
+                                'zero': { type: 'file', size: 0, permissions: 'crw-rw-rw-', owner: 'root', group: 'root', modified: new Date(), content: '' },
+                                'sda': { type: 'file', size: 0, permissions: 'brw-rw----', owner: 'root', group: 'disk', modified: new Date(), content: '' }
+                            } },
+                            'tmp': { type: 'dir', permissions: 'drwxrwxrwt', owner: 'root', group: 'root', modified: new Date(), children: {} },
+                            'proc': { type: 'dir', permissions: 'dr-xr-xr-x', owner: 'root', group: 'root', modified: new Date(), children: {
+                                'cpuinfo': { type: 'file', size: 512, permissions: '-r--r--r--', owner: 'root', group: 'root', modified: new Date(), content: 'processor: 0\nmodel name: MiniOS Virtual CPU\n' }
+                            } },
+                            'README.md': { type: 'file', size: 512, permissions: '-rw-r--r--', owner: 'root', group: 'root', modified: new Date(), content: '# MiniOS v3.0\n\nWelcome to MiniOS Ultimate!\n\nAn advanced educational operating system with full features.\n\n## Features\n- Memory Management\n- Process Scheduling\n- Filesystem (VFS)\n- Network Stack\n- User Management\n- And much more!\n\nType "help" for available commands.\n' }
+                        }
+                    }
+                };
+            }
+
+            initProcesses() {
+                return [
+                    { pid: 0, name: 'idle', state: 'sleeping', cpu: 0, mem: 0, user: 'root', ppid: 0, priority: 0, nice: 0, threads: 1, startTime: Date.now() },
+                    { pid: 1, name: 'init', state: 'running', cpu: 1, mem: 1024, user: 'root', ppid: 0, priority: 20, nice: 0, threads: 1, startTime: Date.now() },
+                    { pid: 2, name: 'kthreadd', state: 'sleeping', cpu: 0, mem: 0, user: 'root', ppid: 0, priority: 20, nice: 0, threads: 1, startTime: Date.now() },
+                    { pid: 3, name: 'systemd', state: 'running', cpu: 2, mem: 2048, user: 'root', ppid: 1, priority: 20, nice: 0, threads: 2, startTime: Date.now() },
+                    { pid: 4, name: 'terminal', state: 'running', cpu: 5, mem: 4096, user: this.currentUser, ppid: 3, priority: 20, nice: 0, threads: 3, startTime: Date.now() },
+                    { pid: 5, name: 'sshd', state: 'sleeping', cpu: 0, mem: 1024, user: 'root', ppid: 1, priority: 20, nice: 0, threads: 1, startTime: Date.now() }
+                ];
+            }
+
+            initNetwork() {
+                return {
+                    'lo': { name: 'lo', ip: '127.0.0.1', mac: '00:00:00:00:00:00', status: 'UP', rx: 0, tx: 0, type: 'loopback' },
+                    'eth0': { name: 'eth0', ip: '192.168.1.100', mac: '52:54:00:12:34:56', status: 'UP', rx: 0, tx: 0, type: 'ethernet' },
+                    'wlan0': { name: 'wlan0', ip: '192.168.1.101', mac: '00:11:22:33:44:55', status: 'DOWN', rx: 0, tx: 0, type: 'wireless' }
+                };
+            }
+
+            initUsers() {
+                return {
+                    'root': { uid: 0, gid: 0, home: '/root', shell: '/bin/bash', groups: ['root', 'wheel'] },
+                    'user': { uid: 1000, gid: 1000, home: '/home/user', shell: '/bin/bash', groups: ['user', 'sudo'] },
+                    'guest': { uid: 1001, gid: 1001, home: '/home/guest', shell: '/bin/bash', groups: ['guest'] }
+                };
+            }
+
+            handleKeyDown(e) {
+                if (e.key === 'Enter') {
+                    this.executeCommand(this.input.value);
+                    this.input.value = '';
+                    this.autocomplete.style.display = 'none';
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (this.historyIndex < this.history.length - 1) {
+                        this.historyIndex++;
+                        this.input.value = this.history[this.history.length - 1 - this.historyIndex];
+                    }
+                } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (this.historyIndex > 0) {
+                        this.historyIndex--;
+                        this.input.value = this.history[this.history.length - 1 - this.historyIndex];
+                    } else if (this.historyIndex === 0) {
+                        this.historyIndex = -1;
+                        this.input.value = '';
+                    }
+                } else if (e.key === 'Tab') {
+                    e.preventDefault();
+                    this.handleTabCompletion();
+                } else if (e.ctrlKey && e.key === 'l') {
+                    e.preventDefault();
+                    this.cmdClear();
+                } else if (e.ctrlKey && e.key === 'c') {
+                    e.preventDefault();
+                    this.print('^C');
+                    this.input.value = '';
+                }
+            }
+
+            handleTabCompletion() {
+                const input = this.input.value;
+                const parts = input.split(' ');
+                const lastPart = parts[parts.length - 1];
+                
+                if (parts.length === 1) {
+                    const commands = this.getAllCommands();
+                    const matches = commands.filter(cmd => cmd.startsWith(input));
+                    
+                    if (matches.length === 1) {
+                        this.input.value = matches[0];
+                    } else if (matches.length > 1) {
+                        this.showAutocomplete(matches);
+                    }
+                } else {
+                    const dir = this.getDirectory(this.currentDir);
+                    if (dir && dir.children) {
+                        const files = Object.keys(dir.children).filter(f => f.startsWith(lastPart));
+                        if (files.length === 1) {
+                            parts[parts.length - 1] = files[0];
+                            this.input.value = parts.join(' ');
+                        } else if (files.length > 1) {
+                            this.showAutocomplete(files);
+                        }
+                    }
+                }
+            }
+
+            handleAutocomplete() {
+                const input = this.input.value;
+                if (input.length < 2) {
+                    this.autocomplete.style.display = 'none';
+                    return;
+                }
+                
+                const parts = input.split(' ');
+                const lastPart = parts[parts.length - 1];
+                
+                if (parts.length === 1) {
+                    const commands = this.getAllCommands();
+                    const matches = commands.filter(cmd => cmd.startsWith(input));
+                    if (matches.length > 0) {
+                        this.showAutocomplete(matches);
+                    } else {
+                        this.autocomplete.style.display = 'none';
+                    }
+                }
+            }
+
+            showAutocomplete(items) {
+                this.autocomplete.innerHTML = '';
+                items.forEach((item, idx) => {
+                    const div = document.createElement('div');
+                    div.className = 'autocomplete-item';
+                    div.textContent = item;
+                    div.onclick = () => {
+                        const parts = this.input.value.split(' ');
+                        parts[parts.length - 1] = item;
+                        this.input.value = parts.join(' ');
+                        this.autocomplete.style.display = 'none';
+                        this.input.focus();
+                    };
+                    this.autocomplete.appendChild(div);
+                });
+                
+                const rect = this.input.getBoundingClientRect();
+                this.autocomplete.style.left = rect.left + 'px';
+                this.autocomplete.style.top = (rect.top - this.autocomplete.offsetHeight - 10) + 'px';
+                this.autocomplete.style.display = 'block';
+            }
+
+            getAllCommands() {
+                return Object.keys(this).filter(k => k.startsWith('cmd')).map(k => k.slice(3).toLowerCase());
+            }
+
+            showWelcome() {
+                const ascii = `
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║     ███╗   ███╗██╗███╗   ██╗██╗     ██████╗ ███████╗                     ║
+║     ████╗ ████║██║████╗  ██║██║    ██╔═══██╗██╔════╝                     ║
+║     ██╔████╔██║██║██╔██╗ ██║██║    ██║   ██║███████╗                     ║
+║     ██║╚██╔╝██║██║██║╚██╗██║██║    ██║   ██║╚════██║                     ║
+║     ██║ ╚═╝ ██║██║██║ ╚████║██║    ╚██████╔╝███████║                     ║
+║     ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝     ╚═════╝ ╚══════╝                     ║
+║                                                                            ║
+║                    Ultimate Web Terminal v3.0                              ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+                `;
+                this.print(ascii, 'ascii-art');
+                this.print('\n🚀 Welcome to MiniOS Ultimate Terminal!', 'success');
+                this.print('📚 Type "help" for available commands or "tutorial" for a quick guide.', 'info');
+                this.print('🎨 Try "theme" to change terminal theme!\n', 'warning');
+                this.showNotification('System Online', 'All services operational');
+            }
+
+            executeCommand(cmd) {
+                if (!cmd.trim()) return;
+                
+                this.history.push(cmd);
+                this.historyIndex = -1;
+                this.print(`${this.currentUser}@MiniOS:${this.currentDir}$ ${cmd}`, 'output-line');
+
+                // Check aliases
+                for (const [alias, realCmd] of Object.entries(this.aliases)) {
+                    if (cmd.startsWith(alias)) {
+                        cmd = cmd.replace(alias, realCmd);
+                    }
+                }
+
+                const [command, ...args] = cmd.trim().split(' ');
+                const method = 'cmd' + command.charAt(0).toUpperCase() + command.slice(1);
+                
+                if (typeof this[method] === 'function') {
+                    try {
+                        this[method](args);
+                    } catch (error) {
+                        this.print(`Error executing ${command}: ${error.message}`, 'error');
+                    }
+                } else {
+                    this.print(`Command not found: ${command}`, 'error');
+                    this.print('Type "help" for available commands', 'info');
+                }
+
+                this.scrollToBottom();
+            }
+
+            // ========== COMMANDS ==========
+            
+            cmdHelp(args) {
+                const commands = {
+                    'System': ['help', 'about', 'clear', 'history', 'tutorial', 'version', 'license', 'credits'],
+                    'Files': ['ls', 'cd', 'pwd', 'cat', 'tree', 'mkdir', 'touch', 'rm', 'cp', 'mv', 'find', 'grep', 'chmod', 'chown', 'ln', 'file', 'du', 'df', 'stat'],
+                    'Editor': ['nano', 'edit', 'vim'],
+                    'Processes': ['ps', 'top', 'kill', 'killall', 'jobs', 'fg', 'bg', 'nice', 'renice'],
+                    'System Info': ['uname', 'uptime', 'date', 'neofetch', 'sysinfo', 'meminfo', 'diskinfo', 'lscpu', 'lsusb', 'lspci', 'dmidecode'],
+                    'Network': ['netstat', 'ping', 'ifconfig', 'route', 'arp', 'traceroute', 'nslookup', 'telnet', 'ssh', 'curl', 'wget', 'nc'],
+                    'Users': ['whoami', 'id', 'su', 'sudo', 'users', 'groups', 'passwd', 'adduser', 'deluser', 'usermod'],
+                    'Package': ['apt', 'dpkg', 'rpm', 'yum', 'pacman', 'snap'],
+                    'System Control': ['reboot', 'shutdown', 'poweroff', 'halt', 'systemctl', 'service'],
+                    'Utilities': ['echo', 'printf', 'date', 'cal', 'bc', 'expr', 'factor', 'seq', 'yes', 'sleep', 'watch'],
+                    'Text Processing': ['head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'paste', 'tr', 'sed', 'awk'],
+                    'Archive': ['tar', 'gzip', 'gunzip', 'zip', 'unzip', 'bzip2', 'xz'],
+                    'Fun': ['matrix', 'fortune', 'banner', 'cowsay', 'cmatrix', 'sl', 'hollywood', 'figlet', 'lolcat', 'snake', 'tetris'],
+                    'Appearance': ['theme', 'color', 'font'],
+                    'Environment': ['env', 'export', 'unset', 'alias', 'unalias', 'which', 'whereis']
+                };
+
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              Available Commands                            ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                for (const [category, cmds] of Object.entries(commands)) {
+                    this.print(`\n📁 ${category}:`, 'highlight');
+                    this.print('  ' + cmds.join(', '), 'success');
+                }
+                this.print('\n💡 Type "command --help" for detailed help on a specific command', 'warning');
+                this.print('💡 Use Tab for auto-completion\n', 'warning');
+            }
+
+            cmdClear(args) {
+                this.output.innerHTML = '';
+            }
+
+            cmdLs(args) {
+                const showAll = args.includes('-a') || args.includes('--all');
+                const longFormat = args.includes('-l') || args.includes('--long');
+                const human = args.includes('-h') || args.includes('--human-readable');
+                
+                const path = args.find(a => !a.startsWith('-')) || this.currentDir;
+                const dir = this.getDirectory(path);
+                
+                if (!dir || dir.type !== 'dir') {
+                    this.print('ls: cannot access: No such directory', 'error');
+                    return;
+                }
+
+                this.print('');
+                
+                if (longFormat) {
+                    this.print('total ' + Object.keys(dir.children).length);
+                    for (const [name, item] of Object.entries(dir.children)) {
+                        if (!showAll && name.startsWith('.')) continue;
+                        
+                        const perms = item.permissions || (item.type === 'dir' ? 'drwxr-xr-x' : '-rw-r--r--');
+                        const size = human ? this.humanFileSize(item.size || 0) : (item.size || 0);
+                        const date = item.modified ? item.modified.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+                        const owner = item.owner || 'root';
+                        const group = item.group || 'root';
+                        
+                        const color = item.type === 'dir' ? 'info' : 'success';
+                        this.print(`${perms} ${owner} ${group} ${size.toString().padStart(8)} ${date} ${name}`, color);
+                    }
+                } else {
+                    for (const [name, item] of Object.entries(dir.children)) {
+                        if (!showAll && name.startsWith('.')) continue;
+                        
+                        const icon = item.type === 'dir' ? '<span class="dir-icon">📁</span>' : '<span class="file-icon">📄</span>';
+                        const color = item.type === 'dir' ? 'info' : 'success';
+                        this.print(`${icon} ${name}`, color);
+                    }
+                }
+                this.print('');
+            }
+
+            cmdPs(args) {
+                const showAll = args.includes('-a') || args.includes('--all');
+                const detailed = args.includes('-l') || args.includes('--long');
+                const tree = args.includes('-T') || args.includes('--tree');
+                
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║                    Process List                            ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                if (detailed) {
+                    this.print('PID   PPID  USER     PRI NI  CPU   MEM    STATE      TIME     COMMAND', 'highlight');
+                    this.print('─────────────────────────────────────────────────────────────────────────────', 'info');
+                } else {
+                    this.print('PID   USER     STATE      CPU   MEMORY   COMMAND', 'highlight');
+                    this.print('─────────────────────────────────────────────────────────────────────────────', 'info');
+                }
+                
+                for (const proc of this.processes) {
+                    if (!showAll && proc.user !== this.currentUser) continue;
+                    
+                    const runtime = Math.floor((Date.now() - proc.startTime) / 1000);
+                    const timeStr = this.formatTime(runtime);
+                    
+                    if (detailed) {
+                        this.print(`${proc.pid.toString().padEnd(5)} ${proc.ppid.toString().padEnd(5)} ${proc.user.padEnd(8)} ${proc.priority.toString().padEnd(3)} ${proc.nice.toString().padEnd(3)} ${proc.cpu.toString().padEnd(5)} ${proc.mem.toString().padEnd(6)} ${proc.state.padEnd(10)} ${timeStr.padEnd(8)} ${proc.name}`);
+                    } else {
+                        this.print(`${proc.pid.toString().padEnd(5)} ${proc.user.padEnd(8)} ${proc.state.padEnd(10)} ${proc.cpu}%    ${proc.mem}KB      ${proc.name}`);
+                    }
+                }
+                this.print('');
+            }
+
+            cmdTop(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║                  System Monitor (Top)                      ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                const uptime = this.getUptime();
+                const loadAvg = (Math.random() * 2).toFixed(2);
+                
+                this.print(`\nUptime: ${uptime} | Load Average: ${loadAvg}`, 'success');
+                this.print(`Tasks: ${this.processes.length} total | CPU: ${this.systemStats.cpu}% | Memory: ${this.systemStats.mem}%\n`, 'success');
+                
+                this.print('PID   USER     PRI   CPU   MEM    TIME     COMMAND', 'highlight');
+                this.print('─────────────────────────────────────────────────────────────', 'info');
+                
+                const sorted = [...this.processes].sort((a, b) => b.cpu - a.cpu);
+                for (const proc of sorted.slice(0, 10)) {
+                    const runtime = Math.floor((Date.now() - proc.startTime) / 1000);
+                    const timeStr = this.formatTime(runtime);
+                    this.print(`${proc.pid.toString().padEnd(5)} ${proc.user.padEnd(8)} ${proc.priority.toString().padEnd(5)} ${proc.cpu}%    ${proc.mem.toString().padEnd(6)} ${timeStr.padEnd(8)} ${proc.name}`);
+                }
+                this.print('\n💡 Press Ctrl+C to stop (simulated)', 'warning');
+            }
+
+            cmdNeofetch(args) {
+                const art = `
+    ╔═══════════╗
+    ║  MiniOS   ║     ${this.currentUser}@minios
+    ║   v3.0    ║     ──────────────────
+    ║  Ultimate ║     OS: MiniOS v3.0 Ultimate
+    ╚═══════════╝     Kernel: 3.0.0-ultimate
+                      Uptime: ${this.getUptime()}
+                      Shell: WebTerminal 3.0
+                      Resolution: ${window.innerWidth}x${window.innerHeight}
+                      Terminal: HTML5/JavaScript
+                      CPU: JavaScript Engine (V8)
+                      Memory: ${this.systemStats.mem}% used
+                      Disk: ${this.systemStats.disk}% used
+                      Theme: ${this.theme}
+                `;
+                this.print(art, 'info');
+            }
+
+            cmdMatrix(args) {
+                this.print('🌟 Entering Matrix mode...', 'success');
+                const duration = parseInt(args[0]) || 20;
+                const chars = '01アイウエオカキクケコサシスセソタチツテトナニヌネノABCDEFGHIJKLMNOP';
+                
+                for (let i = 0; i < duration; i++) {
+                    setTimeout(() => {
+                        let line = '';
+                        for (let j = 0; j < 80; j++) {
+                            line += chars[Math.floor(Math.random() * chars.length)];
+                        }
+                        this.print(line, 'success');
+                        if (i === duration - 1) {
+                            this.print('\n✨ Matrix mode complete!', 'info');
+                        }
+                    }, i * 100);
+                }
+            }
+
+            cmdTree(args) {
+                const path = args[0] || this.currentDir;
+                const depth = parseInt(args[1]) || 3;
+                
+                this.print('\n' + path, 'highlight');
+                this.printTree(this.getDirectory(path), '', true, 0, depth);
+                this.print('');
+            }
+
+            printTree(node, prefix, isLast, currentDepth, maxDepth) {
+                if (!node || !node.children || currentDepth >= maxDepth) return;
+                
+                const entries = Object.entries(node.children);
+                entries.forEach(([name, child], idx) => {
+                    const isLastEntry = idx === entries.length - 1;
+                    const connector = isLastEntry ? '└── ' : '├── ';
+                    const icon = child.type === 'dir' ? '📁' : '📄';
+                    
+                    this.print(prefix + connector + icon + ' ' + name, 'tree-line');
+                    
+                    if (child.type === 'dir') {
+                        const newPrefix = prefix + (isLastEntry ? '    ' : '│   ');
+                        this.printTree(child, newPrefix, isLastEntry, currentDepth + 1, maxDepth);
+                    }
+                });
+            }
+
+            cmdSysinfo(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              System Information                            ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                const info = [
+                    ['OS Name', 'MiniOS v3.0 Ultimate'],
+                    ['Architecture', 'x86_64 (64-bit)'],
+                    ['Kernel', '3.0.0-ultimate'],
+                    ['Build Date', new Date().toISOString().split('T')[0]],
+                    ['Uptime', this.getUptime()],
+                    ['Hostname', 'minios'],
+                    ['Current User', this.currentUser],
+                    ['Processes', this.processes.length],
+                    ['CPU Usage', this.systemStats.cpu + '%'],
+                    ['Memory Usage', this.systemStats.mem + '%'],
+                    ['Disk Usage', this.systemStats.disk + '%'],
+                    ['Network Status', this.systemStats.net + '%'],
+                    ['Shell', 'WebTerminal 3.0'],
+                    ['Theme', this.theme]
+                ];
+                
+                this.print('');
+                for (const [key, value] of info) {
+                    this.print(`${key.padEnd(20)} : ${value}`, 'success');
+                }
+                this.print('');
+            }
+
+            cmdPwd(args) {
+                this.print(this.currentDir);
+            }
+
+            cmdCd(args) {
+                if (!args[0] || args[0] === '~') {
+                    this.currentDir = this.users[this.currentUser].home;
+                } else if (args[0] === '..') {
+                    if (this.currentDir !== '/') {
+                        const parts = this.currentDir.split('/').filter(p => p);
+                        parts.pop();
+                        this.currentDir = '/' + parts.join('/');
+                        if (this.currentDir !== '/' && !this.currentDir.endsWith('/')) {
+                            this.currentDir += '/';
+                        }
+                    }
+                } else if (args[0] === '-') {
+                    // Go back to previous directory (not implemented yet)
+                    this.print('cd: OLDPWD not set', 'warning');
+                } else {
+                    const newPath = args[0].startsWith('/') ? args[0] : this.currentDir + args[0];
+                    const dir = this.getDirectory(newPath);
+                    if (!dir || dir.type !== 'dir') {
+                        this.print(`cd: ${args[0]}: No such directory`, 'error');
+                    } else {
+                        this.currentDir = newPath.endsWith('/') ? newPath : newPath + '/';
+                    }
+                }
+            }
+
+            cmdCat(args) {
+                if (!args[0]) {
+                    this.print('cat: missing operand', 'error');
+                    return;
+                }
+                
+                const file = this.getDirectory(this.currentDir + args[0]);
+                if (!file) {
+                    this.print(`cat: ${args[0]}: No such file`, 'error');
+                } else if (file.type === 'dir') {
+                    this.print(`cat: ${args[0]}: Is a directory`, 'error');
+                } else {
+                    this.print('\n' + (file.content || '(empty file)'));
+                    this.print('');
+                }
+            }
+
+            cmdMkdir(args) {
+                if (!args[0]) {
+                    this.print('mkdir: missing operand', 'error');
+                    return;
+                }
+                
+                const name = args[0];
+                const dir = this.getDirectory(this.currentDir);
+                
+                if (dir && dir.children && !dir.children[name]) {
+                    dir.children[name] = {
+                        type: 'dir',
+                        permissions: 'drwxr-xr-x',
+                        owner: this.currentUser,
+                        group: this.currentUser,
+                        modified: new Date(),
+                        children: {}
+                    };
+                    this.print(`✓ Directory '${name}' created`, 'success');
+                } else {
+                    this.print(`mkdir: cannot create directory '${name}': File exists`, 'error');
+                }
+            }
+
+            cmdTouch(args) {
+                if (!args[0]) {
+                    this.print('touch: missing operand', 'error');
+                    return;
+                }
+                
+                const name = args[0];
+                const dir = this.getDirectory(this.currentDir);
+                
+                if (dir && dir.children) {
+                    if (dir.children[name]) {
+                        dir.children[name].modified = new Date();
+                        this.print(`✓ Updated timestamp for '${name}'`, 'success');
+                    } else {
+                        dir.children[name] = {
+                            type: 'file',
+                            size: 0,
+                            permissions: '-rw-r--r--',
+                            owner: this.currentUser,
+                            group: this.currentUser,
+                            modified: new Date(),
+                            content: ''
+                        };
+                        this.print(`✓ File '${name}' created`, 'success');
+                    }
+                } else {
+                    this.print('touch: cannot create file', 'error');
+                }
+            }
+
+            cmdRm(args) {
+                if (!args[0]) {
+                    this.print('rm: missing operand', 'error');
+                    return;
+                }
+                
+                const recursive = args.includes('-r') || args.includes('-rf') || args.includes('--recursive');
+                const force = args.includes('-f') || args.includes('-rf') || args.includes('--force');
+                const name = args.find(a => !a.startsWith('-'));
+                
+                const dir = this.getDirectory(this.currentDir);
+                
+                if (dir && dir.children && dir.children[name]) {
+                    const item = dir.children[name];
+                    
+                    if (item.type === 'dir' && !recursive) {
+                        this.print(`rm: cannot remove '${name}': Is a directory`, 'error');
+                        return;
+                    }
+                    
+                    delete dir.children[name];
+                    this.print(`✓ Removed '${name}'`, 'success');
+                } else {
+                    if (!force) {
+                        this.print(`rm: cannot remove '${name}': No such file or directory`, 'error');
+                    }
+                }
+            }
+
+            cmdDate(args) {
+                const now = new Date();
+                if (args.includes('--iso-8601') || args.includes('-I')) {
+                    this.print(now.toISOString());
+                } else if (args.includes('--utc') || args.includes('-u')) {
+                    this.print(now.toUTCString());
+                } else {
+                    this.print(now.toString());
+                }
+            }
+
+            cmdUptime(args) {
+                const uptime = this.getUptime();
+                const users = Object.keys(this.users).length;
+                const loadAvg = (Math.random() * 2).toFixed(2);
+                this.print(`up ${uptime}, ${users} users, load average: ${loadAvg}, ${loadAvg}, ${loadAvg}`);
+            }
+
+            cmdUname(args) {
+                const showAll = args.includes('-a') || args.includes('--all');
+                
+                if (showAll) {
+                    this.print('MiniOS minios 3.0.0-ultimate x86_64 GNU/Linux');
+                } else if (args.includes('-r')) {
+                    this.print('3.0.0-ultimate');
+                } else if (args.includes('-m')) {
+                    this.print('x86_64');
+                } else {
+                    this.print('MiniOS');
+                }
+            }
+
+            cmdHistory(args) {
+                this.print('\nCommand History:', 'highlight');
+                const count = parseInt(args[0]) || this.history.length;
+                const start = Math.max(0, this.history.length - count);
+                
+                for (let i = start; i < this.history.length; i++) {
+                    this.print(`${(i + 1).toString().padStart(4)}: ${this.history[i]}`);
+                }
+                this.print('');
+            }
+
+            cmdFortune(args) {
+                const fortunes = [
+                    'The code compiles! Ship it!',
+                    'There are 10 types of people: those who understand binary and those who don\'t.',
+                    'To err is human, to really mess up requires root access.',
+                    'The best debugger is a good night\'s sleep.',
+                    'Code never lies, comments sometimes do.',
+                    'A programmer\'s wife asks: "Would you go to the shop and get a loaf of bread? And if they have eggs, get a dozen." The programmer returns with 12 loaves.',
+                    'There is no place like 127.0.0.1',
+                    'In a world without fences, who needs Gates?',
+                    'If at first you don\'t succeed, call it version 1.0',
+                    'Programming is like sex: one mistake and you have to support it for the rest of your life.'
+                ];
+                this.print('\n💬 ' + fortunes[Math.floor(Math.random() * fortunes.length)], 'info');
+                this.print('');
+            }
+
+            cmdEcho(args) {
+                this.print(args.join(' '));
+            }
+
+            cmdWhoami(args) {
+                this.print(this.currentUser);
+            }
+
+            cmdId(args) {
+                const user = this.users[this.currentUser];
+                this.print(`uid=${user.uid}(${this.currentUser}) gid=${user.gid}(${this.currentUser}) groups=${user.groups.join(',')}`);
+            }
+
+            cmdEnv(args) {
+                this.print('\nEnvironment Variables:', 'highlight');
+                for (const [key, value] of Object.entries(this.envVars)) {
+                    this.print(`${key}=${value}`, 'success');
+                }
+                this.print('');
+            }
+
+            cmdExport(args) {
+                if (!args[0]) {
+                    this.cmdEnv([]);
+                    return;
+                }
+                
+                const [key, ...valueParts] = args[0].split('=');
+                const value = valueParts.join('=');
+                
+                if (value) {
+                    this.envVars[key] = value;
+                    this.print(`✓ Exported ${key}=${value}`, 'success');
+                } else {
+                    this.print('export: usage: export VAR=value', 'error');
+                }
+            }
+
+            cmdAlias(args) {
+                if (!args[0]) {
+                    this.print('\nDefined Aliases:', 'highlight');
+                    for (const [alias, cmd] of Object.entries(this.aliases)) {
+                        this.print(`${alias}='${cmd}'`, 'success');
+                    }
+                    this.print('');
+                } else {
+                    const [alias, ...cmdParts] = args[0].split('=');
+                    const cmd = cmdParts.join('=').replace(/^['"]|['"]$/g, '');
+                    
+                    if (cmd) {
+                        this.aliases[alias] = cmd;
+                        this.print(`✓ Alias created: ${alias}='${cmd}'`, 'success');
+                    } else {
+                        this.print('alias: usage: alias name=command', 'error');
+                    }
+                }
+            }
+
+            cmdTheme(args) {
+                const themes = ['default', 'matrix', 'cyberpunk', 'retro'];
+                
+                if (!args[0]) {
+                    this.print('\n🎨 Available Themes:', 'highlight');
+                    themes.forEach(t => {
+                        const indicator = t === this.theme ? '✓ ' : '  ';
+                        this.print(`${indicator}${t}`, 'success');
+                    });
+                    this.print('\n💡 Usage: theme <name>', 'info');
+                    return;
+                }
+                
+                const theme = args[0].toLowerCase();
+                if (themes.includes(theme)) {
+                    this.theme = theme;
+                    document.body.className = theme === 'default' ? '' : `theme-${theme}`;
+                    this.print(`✓ Theme changed to: ${theme}`, 'success');
+                    this.showNotification('Theme Changed', `Applied ${theme} theme`);
+                } else {
+                    this.print(`Theme '${theme}' not found`, 'error');
+                }
+            }
+
+            cmdIfconfig(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              Network Interfaces                            ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                for (const [name, iface] of Object.entries(this.networkDevices)) {
+                    this.print(`\n${name}: flags=${iface.status}  mtu 1500`, 'highlight');
+                    this.print(`        inet ${iface.ip}  netmask 255.255.255.0`, 'success');
+                    this.print(`        ether ${iface.mac}  txqueuelen 1000  (${iface.type})`, 'success');
+                    this.print(`        RX packets ${iface.rx}  bytes ${iface.rx * 1024}`, 'info');
+                    this.print(`        TX packets ${iface.tx}  bytes ${iface.tx * 1024}`, 'info');
+                }
+                this.print('');
+            }
+
+            cmdPing(args) {
+                if (!args[0]) {
+                    this.print('ping: usage: ping <host>', 'error');
+                    return;
+                }
+                
+                const host = args[0];
+                this.print(`PING ${host} (192.168.1.1) 56(84) bytes of data.`, 'info');
+                
+                for (let i = 0; i < 4; i++) {
+                    setTimeout(() => {
+                        const time = (Math.random() * 50 + 10).toFixed(1);
+                        const ttl = 64 - Math.floor(Math.random() * 10);
+                        this.print(`64 bytes from ${host}: icmp_seq=${i+1} ttl=${ttl} time=${time} ms`, 'success');
+                        
+                        if (i === 3) {
+                            this.print(`\n--- ${host} ping statistics ---`, 'info');
+                            this.print('4 packets transmitted, 4 received, 0% packet loss', 'success');
+                            this.print('');
+                        }
+                    }, i * 1000);
+                }
+            }
+
+            cmdNetstat(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              Network Statistics                            ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                this.print('\nProto  Local Address         Foreign Address       State', 'highlight');
+                this.print('─────────────────────────────────────────────────────────────', 'info');
+                
+                const connections = [
+                    ['tcp', '0.0.0.0:22', '0.0.0.0:*', 'LISTEN'],
+                    ['tcp', '0.0.0.0:80', '0.0.0.0:*', 'LISTEN'],
+                    ['tcp', '127.0.0.1:3306', '0.0.0.0:*', 'LISTEN'],
+                    ['tcp', '192.168.1.100:45678', '142.250.185.78:443', 'ESTABLISHED'],
+                    ['udp', '0.0.0.0:53', '0.0.0.0:*', ''],
+                ];
+                
+                for (const [proto, local, foreign, state] of connections) {
+                    this.print(`${proto.padEnd(6)} ${local.padEnd(21)} ${foreign.padEnd(21)} ${state}`);
+                }
+                this.print('');
+            }
+
+            cmdNano(args) {
+                if (!args[0]) {
+                    this.print('nano: usage: nano <filename>', 'error');
+                    return;
+                }
+                
+                this.openEditor(args[0]);
+            }
+
+            cmdEdit(args) {
+                this.cmdNano(args);
+            }
+
+            cmdGrep(args) {
+                if (args.length < 2) {
+                    this.print('grep: usage: grep <pattern> <file>', 'error');
+                    return;
+                }
+                
+                const pattern = args[0];
+                const filename = args[1];
+                const file = this.getDirectory(this.currentDir + filename);
+                
+                if (!file || file.type === 'dir') {
+                    this.print(`grep: ${filename}: No such file`, 'error');
+                    return;
+                }
+                
+                const lines = (file.content || '').split('\n');
+                const matches = lines.filter(line => line.includes(pattern));
+                
+                if (matches.length > 0) {
+                    this.print('');
+                    matches.forEach(line => this.print(line, 'success'));
+                    this.print('');
+                } else {
+                    this.print(`grep: no matches found for '${pattern}'`, 'warning');
+                }
+            }
+
+            cmdFind(args) {
+                const dir = this.getDirectory(this.currentDir);
+                const pattern = args[0] || '*';
+                
+                this.print('');
+                this.findFiles(dir, this.currentDir, pattern);
+                this.print('');
+            }
+
+            findFiles(node, path, pattern) {
+                if (!node || !node.children) return;
+                
+                for (const [name, child] of Object.entries(node.children)) {
+                    const fullPath = path + name;
+                    if (pattern === '*' || name.includes(pattern)) {
+                        this.print(fullPath, child.type === 'dir' ? 'info' : 'success');
+                    }
+                    
+                    if (child.type === 'dir') {
+                        this.findFiles(child, fullPath + '/', pattern);
+                    }
+                }
+            }
+
+            cmdDf(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              Disk Usage                                     ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                this.print('\nFilesystem     Size  Used  Avail Use% Mounted on', 'highlight');
+                this.print('─────────────────────────────────────────────────────────', 'info');
+                this.print('/dev/sda1       10G   6.5G   3.5G  65% /', 'success');
+                this.print('/dev/sda2        5G   2.1G   2.9G  42% /home', 'success');
+                this.print('tmpfs          256M    12M   244M   5% /tmp', 'success');
+                this.print('');
+            }
+
+            cmdFree(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              Memory Usage                                  ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                const total = 262144;
+                const used = Math.floor(total * this.systemStats.mem / 100);
+                const free = total - used;
+                const buffers = Math.floor(Math.random() * 10000 + 5000);
+                const cached = Math.floor(Math.random() * 20000 + 10000);
+                
+                this.print('\n              total        used        free      shared  buff/cache   available', 'highlight');
+                this.print('Mem:         256144      ' + used.toString().padStart(6) + '      ' + free.toString().padStart(6) + '        1024       ' + buffers.toString().padStart(6) + '      ' + (free + cached).toString().padStart(6), 'success');
+                this.print('Swap:         65536           0       65536', 'success');
+                this.print('');
+            }
+
+            cmdMeminfo(args) {
+                this.cmdFree(args);
+            }
+
+            cmdDiskinfo(args) {
+                this.cmdDf(args);
+            }
+
+            cmdVersion(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              MiniOS Version Information                    ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                this.print('\nMiniOS Ultimate Terminal v3.0', 'success');
+                this.print('Build: 2024-11-01 (Ultimate Edition)', 'info');
+                this.print('Kernel: 3.0.0-ultimate x86_64', 'info');
+                this.print('Browser: ' + navigator.userAgent.split(' ').slice(-1)[0], 'info');
+                this.print('JavaScript Engine: V8', 'info');
+                this.print('\n© 2024 MiniOS Project. All rights reserved.', 'warning');
+                this.print('Licensed under MIT License', 'warning');
+                this.print('');
+            }
+
+            cmdAbout(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              About MiniOS                                  ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                this.print('\n🚀 MiniOS v3.0 Ultimate', 'highlight');
+                this.print('An advanced multi-language educational operating system', 'info');
+                this.print('\n📦 Components:', 'highlight');
+                this.print('  • Bootloader (Assembly/NASM)', 'success');
+                this.print('  • Kernel Core (C)', 'success');
+                this.print('  • Driver Manager (C++)', 'success');
+                this.print('  • Filesystem (Java)', 'success');
+                this.print('  • System Monitor (Python)', 'success');
+                this.print('  • Web Terminal (JavaScript)', 'success');
+                this.print('  • Network Stack (C#)', 'success');
+                this.print('\n✨ Features:', 'highlight');
+                this.print('  • Virtual Filesystem', 'success');
+                this.print('  • Process Management', 'success');
+                this.print('  • Memory Management', 'success');
+                this.print('  • Network Simulation', 'success');
+                this.print('  • User Management', 'success');
+                this.print('  • Multiple Themes', 'success');
+                this.print('  • File Editor', 'success');
+                this.print('  • Auto-completion', 'success');
+                this.print('');
+            }
+
+            cmdReboot(args) {
+                this.print('\n🔄 System rebooting...', 'warning');
+                setTimeout(() => {
+                    this.cmdClear([]);
+                    this.showWelcome();
+                    this.showNotification('System Rebooted', 'Welcome back!');
+                }, 2000);
+            }
+
+            cmdShutdown(args) {
+                this.print('\n🛑 System shutting down...', 'warning');
+                setTimeout(() => {
+                    this.cmdClear([]);
+                    this.print('\n\n\n', 'success');
+                    this.print('      ╔══════════════════════════════════════╗', 'info');
+                    this.print('      ║                                      ║', 'info');
+                    this.print('      ║     System Halted                    ║', 'info');
+                    this.print('      ║                                      ║', 'info');
+                    this.print('      ║     It is now safe to close          ║', 'info');
+                    this.print('      ║     this window                      ║', 'info');
+                    this.print('      ║                                      ║', 'info');
+                    this.print('      ╚══════════════════════════════════════╝', 'info');
+                    this.input.disabled = true;
+                }, 2000);
+            }
+
+            cmdCowsay(args) {
+                const message = args.join(' ') || 'Hello from MiniOS!';
+                const border = '_'.repeat(message.length + 2);
+                
+                this.print('\n ' + border);
+                this.print('< ' + message + ' >');
+                this.print(' ' + '-'.repeat(message.length + 2));
+                this.print('        \\   ^__^');
+                this.print('         \\  (oo)\\_______');
+                this.print('            (__)\\       )\\/\\');
+                this.print('                ||----w |');
+                this.print('                ||     ||');
+                this.print('');
+            }
+
+            cmdFiglet(args) {
+                const text = args.join(' ') || 'MiniOS';
+                this.print('\n' + text.split('').map(c => {
+                    return c === ' ' ? '   ' : '█▀█';
+                }).join(' '), 'success');
+                this.print('');
+            }
+
+            cmdTutorial(args) {
+                this.print('\n╔════════════════════════════════════════════════════════════╗', 'info');
+                this.print('║              MiniOS Quick Tutorial                         ║', 'info');
+                this.print('╚════════════════════════════════════════════════════════════╝', 'info');
+                
+                const tutorial = [
+                    ['📁 Navigation', 'ls, cd, pwd, tree'],
+                    ['📝 Files', 'cat, nano, touch, mkdir, rm, cp, mv'],
+                    ['🔍 Search', 'find, grep, which, locate'],
+                    ['⚙️ System', 'ps, top, kill, reboot, shutdown'],
+                    ['💻 Info', 'neofetch, sysinfo, uname, uptime'],
+                    ['🌐 Network', 'ping, ifconfig, netstat, curl'],
+                    ['👤 Users', 'whoami, id, su, sudo'],
+                    ['🎨 Customize', 'theme, alias, export'],
+                    ['🎮 Fun', 'matrix, fortune, cowsay, figlet'],
+                    ['⌨️ Shortcuts', 'Tab (autocomplete), ↑↓ (history), Ctrl+L (clear)']
+                ];
+                
+                this.print('');
+                tutorial.forEach(([category, commands]) => {
+                    this.print(`${category}:`, 'highlight');
+                    this.print(`  ${commands}`, 'success');
+                });
+                
+                this.print('\n💡 Pro tips:', 'warning');
+                this.print('  • Type "help" to see all available commands', 'info');
+                this.print('  • Use Tab key for command auto-completion', 'info');
+                this.print('  • Use arrow keys to navigate command history', 'info');
+                this.print('  • Try different themes with "theme" command', 'info');
+                this.print('  • Create aliases for frequently used commands', 'info');
+                this.print('');
+            }
+
+            // ========== UTILITY METHODS ==========
+
+            getDirectory(path) {
+                if (path === '/') return this.fileSystem['/'];
+                
+                const parts = path.split('/').filter(p => p);
+                let current = this.fileSystem['/'];
+
+                for (const part of parts) {
+                    if (!current.children || !current.children[part]) return null;
+                    current = current.children[part];
+                }
+
+                return current;
+            }
+
+            openEditor(filename) {
+                const file = this.getDirectory(this.currentDir + filename);
+                const content = file && file.content ? file.content : '';
+                
+                document.getElementById('editor-filename').value = filename;
+                document.getElementById('editor-content').value = content;
+                document.getElementById('editor-modal').classList.add('active');
+            }
+
+            saveFile() {
+                const filename = document.getElementById('editor-filename').value;
+                const content = document.getElementById('editor-content').value;
+                
+                const dir = this.getDirectory(this.currentDir);
+                if (dir && dir.children) {
+                    if (!dir.children[filename]) {
+                        dir.children[filename] = {
+                            type: 'file',
+                            size: content.length,
+                            permissions: '-rw-r--r--',
+                            owner: this.currentUser,
+                            group: this.currentUser,
+                            modified: new Date(),
+                            content: content
+                        };
+                    } else {
+                        dir.children[filename].content = content;
+                        dir.children[filename].size = content.length;
+                        dir.children[filename].modified = new Date();
+                    }
+                    
+                    this.showNotification('File Saved', `${filename} saved successfully`);
+                    this.print(`✓ File '${filename}' saved (${content.length} bytes)`, 'success');
+                }
+                
+                this.closeEditor();
+            }
+
+            closeEditor() {
+                document.getElementById('editor-modal').classList.remove('active');
+                this.input.focus();
+            }
+
+            print(text, className = '') {
+                const line = document.createElement('div');
+                line.className = 'output-line ' + className;
+                line.innerHTML = text;
+                this.output.appendChild(line);
+            }
+
+            scrollToBottom() {
+                this.terminal.scrollTop = this.terminal.scrollHeight;
+            }
+
+            getUptime() {
+                const uptime = Date.now() - this.startTime;
+                const days = Math.floor(uptime / 86400000);
+                const hours = Math.floor((uptime % 86400000) / 3600000);
+                const minutes = Math.floor((uptime % 3600000) / 60000);
+                const seconds = Math.floor((uptime % 60000) / 1000);
+                
+                if (days > 0) {
+                    return `${days}d ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                }
+                return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            }
+
+            formatTime(seconds) {
+                const h = Math.floor(seconds / 3600);
+                const m = Math.floor((seconds % 3600) / 60);
+                const s = seconds % 60;
+                return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+            }
+
+            humanFileSize(bytes) {
+                const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                let size = bytes;
+                let unitIndex = 0;
+                
+                while (size >= 1024 && unitIndex < units.length - 1) {
+                    size /= 1024;
+                    unitIndex++;
+                }
+                
+                return `${size.toFixed(1)}${units[unitIndex]}`;
+            }
+
+            showNotification(title, message) {
+                const notif = document.createElement('div');
+                notif.className = 'notification';
+                notif.innerHTML = `<strong>${title}</strong><br>${message}`;
+                document.body.appendChild(notif);
+                
+                setTimeout(() => {
+                    notif.style.animation = 'slideIn 0.3s reverse';
+                    setTimeout(() => notif.remove(), 300);
+                }, 3000);
+            }
+
+            startSystemMonitor() {
+                setInterval(() => {
+                    this.systemStats.cpu = Math.floor(Math.random() * 30 + 20);
+                    this.systemStats.mem = Math.floor(Math.random() * 20 + 40);
+                    this.systemStats.disk = Math.floor(Math.random() * 10 + 60);
+                    this.systemStats.net = Math.random() > 0.1 ? 100 : 0;
+
+                    document.getElementById('cpu-usage').textContent = this.systemStats.cpu + '%';
+                    document.getElementById('mem-usage').textContent = this.systemStats.mem + '%';
+                    document.getElementById('disk-usage').textContent = this.systemStats.disk + '%';
+                    document.getElementById('net-status').textContent = this.systemStats.net ? 'ONLINE' : 'OFFLINE';
+                    document.getElementById('uptime').textContent = this.getUptime();
+                    
+                    // Update network stats
+                    for (const iface of Object.values(this.networkDevices)) {
+                        if (iface.status === 'UP') {
+                            iface.rx += Math.floor(Math.random() * 100);
+                            iface.tx += Math.floor(Math.random() * 50);
+                        }
+                    }
+                    
+                    // Update process CPU times
+                    this.processes.forEach(proc => {
+                        if (proc.state === 'running') {
+                            proc.cpu = Math.floor(Math.random() * 15);
+                        }
+                    });
+                }, 1000);
+            }
+        }
+
+        // Initialize terminal
+        let terminal;
+        window.addEventListener('DOMContentLoaded', () => {
+            terminal = new MiniOSTerminal();
+            window.terminal = terminal; // Make it globally accessible
+        });
+    </script>
+</body>
+</html>
