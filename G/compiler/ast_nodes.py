@@ -99,17 +99,23 @@ class If:
     cond: object
     then: list
     els: Optional[list]
+    line: int = 0
+    col: int = 0
 
 
 @dataclass
 class While:
     cond: object
     body: list
+    line: int = 0
+    col: int = 0
 
 
 @dataclass
 class Loop:                 # vòng lặp vô hạn (Rust)
     body: list
+    line: int = 0
+    col: int = 0
 
 
 @dataclass
@@ -120,6 +126,17 @@ class For:                  # for i in a..b { } | a..=b | step N
     body: list
     inclusive: bool = False
     step: object = None
+    line: int = 0
+    col: int = 0
+
+
+@dataclass
+class ForEach:             # for x in iterable { }   (mảng tĩnh hoặc str)
+    var: str
+    iterable: object
+    body: list
+    line: int = 0
+    col: int = 0
 
 
 @dataclass
