@@ -1,0 +1,6 @@
+grid[0][2]=3, grid[1][0]=4
+tổng ma trận = 10
+len([1,2,3,4,5]) = 5
+foreach literal = 100
+cube[1][1][1] = 8
+buf[3] = 300

@@ -1,0 +1,19 @@
+trong khối
+dọn 1
+dọn 2
+dọn 3
+vòng 1
+  hết vòng 1
+vòng 2
+  hết vòng 2
+vòng 3
+  hết vòng 3
+  mở tài nguyên 0
+  [đóng tài nguyên 0]
+kết quả = -1
+  mở tài nguyên 5
+  [đóng tài nguyên 5]
+kết quả = 50
+  defer-loop 1
+  defer-loop 2
+xong

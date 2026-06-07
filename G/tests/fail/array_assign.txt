@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể gán cả mảng tĩnh '[3]int' bằng '=' (sao chép từng phần tử, hoặc dùng con trỏ/[]T)

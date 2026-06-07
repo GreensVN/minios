@@ -1,0 +1,7 @@
+x = 30
+inner y = 3
+mid y = 2
+outer y = 1
+z = now a string
+0 1 2 
+outer i = 100

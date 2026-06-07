@@ -1,0 +1,4 @@
+tree_sum = 30
+x.tag=1, x.b.tag=2, y.a.tag=1
+o.inner.v = 99
+unit ok

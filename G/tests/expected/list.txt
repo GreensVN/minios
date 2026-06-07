@@ -1,0 +1,3 @@
+Danh sách (8 phần tử): [ 64 49 36 25 16 9 4 1 ]
+Tổng = 204
+Sau khi giải phóng: len = 0

@@ -66,21 +66,30 @@ while cond { }
 loop { ... break }                 // vòng lặp vô hạn (Rust)
 for i in 0..10 { }                 // 0..9
 for i in 0..=10 step 2 { }         // bao gồm 10, bước 2
+for i in 10..0 step -1 { }         // đếm ngược (step âm)
 let p = (n % 2 == 0) ? "chẵn" : "lẻ"   // ternary
 ```
+Vòng `for ... step` chấp nhận **bước âm** (đếm ngược); khi dấu của bước chỉ biết
+lúc chạy, chiều so sánh được chọn tự động.
 
-### `match` (Rust) — nhiều pattern, khớp chuỗi, mặc định
+### `match` (Rust) — nhiều pattern, khoảng, khớp chuỗi, mặc định
 ```g
 match score {
-    9 | 10 => { return "Xuất sắc" }
-    7 | 8  => { return "Khá" }
-    _      => { return "Yếu" }
+    9 | 10   => { return "Xuất sắc" }   // nhiều pattern (|)
+    80..=100 => { return "A" }          // khoảng bao gồm (lo..=hi)
+    11..80   => { return "B" }          // khoảng nửa mở (lo..hi)
+    _        => { return "Yếu" }
 }
 match cmd {                 // tự dùng strcmp cho chuỗi
     "quit" => { ... }
     _      => { ... }
 }
+match dir {                 // match enum phủ hết variant: KHÔNG cần '_'
+    North => { return "lên" }
+    South => { return "xuống" }
+}
 ```
+Khoảng dùng được cho cả `char`: `'a'..='z' => { ... }`.
 
 ### `struct`, `enum`, và `impl` (method)
 ```g
@@ -144,17 +153,38 @@ comptime fn square(n: int) -> int { return n * n }
 | `{b}` | bool → true/false |
 | `{{` `}}` | dấu `{` `}` literal |
 
-> Compiler **kiểm tra số placeholder khớp số đối số** và báo lỗi nếu lệch.
+**Width / precision / căn lề** (kiểu Zig/Rust) qua `{key:flags}`:
+
+| Ví dụ | Kết quả |
+|-------|---------|
+| `{d:5}` | `"   42"` (width tối thiểu 5, căn phải) |
+| `{d:<5}` | `"42   "` (căn trái) |
+| `{d:05}` | `"00042"` (đệm số 0) |
+| `{f:.2}` | `"3.14"` (2 chữ số sau dấu phẩy) |
+| `{f:8.3}` | `"   3.142"` (width 8, precision 3) |
+| `{s:>10}` | `"        hi"` (chuỗi căn phải) |
+
+> Compiler **kiểm tra số placeholder khớp số đối số** *và* **khớp kiểu với
+> specifier** (vd `{s}` cho số, `{d}` cho float đều báo lỗi).
 
 ### Builtins
-`len(x)` · `assert(cond[, msg])` · `panic(msg)` · `min(a,b)` · `max(a,b)` · `abs(x)` · `g_alloc(T,n)` · `g_realloc(p,T,n)` · `g_free(p)`.
+`len(x)` · `assert(cond[, msg])` · `panic(msg)` · `unreachable([msg])` · `todo([msg])` · `min(a,b)` · `max(a,b)` · `abs(x)` · `clamp(x,lo,hi)` · `g_alloc(T,n)` · `g_realloc(p,T,n)` · `g_free(p)` · `sizeof(T)`.
+
+`unreachable()`/`todo()` không bao giờ trả về (như `panic`) nên thoả mãn phân
+tích "mọi nhánh đều return" — tiện cho nhánh mặc định hoặc hàm chưa hoàn thiện.
 
 ### Module / `import`
 ```g
 import std            // nạp lib/std.g
 import "helpers.g"    // nạp file cùng thư mục
 ```
-`lib/std.g` cung cấp: `gcd lcm ipow is_prime factorial swap_int`.
+`lib/std.g` cung cấp:
+- **Số học:** `gcd lcm ipow is_prime factorial sign is_even is_odd isqrt fib powmod max3 min3 popcount`
+- **Mảng:** `sum_slice swap_int swap_at bubble_sort binary_search max_subarray`
+- **Chuỗi:** `streq str_len str_concat substr str_contains starts_with ends_with parse_int parse_float int_to_str`
+
+> Các hàm chuỗi trả chuỗi mới (vd `str_concat`, `substr`, `int_to_str`) cấp phát
+> trên heap — nhớ `g_free` khi dùng xong.
 
 ---
 
@@ -192,8 +222,9 @@ G/
 ├── examples/               # hello, showcase, fib, sieve, oop, features
 └── tests/
     ├── run_tests.sh        # bộ test (so sánh output; --bless để cập nhật)
-    ├── cases/              # test case riêng
-    └── expected/           # kết quả mong đợi
+    ├── cases/              # test case riêng (chạy & so output)
+    ├── expected/           # kết quả mong đợi
+    └── fail/               # test "phải lỗi" (khoá thông điệp chẩn đoán)
 ```
 
 ---
@@ -209,11 +240,29 @@ let x = a +
 
 ---
 
+## Hệ thống kiểu & chẩn đoán — điểm nổi bật
+
+- **Khớp định dạng `print`:** kiểm tra cả *số lượng* lẫn *kiểu* placeholder.
+- **Tràn số literal:** báo lỗi khi literal vượt biên kiểu đích (`u8 = 300` → lỗi).
+- **Bất biến qua method:** cấm gọi method-sửa-`self` trên binding `let`.
+- **Phân tích đường về:** hàm non-void phải trả về trên mọi nhánh (hiểu `match`
+  enum vét cạn, `if/else` cùng diverge, `loop` vô hạn, `panic/unreachable/todo`).
+- **Gợi ý "có phải ... ?"** cho định danh/trường/kiểu gõ sai (Levenshtein).
+- **Khai báo trùng:** bắt sớm trường struct / biến thể enum / hàm / method trùng
+  tên (kèm va chạm tên biến thể enum giữa các enum) — thay vì rò lỗi C khó hiểu.
+- **Gán không hợp lệ:** cấm gán cả mảng tĩnh bằng `=`, và gán kết quả hàm `void`
+  cho biến.
+
+> **Ngữ nghĩa vòng lặp:** `for i in a..b` lượng giá cận `b` (và `step`) **đúng
+> một lần** khi vào vòng (giống Rust) — đổi `b` trong thân không làm dài thêm
+> vòng lặp, và hàm dùng làm cận chỉ được gọi một lần.
+
 ## Giới hạn hiện tại
 
-- `match` so khớp bằng `==`/`strcmp` (chưa destructuring/range pattern).
+- `match` so khớp bằng `==`/`strcmp`/khoảng (chưa destructuring struct/enum dữ liệu).
 - `asm` là *basic asm* GCC (chưa ràng buộc toán tử `%0/%1`).
 - Chưa có generic, trait, ownership/borrow-checker đầy đủ.
-- `defer` ở mức hàm (chưa mức block lồng).
+- Cỡ mảng phải là literal nguyên (chưa hằng biểu thức `[N+1]`).
+- Chưa có con trỏ hàm / closure.
 
 Một nền tảng vững để mở rộng tiếp. 🚀

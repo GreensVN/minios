@@ -5,6 +5,7 @@ G Language - Driver: điều phối toàn bộ pipeline biên dịch.
 
 import os
 import sys
+import shutil
 import subprocess
 import tempfile
 
@@ -13,6 +14,8 @@ from .parser import Parser, ParseError
 from .checker import Checker, CheckError
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
+
+VERSION = "0.2.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -88,6 +91,12 @@ def load_program(path, sources, visited):
             raise GError(path, sources[ap][1], 1, 1,
                          f"không tìm thấy module để import: '{imp}'", "module")
         items.extend(load_program(ipath, sources, visited))
+    # Gắn file nguồn vào từng khai báo để chẩn đoán đa module đúng file/dòng.
+    for it in prog.items:
+        try:
+            it.src_file = ap
+        except Exception:
+            pass
     items.extend(prog.items)
     return items
 
@@ -98,18 +107,27 @@ def build_program(main_path, sources):
 
 
 # ---------- pipeline ----------
+def has_main(prog):
+    return any(isinstance(it, A.Function) and it.name == "main" and it.body is not None
+               for it in prog.items)
+
+
 def compile_to_c(main_path):
+    """Trả về dict {c, has_main}. Báo lỗi đúng file nguồn (kể cả module import)."""
     sources = {}
+    main_ap = os.path.abspath(main_path)
     prog = build_program(main_path, sources)
-    main_src = sources[os.path.abspath(main_path)][1]
+    main_src = sources[main_ap][1]
     try:
         Checker(prog).check()
     except CheckError as e:
-        raise GError(main_path, main_src, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
+        fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
+        raise GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
     try:
-        return Codegen(prog).generate()
+        c_code = Codegen(prog).generate()
     except CodegenError as e:
         raise GError(main_path, main_src, 0, 0, str(e), "sinh mã")
+    return {"c": c_code, "has_main": has_main(prog)}
 
 
 def dump_tokens(main_path):
@@ -164,56 +182,19 @@ def find_cc(preferred=None):
     order = [preferred] if preferred else []
     order += ["cc", "gcc", "clang"]
     for cc in order:
-        if cc and subprocess.call(["which", cc], stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL) == 0:
+        if cc and shutil.which(cc):
             return cc
     return "cc"
 
 
-def main(argv):
-    import argparse
-    ap = argparse.ArgumentParser(prog="gc", description="Trình biên dịch ngôn ngữ G")
-    ap.add_argument("input", help="file nguồn .g")
-    ap.add_argument("-o", "--output", help="tên file thực thi đầu ra")
-    ap.add_argument("--emit-c", action="store_true", help="xuất mã C, không biên dịch")
-    ap.add_argument("--keep-c", action="store_true", help="giữ lại file .c trung gian")
-    ap.add_argument("-r", "--run", action="store_true", help="biên dịch rồi chạy")
-    ap.add_argument("--check", action="store_true", help="chỉ kiểm tra kiểu, không sinh mã")
-    ap.add_argument("--tokens", action="store_true", help="in danh sách token")
-    ap.add_argument("--ast", action="store_true", help="in cây cú pháp AST")
-    ap.add_argument("--cc", default=None, help="trình biên dịch C (mặc định tự dò)")
-    ap.add_argument("-O", default="2", help="mức tối ưu (0..3), mặc định 2")
-    args, extra = ap.parse_known_args(argv)
-
-    if not os.path.exists(args.input):
-        print(f"gc: không tìm thấy file: {args.input}", file=sys.stderr)
-        return 1
-
-    try:
-        if args.tokens:
-            dump_tokens(args.input)
-            return 0
-        if args.ast:
-            dump_ast(args.input)
-            return 0
-        if args.check:
-            compile_to_c(args.input)  # chạy tới hết checker
-            print(f"gc: \033[32mOK\033[0m — không phát hiện lỗi kiểu trong {args.input}")
-            return 0
-        c_code = compile_to_c(args.input)
-    except GError as e:
-        print(render_diag(e.filename, e.source, e.line, e.col, e.msg, e.phase),
+def build_executable(args, extra, result):
+    """Biên dịch mã C đã sinh ra file thực thi qua cc; trả về mã thoát."""
+    c_code = result["c"]
+    if not result["has_main"]:
+        print("gc: \033[1;31mlỗi:\033[0m không tìm thấy hàm 'main' "
+              "(cần 'fn main() -> int { ... }' để tạo file thực thi)",
               file=sys.stderr)
         return 1
-
-    if args.emit_c:
-        if args.output:
-            with open(args.output, "w") as f:
-                f.write(c_code)
-            print(f"gc: đã ghi mã C vào {args.output}")
-        else:
-            print(c_code)
-        return 0
 
     base = os.path.splitext(os.path.basename(args.input))[0]
     out_dir = os.path.dirname(os.path.abspath(args.input)) or "."
@@ -233,9 +214,11 @@ def main(argv):
 
     cmd = [cc, c_path, "-o", out_path, f"-O{args.O}", "-I", RUNTIME_DIR,
            "-std=gnu11", "-lm", "-w"] + extra
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if not keep:
-        os.unlink(c_path)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        if not keep and os.path.exists(c_path):
+            os.unlink(c_path)
 
     if proc.returncode != 0:
         print("gc: lỗi biên dịch C backend (đây thường là lỗi nội bộ của G):",
@@ -253,3 +236,70 @@ def main(argv):
         print("-" * 44 + f"\ngc: chương trình kết thúc với mã {rc}")
         return rc
     return 0
+
+
+def main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(prog="gc", description="Trình biên dịch ngôn ngữ G")
+    ap.add_argument("input", help="file nguồn .g")
+    ap.add_argument("-o", "--output", help="tên file thực thi đầu ra")
+    ap.add_argument("--emit-c", action="store_true", help="xuất mã C, không biên dịch")
+    ap.add_argument("--keep-c", action="store_true", help="giữ lại file .c trung gian")
+    ap.add_argument("-r", "--run", action="store_true", help="biên dịch rồi chạy")
+    ap.add_argument("--check", action="store_true", help="chỉ kiểm tra kiểu, không sinh mã")
+    ap.add_argument("--tokens", action="store_true", help="in danh sách token")
+    ap.add_argument("--ast", action="store_true", help="in cây cú pháp AST")
+    ap.add_argument("--cc", default=None, help="trình biên dịch C (mặc định tự dò)")
+    ap.add_argument("-O", default="2", help="mức tối ưu (0,1,2,3,s,g), mặc định 2")
+    ap.add_argument("--debug", action="store_true",
+                    help="in traceback đầy đủ khi gặp lỗi nội bộ")
+    ap.add_argument("--version", action="version", version=f"gc (ngôn ngữ G) {VERSION}")
+    args, extra = ap.parse_known_args(argv)
+
+    if not os.path.exists(args.input):
+        print(f"gc: không tìm thấy file: {args.input}", file=sys.stderr)
+        return 1
+    if args.O not in ("0", "1", "2", "3", "s", "g", "z", "fast"):
+        print(f"gc: mức tối ưu không hợp lệ: -O{args.O} (dùng 0,1,2,3,s,g)",
+              file=sys.stderr)
+        return 1
+
+    try:
+        if args.tokens:
+            dump_tokens(args.input)
+            return 0
+        if args.ast:
+            dump_ast(args.input)
+            return 0
+        if args.check:
+            compile_to_c(args.input)  # chạy tới hết checker
+            print(f"gc: \033[32mOK\033[0m — không phát hiện lỗi kiểu trong {args.input}")
+            return 0
+        result = compile_to_c(args.input)
+    except GError as e:
+        print(render_diag(e.filename, e.source, e.line, e.col, e.msg, e.phase),
+              file=sys.stderr)
+        return 1
+    except RecursionError:
+        print("gc: \033[1;31mlỗi:\033[0m đệ quy quá sâu khi biên dịch "
+              "(biểu thức/cấu trúc lồng quá phức tạp?)", file=sys.stderr)
+        return 2
+    except Exception as e:  # lỗi nội bộ không lường trước -> không xả traceback thô
+        if args.debug:
+            raise
+        print(f"gc: \033[1;31mlỗi nội bộ trình biên dịch:\033[0m {type(e).__name__}: {e}",
+              file=sys.stderr)
+        print("    (chạy lại với --debug để xem traceback; đây là bug của G, "
+              "vui lòng báo cáo)", file=sys.stderr)
+        return 2
+
+    if args.emit_c:
+        if args.output:
+            with open(args.output, "w") as f:
+                f.write(result["c"])
+            print(f"gc: đã ghi mã C vào {args.output}")
+        else:
+            print(result["c"])
+        return 0
+
+    return build_executable(args, extra, result)

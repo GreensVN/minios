@@ -185,10 +185,13 @@ class Lexer:
 
     def read_number(self, line, col):
         start = self.i
-        # Tiền tố cơ số: 0x (hex), 0b (nhị phân), 0o (bát phân)
-        if self.peek() == "0" and self.peek(1) in "xXbBoO":
+        # Tiền tố cơ số: 0x (hex), 0b (nhị phân), 0o (bát phân).
+        # Lưu ý: tránh bẫy `"" in "xXbBoO"` (Python coi chuỗi rỗng là chuỗi con) —
+        # so khớp tường minh để không crash khi số nằm ở cuối file.
+        if self.peek() == "0" and self.peek(1) in ("x", "X", "b", "B", "o", "O"):
             base = self.peek(1).lower()
-            self.advance(); self.advance()
+            self.advance(); self.advance()  # bỏ '0' và ký tự cơ số
+            digit_start = self.i
             digits = {
                 "x": "0123456789abcdefABCDEF_",
                 "b": "01_",
@@ -196,27 +199,37 @@ class Lexer:
             }[base]
             while self.peek() and self.peek() in digits:
                 self.advance()
-            raw = self.src[start:self.i].replace("_", "")
-            # Chuẩn hoá về thập phân để C hiểu (0b không chuẩn C)
-            val = int(raw, 0) if base != "b" else int(raw[2:], 2)
+            raw = self.src[digit_start:self.i].replace("_", "")
+            if raw == "":
+                self.error(f"số cơ số {base!r} cần ít nhất một chữ số")
+            try:
+                val = int(raw, {"x": 16, "b": 2, "o": 8}[base])
+            except ValueError:
+                self.error(f"số không hợp lệ: 0{base}{raw}")
+            # Chuẩn hoá về thập phân để C luôn hiểu (0b/0o không chuẩn C cũ)
             self.add("int", str(val), line, col)
             return
 
         is_float = False
         while self.peek().isdigit() or self.peek() == "_":
             self.advance()
+        # Phần thập phân: chỉ khi có chữ số ngay sau dấu '.' (để '1..5' là range)
         if self.peek() == "." and self.peek(1).isdigit():
             is_float = True
             self.advance()
             while self.peek().isdigit() or self.peek() == "_":
                 self.advance()
-        if self.peek() in "eE":
-            is_float = True
-            self.advance()
-            if self.peek() in "+-":
-                self.advance()
-            while self.peek().isdigit():
-                self.advance()
+        # Phần mũ: 'e'/'E' kèm dấu tuỳ chọn và ÍT NHẤT một chữ số
+        if self.peek() in ("e", "E"):
+            sign = "+" if self.peek(1) in ("+", "-") else ""
+            exp_digit = self.peek(2) if sign else self.peek(1)
+            if exp_digit.isdigit():
+                is_float = True
+                self.advance()                 # e/E
+                if self.peek() in ("+", "-"):
+                    self.advance()
+                while self.peek().isdigit() or self.peek() == "_":
+                    self.advance()
         text = self.src[start:self.i].replace("_", "")
         self.add("float" if is_float else "int", text, line, col)
 
@@ -248,13 +261,31 @@ class Lexer:
 
     def read_escape(self):
         c = self.advance()
-        if c == "x":  # \xNN hex
+        if c == "x":  # \xNN hex (đúng 2 chữ số)
             h = ""
             while len(h) < 2 and self.peek() in "0123456789abcdefABCDEF":
                 h += self.advance()
-            return chr(int(h, 16)) if h else "x"
+            if not h:
+                self.error("escape \\x cần ít nhất một chữ số hex")
+            return chr(int(h, 16))
+        if c == "u":  # \u{XXXX} — điểm mã Unicode (kiểu Rust/Zig)
+            if self.peek() != "{":
+                self.error("escape \\u cần dạng \\u{XXXX}")
+            self.advance()  # {
+            h = ""
+            while self.peek() in "0123456789abcdefABCDEF":
+                h += self.advance()
+            if self.peek() != "}":
+                self.error("escape \\u{...} thiếu '}'")
+            self.advance()  # }
+            if not h:
+                self.error("escape \\u{...} cần ít nhất một chữ số hex")
+            cp = int(h, 16)
+            if cp > 0x10FFFF:
+                self.error(f"điểm mã Unicode vượt giới hạn: U+{cp:X}")
+            return chr(cp)
         return {
             "n": "\n", "t": "\t", "r": "\r", "0": "\0",
             "\\": "\\", '"': '"', "'": "'", "a": "\a", "b": "\b",
-            "f": "\f", "v": "\v",
+            "f": "\f", "v": "\v", "e": "\x1b",
         }.get(c, c)

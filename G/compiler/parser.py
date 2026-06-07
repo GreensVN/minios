@@ -33,6 +33,9 @@ class Parser:
         self.toks = tokens
         self.pos = 0
         self.filename = filename
+        # Khi True, 'Ident {' KHÔNG được coi là struct literal (đang ở header
+        # của if/while/for/match — '{' là khối lệnh). Kiểu Rust. Reset trong ( ) [ ].
+        self.no_struct_lit = False
 
     # ---------- tiện ích ----------
     def cur(self) -> Token:
@@ -74,6 +77,16 @@ class Parser:
     def skip_semis(self):
         while self.check("op", ";"):
             self.advance()
+
+    def parse_cond(self):
+        """Parse biểu thức điều kiện trong header if/while/for/match: cấm struct
+        literal trần để '{' theo sau được hiểu là khối lệnh (giống Rust)."""
+        saved = self.no_struct_lit
+        self.no_struct_lit = True
+        try:
+            return self.parse_expr()
+        finally:
+            self.no_struct_lit = saved
 
     def is_kw(self, w):
         return self.check("kw", w)
@@ -210,17 +223,25 @@ class Parser:
         ptr = 0
         while self.accept("op", "*"):
             ptr += 1
-        array = None
-        is_array = False
-        if self.accept("op", "["):
-            is_array = True
-            if not self.is_op("]"):
-                array = int(self.expect("int").value, 0)
+        # Mảng (có thể nhiều chiều): [N][M]T | []T | [N]T
+        # N là literal nguyên HOẶC tên hằng (vd '[CAP]int') — checker sẽ fold.
+        dims = []
+        while self.is_op("["):
+            self.advance()
+            if self.is_op("]"):
+                dims.append("dyn")        # []T : con trỏ động
+            elif self.check("int"):
+                dims.append(int(self.advance().value, 0))
+            elif self.check("id"):
+                dims.append(self.advance().value)   # tên hằng (string) -> fold sau
+            else:
+                self.error("cỡ mảng phải là số nguyên hoặc tên hằng")
             self.expect("op", "]")
         name = self.expect("id").value
-        ty = A.Type(name, ptr=ptr, array=array, **self.pos_of(t))
-        if is_array and array is None:
-            ty.array = "dyn"   # []T : con trỏ động
+        ty = A.Type(name, ptr=ptr, **self.pos_of(t))
+        if dims:
+            ty.dims = dims
+            ty.array = dims[0]            # chiều ngoài cùng (giữ tương thích)
         return ty
 
     # ---------- khối & câu lệnh ----------
@@ -249,7 +270,7 @@ class Parser:
             return self.parse_if()
         if self.is_kw("while"):
             self.advance()
-            cond = self.parse_expr()
+            cond = self.parse_cond()
             body = self.parse_block()
             return A.While(cond, body)
         if self.is_kw("loop"):
@@ -265,11 +286,14 @@ class Parser:
         if self.is_kw("asm"):
             return self.parse_asm()
         if self.is_kw("break"):
-            self.advance(); self.skip_semis()
-            return A.Break()
+            tk = self.advance(); self.skip_semis()
+            return A.Break(**self.pos_of(tk))
         if self.is_kw("continue"):
-            self.advance(); self.skip_semis()
-            return A.Continue()
+            tk = self.advance(); self.skip_semis()
+            return A.Continue(**self.pos_of(tk))
+        if self.is_op("{"):
+            # khối lệnh trần { ... } — tạo scope riêng (block-scoped defer)
+            return A.Block(self.parse_block(), **self.pos_of(t))
         # biểu thức hoặc gán
         expr = self.parse_expr()
         if self.cur().kind == "op" and self.cur().value in ASSIGN_OPS:
@@ -298,7 +322,7 @@ class Parser:
 
     def parse_if(self) -> A.If:
         self.expect("kw", "if")
-        cond = self.parse_expr()
+        cond = self.parse_cond()
         then = self.parse_block()
         els = None
         if self.accept("kw", "else"):
@@ -308,27 +332,33 @@ class Parser:
                 els = self.parse_block()
         return A.If(cond, then, els)
 
-    def parse_for(self) -> A.For:
+    def parse_for(self):
+        t = self.cur()
         self.expect("kw", "for")
+        mutable = bool(self.accept("kw", "mut"))
         var = self.expect("id").value
         self.expect("kw", "in")
-        start = self.parse_expr()
-        inclusive = False
-        if self.accept("op", "..="):
-            inclusive = True
-        else:
-            self.expect("op", "..")
-        end = self.parse_expr()
-        step = None
-        if self.accept("kw", "step"):
-            step = self.parse_expr()
+        saved = self.no_struct_lit
+        self.no_struct_lit = True
+        first = self.parse_expr()
+        # for i in a..b | a..=b [step N]   (vòng lặp theo khoảng)
+        inclusive = self.accept("op", "..=")
+        if inclusive or self.accept("op", ".."):
+            end = self.parse_expr()
+            step = self.parse_expr() if self.accept("kw", "step") else None
+            self.no_struct_lit = saved
+            body = self.parse_block()
+            return A.For(var, first, end, body, bool(inclusive), step,
+                         **self.pos_of(t))
+        # for [mut] x in <iterable> { }   (duyệt mảng tĩnh hoặc chuỗi)
+        self.no_struct_lit = saved
         body = self.parse_block()
-        return A.For(var, start, end, body, inclusive, step)
+        return A.ForEach(var, first, body, mutable, **self.pos_of(t))
 
     def parse_match(self) -> A.Match:
         t = self.cur()
         self.expect("kw", "match")
-        subject = self.parse_expr()
+        subject = self.parse_cond()
         self.expect("op", "{")
         arms = []
         self.skip_semis()
@@ -337,19 +367,34 @@ class Parser:
                 pats = None
             else:
                 # parse_binary(4): dừng trước '|' (prec 3) để '|' làm dấu phân tách pattern
-                pats = [self.parse_binary(4)]
+                pats = [self.parse_match_pattern()]
                 while self.accept("op", "|"):
-                    pats.append(self.parse_binary(4))
+                    pats.append(self.parse_match_pattern())
+            # Guard tuỳ chọn (kiểu Rust): 'pattern if <điều kiện> =>'. Cấm struct
+            # literal trần trong điều kiện để '{' sau đó là thân nhánh.
+            guard = None
+            if self.accept("kw", "if"):
+                guard = self.parse_cond()
             self.expect("op", "=>")
             if self.is_op("{"):
                 body = self.parse_block()
             else:
                 body = [self.parse_stmt()]
-            arms.append((pats, body))
+            arms.append((pats, guard, body))
             self.accept("op", ",")
             self.skip_semis()
         self.expect("op", "}")
         return A.Match(subject, arms, **self.pos_of(t))
+
+    def parse_match_pattern(self):
+        """Một pattern trong match: biểu thức đơn, hoặc khoảng lo..hi / lo..=hi."""
+        lo = self.parse_binary(4)
+        t = self.cur()
+        inclusive = self.accept("op", "..=")
+        if inclusive or self.accept("op", ".."):
+            hi = self.parse_binary(4)
+            return A.RangePat(lo, hi, bool(inclusive), t.line, t.col)
+        return lo
 
     def parse_asm(self) -> A.Asm:
         self.expect("kw", "asm")
@@ -401,15 +446,21 @@ class Parser:
         while True:
             t = self.cur()
             if self.accept("op", "("):
+                saved = self.no_struct_lit
+                self.no_struct_lit = False    # trong ( ) struct literal lại hợp lệ
                 args = []
                 while not self.is_op(")"):
                     args.append(self.parse_expr())
                     if not self.accept("op", ","):
                         break
+                self.no_struct_lit = saved
                 self.expect("op", ")")
                 e = A.Call(e, args, t.line, t.col)
             elif self.accept("op", "["):
+                saved = self.no_struct_lit
+                self.no_struct_lit = False
                 idx = self.parse_expr()
+                self.no_struct_lit = saved
                 self.expect("op", "]")
                 e = A.Index(e, idx, t.line, t.col)
             elif self.accept("op", "."):
@@ -442,33 +493,52 @@ class Parser:
         if self.is_kw("sizeof"):
             self.advance()
             self.expect("op", "(")
-            ty = self.parse_type()
+            # sizeof(*T) / sizeof([N]T): chắc chắn là kiểu
+            if self.is_op("*") or self.is_op("["):
+                ty = self.parse_type()
+                self.expect("op", ")")
+                return A.SizeOf(ty, t.line, t.col)
+            e = self.parse_expr()
             self.expect("op", ")")
-            return A.SizeOf(ty, t.line, t.col)
+            # tên trần: C cho phép sizeof(name) cho cả kiểu lẫn biến
+            if isinstance(e, A.Ident):
+                return A.SizeOf(A.Type(e.name, line=e.line, col=e.col), t.line, t.col)
+            return A.SizeOfExpr(e, t.line, t.col)
         if self.is_op("["):    # array literal [a, b, c]
             self.advance()
+            saved = self.no_struct_lit
+            self.no_struct_lit = False
             elems = []
             while not self.is_op("]"):
                 elems.append(self.parse_expr())
                 if not self.accept("op", ","):
                     break
+            self.no_struct_lit = saved
             self.expect("op", "]")
             return A.ArrayLit(elems, t.line, t.col)
         if self.is_op("("):
             self.advance()
+            saved = self.no_struct_lit
+            self.no_struct_lit = False
             e = self.parse_expr()
+            self.no_struct_lit = saved
             self.expect("op", ")")
             return e
         if t.kind == "id":
             self.advance()
-            if self.is_op("{") and self._looks_like_struct_lit():
+            if (not self.no_struct_lit and self.is_op("{")
+                    and self._looks_like_struct_lit()):
                 return self.parse_struct_lit(t.value, t)
-            return A.Ident(t.value, t.line, t.col)
+            return A.Ident(t.value, line=t.line, col=t.col)
         self.error("cần biểu thức")
 
     def _looks_like_struct_lit(self):
-        return (self.at(0).value == "{" and self.at(1).kind == "id"
-                and self.at(2).value == ":")
+        # 'Name {}' (rỗng) hoặc 'Name { field: ...}' — phân biệt với khối lệnh.
+        if self.at(0).value != "{":
+            return False
+        if self.at(1).value == "}":          # struct literal rỗng
+            return True
+        return self.at(1).kind == "id" and self.at(2).value == ":"
 
     def parse_struct_lit(self, name, t):
         self.expect("op", "{")

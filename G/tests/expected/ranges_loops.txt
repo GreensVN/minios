@@ -1,0 +1,5 @@
+ngược: 5 4 3 2 1 
+ngược chẵn: 10 8 6 4 2 0 
+step động: 9 6 3 
+xuôi: 0 2 4 6 8 
+sizeof([10]int)=40, sizeof([3][4]int)=48, sizeof([5]char)=5

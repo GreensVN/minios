@@ -50,10 +50,51 @@ run_one() {
     fi
 }
 
+# Test "phải lỗi": chương trình BẮT BUỘC trượt type-check (--check) và in ra một
+# thông điệp khớp mẫu mong đợi (dòng đầu của tests/fail/<tên>.txt). Khoá lại các
+# chẩn đoán lỗi để không bị thoái lui.
+# Xoá mã màu ANSI để so khớp ổn định (không phụ thuộc màu/đường dẫn tuyệt đối).
+strip_ansi() { sed -E 's/\x1b\[[0-9;]*m//g'; }
+
+run_fail() {
+    local src="$1"
+    local name; name="$(basename "$src" .g)"
+    local exp="$ROOT/tests/fail/$name.txt"
+    local got; got="$("$GC" "$src" --check 2>&1 | strip_ansi)"
+    if echo "$got" | grep -q "không phát hiện lỗi"; then
+        echo -e "${RED}PHẢI LỖI NHƯNG OK${RST}  $name"
+        fail=$((fail+1)); return
+    fi
+    if [ "$bless" = "1" ]; then
+        mkdir -p "$ROOT/tests/fail"
+        # Lưu phần thông điệp sau 'lỗi ...:' — bỏ đường dẫn/dòng/cột để di động.
+        echo "$got" | grep -oE 'lỗi [^:]+: .*' | head -1 > "$exp"
+        echo -e "${YEL}BLESS${RST}        $name (fail)"; return
+    fi
+    if [ ! -f "$exp" ]; then
+        echo -e "${YEL}THIẾU KQ${RST}     $name (fail) (chạy --bless để tạo)"
+        fail=$((fail+1)); return
+    fi
+    local want; want="$(cat "$exp")"
+    if echo "$got" | grep -qF "$want"; then
+        echo -e "${GREEN}PASS${RST}         $name (fail)"
+        pass=$((pass+1))
+    else
+        echo -e "${RED}FAIL${RST}         $name (fail)"
+        echo "  mong đợi chứa: $want"
+        echo "  thực tế:       $(echo "$got" | head -1)"
+        fail=$((fail+1))
+    fi
+}
+
 echo "=== Bộ test ngôn ngữ G ==="
 for src in "$ROOT"/examples/*.g "$ROOT"/tests/cases/*.g; do
     [ -e "$src" ] || continue
     run_one "$src"
+done
+for src in "$ROOT"/tests/fail/*.g; do
+    [ -e "$src" ] || continue
+    run_fail "$src"
 done
 
 echo "-------------------------"

@@ -1,0 +1,6 @@
+g_const = 100
+g_from_const = 101
+g_from_call = 42
+g_arr_const = 1 2 3
+g_arr_dyn = 100 200 42
+g_mut = 105

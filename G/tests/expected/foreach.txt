@@ -1,0 +1,6 @@
+tổng mảng = 14
+số lẻ: 3 1 1 
+số chữ hoa = 2
+tích chéo = 180
+tổng 2D = 21
+tổng 3D = 36

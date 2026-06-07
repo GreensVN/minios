@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: struct 'P' có trường trùng tên 'x'

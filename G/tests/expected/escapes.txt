@@ -1,0 +1,7 @@
+a	b	c
+ABCend
+trái tim: ❤
+emoji: 🚀
+[1mđậm?[0m (không màu khi pipe)
+X	Y
+Z

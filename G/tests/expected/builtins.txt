@@ -1,0 +1,6 @@
+min(3,9)=3, max(3,9)=9
+abs(-42)=42, clamp(15,0,10)=10, clamp(-5,0,10)=0
+m=7, x=7, c=5, số lần gọi dem()=3
+len(arr)=4, len("chào")=5
+sizeof(int)=4, sizeof(i64)=8, sizeof(big*2)=8, sizeof(arr)=16
+0xFF=255, 0b10101010=170, 1_000_000=1000000

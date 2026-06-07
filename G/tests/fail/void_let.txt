@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể gán giá trị từ 'nothing' kiểu void cho biến 'x' (hàm không trả về giá trị)

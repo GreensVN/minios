@@ -5,6 +5,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Parser/checker/codegen là đệ quy xuống; nới giới hạn đệ quy của Python để
+# xử lý biểu thức/cấu trúc lồng sâu (vẫn có thông báo lỗi sạch nếu vượt ngưỡng).
+sys.setrecursionlimit(20000)
+
 from compiler.driver import main
 
 if __name__ == "__main__":

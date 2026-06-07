@@ -1,0 +1,9 @@
+Xin chào, G!
+độ dài = 13
+substr = program
+contains 'gram'? true
+starts 'pro'? true
+ends 'ing'? true
+streq? true
+parse_int = 12345
+int_to_str = 98765

@@ -1,0 +1,7 @@
+classify(0) = zero
+classify(5) = small
+classify(20) = round
+classify(55) = medium
+classify(999) = large
+lower upper digit other
+âm không dương
