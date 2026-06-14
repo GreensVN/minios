@@ -9,7 +9,7 @@ from dataclasses import dataclass
 KEYWORDS = {
     "fn", "let", "mut", "struct", "enum", "if", "else", "while", "for",
     "return", "match", "defer", "asm", "import", "true", "false",
-    "comptime", "break", "continue", "as", "null", "sizeof", "in",
+    "comptime", "break", "continue", "as", "null", "sizeof", "alignof", "in",
     "loop", "impl", "const", "extern", "step",
 }
 

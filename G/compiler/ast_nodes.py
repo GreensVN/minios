@@ -10,10 +10,14 @@ from typing import Optional
 # ---------- Kiểu cú pháp (type annotation) ----------
 @dataclass
 class Type:
-    name: str                      # int, f64, str, void, tên struct/enum...
-    ptr: int = 0                   # số mức con trỏ (*)
-    array: Optional[object] = None # mảng 1 chiều: số phần tử (int) / "dyn" cho []T
-    dims: Optional[list] = None    # mảng nhiều chiều: [d0, d1, ...] (mỗi d là int/"dyn")
+    name: str                      # int, f64, str, void, tên struct/enum...; "fn" nếu là kiểu hàm
+    ptr: int = 0                   # số mức con trỏ NGOÀI (*[N]T: con trỏ tới mảng)
+    array: Optional[object] = None # mảng 1 chiều: số phần tử (int/biểu thức hằng) / "dyn" cho []T
+    dims: Optional[list] = None    # mảng nhiều chiều: [d0, d1, ...] (mỗi d là int/biểu thức/"dyn")
+    elem_ptr: int = 0              # con trỏ trên PHẦN TỬ ([N]*T: mảng các con trỏ)
+    is_fn: bool = False            # True nếu là kiểu con trỏ hàm: fn(P...) -> R
+    fn_params: Optional[list] = None  # list[Type] tham số của kiểu hàm
+    fn_ret: Optional[object] = None   # Type trả về của kiểu hàm (None = void)
     line: int = 0
     col: int = 0
 
@@ -335,6 +339,7 @@ class SizeOf:
     type: Type
     line: int = 0
     col: int = 0
+    align: bool = False     # True nếu là 'alignof' (sinh _Alignof thay vì sizeof)
 
 
 @dataclass

@@ -35,8 +35,12 @@ class GType:
             return f"[{sz}]{self.elem}"
         if self.kind in ("struct", "enum"):
             return self.name
-        if self.kind == "int":
+        if self.kind in ("int", "float") and self.name:
             return self.name
+        if self.kind == "func":
+            ps = ", ".join(str(p) for p in self.params)
+            r = str(self.ret) if self.ret is not None else "void"
+            return f"fn({ps}) -> {r}"
         return self.kind
 
 
@@ -98,6 +102,8 @@ def c_type(t: GType) -> str:
         return t.name
     if t.kind == "null":
         return "void*"
+    if t.kind == "func":
+        return "void*"     # con trỏ hàm dùng làm giá trị cỡ con trỏ (fallback)
     if t.kind == "unknown":
         return "int"
     if t.kind == "int":
@@ -126,6 +132,8 @@ def printf_spec(t: GType):
         # con trỏ tới char -> chuỗi
         if t.elem is not None and t.elem.kind == "char":
             return "%s", False
+        return "%p", False
+    if t.kind == "func":          # con trỏ hàm
         return "%p", False
     if t.kind == "enum":
         return "%d", False

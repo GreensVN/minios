@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <math.h>
+#include <time.h>
 
 /* ---- Cấp phát bộ nhớ (Zig/Rust style) ---- */
 #define g_alloc(T, n)        ((T*)calloc((size_t)(n), sizeof(T)))
@@ -124,6 +125,143 @@ static inline const char* g_int_to_str(int64_t v) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%lld", (long long)v);
     return g_str_dup(buf);
+}
+
+/* Đảo ngược chuỗi -> chuỗi mới (heap). */
+static inline const char* g_str_rev(const char* s) {
+    if (!s) s = "";
+    size_t n = strlen(s);
+    char* p = (char*)malloc(n + 1);
+    if (!p) return NULL;
+    for (size_t i = 0; i < n; i++) p[i] = s[n - 1 - i];
+    p[n] = '\0';
+    return p;
+}
+
+/* Chuyển sang CHỮ HOA / chữ thường (ASCII) -> chuỗi mới (heap). */
+static inline const char* g_str_upper(const char* s) {
+    if (!s) s = "";
+    size_t n = strlen(s);
+    char* p = (char*)malloc(n + 1);
+    if (!p) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        p[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+    }
+    p[n] = '\0';
+    return p;
+}
+static inline const char* g_str_lower(const char* s) {
+    if (!s) s = "";
+    size_t n = strlen(s);
+    char* p = (char*)malloc(n + 1);
+    if (!p) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        p[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    p[n] = '\0';
+    return p;
+}
+
+/* Lặp chuỗi 's' đúng 'k' lần -> chuỗi mới (heap). k<=0 -> chuỗi rỗng. */
+static inline const char* g_str_repeat(const char* s, ptrdiff_t k) {
+    if (!s) s = "";
+    if (k < 0) k = 0;
+    size_t n = strlen(s);
+    char* p = (char*)malloc(n * (size_t)k + 1);
+    if (!p) return NULL;
+    for (ptrdiff_t i = 0; i < k; i++) memcpy(p + (size_t)i * n, s, n);
+    p[n * (size_t)k] = '\0';
+    return p;
+}
+
+/* Đếm số lần ký tự 'c' xuất hiện trong chuỗi. */
+static inline ptrdiff_t g_str_count(const char* s, char c) {
+    if (!s) return 0;
+    ptrdiff_t cnt = 0;
+    for (; *s; s++) if (*s == c) cnt++;
+    return cnt;
+}
+
+/* Cắt khoảng trắng ASCII đầu/cuối -> chuỗi mới (heap). */
+static inline const char* g_str_trim(const char* s) {
+    if (!s) s = "";
+    const char* a = s;
+    while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r'
+           || *a == '\f' || *a == '\v') a++;
+    const char* b = a + strlen(a);
+    while (b > a && (b[-1] == ' ' || b[-1] == '\t' || b[-1] == '\n'
+                     || b[-1] == '\r' || b[-1] == '\f' || b[-1] == '\v')) b--;
+    size_t n = (size_t)(b - a);
+    char* p = (char*)malloc(n + 1);
+    if (!p) return NULL;
+    memcpy(p, a, n);
+    p[n] = '\0';
+    return p;
+}
+
+/* Thay mọi ký tự 'from' bằng 'to' -> chuỗi mới (heap). */
+static inline const char* g_str_replace_char(const char* s, char from, char to) {
+    if (!s) s = "";
+    size_t n = strlen(s);
+    char* p = (char*)malloc(n + 1);
+    if (!p) return NULL;
+    for (size_t i = 0; i < n; i++) p[i] = (s[i] == from) ? to : s[i];
+    p[n] = '\0';
+    return p;
+}
+
+/* ---- Đọc đầu vào từ stdin (cấp phát heap -> nhớ g_free với g_read_line) ----
+ * Trước đây G không có cách đọc đầu vào nào — các hàm này mở khoá chương trình
+ * tương tác (đọc dòng/số). Thiết kế an toàn: EOF -> NULL/0. */
+static inline const char* g_read_line(void) {
+    size_t cap = 64, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return NULL;
+    int c;
+    while ((c = getchar()) != EOF && c != '\n') {
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); return NULL; }
+            buf = nb;
+        }
+        buf[len++] = (char)c;
+    }
+    if (c == EOF && len == 0) { free(buf); return NULL; }   /* EOF, không có dữ liệu */
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Đọc một số nguyên (bỏ qua khoảng trắng dẫn đầu). Thất bại/EOF -> 0. */
+static inline int64_t g_read_int(void) {
+    long long v = 0;
+    if (scanf("%lld", &v) != 1) return 0;
+    return (int64_t)v;
+}
+
+/* Đọc một số thực. Thất bại/EOF -> 0.0. */
+static inline double g_read_float(void) {
+    double v = 0.0;
+    if (scanf("%lf", &v) != 1) return 0.0;
+    return v;
+}
+
+/* Đã hết đầu vào (EOF) chưa? */
+static inline bool g_eof(void) { return feof(stdin) != 0; }
+
+/* ---- Sinh số giả ngẫu nhiên & thời gian (tiện cho ví dụ/thuật toán) ---- */
+/* Hạt giống phụ thuộc thời gian (kết hợp time + clock để khác nhau mỗi lần chạy). */
+static inline uint64_t g_time_seed(void) {
+    uint64_t t = (uint64_t)time(NULL);
+    uint64_t c = (uint64_t)clock();
+    return (t * 0x9E3779B97F4A7C15ULL) ^ (c << 21) ^ (c >> 7) ^ 0xD1B54A32D192ED03ULL;
+}
+
+/* Thời gian CPU đã dùng (giây) — đo hiệu năng. */
+static inline double g_clock_secs(void) {
+    return (double)clock() / (double)CLOCKS_PER_SEC;
 }
 
 /* ---- giá trị nhỏ nhất/lớn nhất theo kiểu (tiện cho comptime) ---- */

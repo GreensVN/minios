@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể giải tham chiếu ('*') giá trị kiểu 'int' (chỉ áp dụng cho con trỏ)

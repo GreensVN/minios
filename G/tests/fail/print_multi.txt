@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: println(...) với nhiều đối số cần một chuỗi định dạng literal làm tham số đầu (vd 'println("{} {}", a, b)') — nếu không, các đối số sau đối số đầu sẽ bị bỏ qua

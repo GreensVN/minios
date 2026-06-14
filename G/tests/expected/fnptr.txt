@@ -1,0 +1,9 @@
+add(3,4)=7
+mul(3,4)=12
+g null? true
+g(41)=42, g khác null? true
+6 25 -5 
+map sqr: 1 4 9 16 25 
+reduce add=55, reduce mul=14400
+op_by_name(sub)(10,3)=7
+tổng: 123

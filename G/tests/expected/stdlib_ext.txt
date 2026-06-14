@@ -1,0 +1,13 @@
+sqrt(144)=12, cbrt(27)=3, pow(3,4)=81
+floor(2.9)=2, ceil(2.1)=3, round(2.5)=3, trunc(2.9)=2
+lerp(10,20,0.5)=15, clampf(9,0,5)=5, hypot(3,4)=5
+sum_digits(9876)=30, count_digits(100000)=6
+reverse_int(-405)=-504, is_palindrome_int(1221)=true, is_palindrome_int(123)=false
+sorted: 1 2 3 4 5 7 8 9 
+min=1, max=9, sorted?=true, index_of(7)=5, count_val(5)=1, contains(6)=false
+reversed: 9 8 7 5 4 3 2 1 
+copy+fill: 99 99 99 99 4 3 2 1 
+upper=NGôN NGữ G
+lower=hello world
+rev=fedcba, repeat===========
+count 'l' trong 'parallel' = 3, str_index('parallel','lle') = 4

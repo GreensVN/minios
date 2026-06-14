@@ -1,0 +1,30 @@
+== typeof (tên kiểu suy luận) ==
+typeof(n)      = i64
+typeof(3.14)   = f64
+typeof("hi")   = str
+typeof(true)   = bool
+
+== sizeof / alignof ==
+sizeof(i64)=8  alignof(i64)=8
+sizeof(*int)=8 alignof(*int)=8
+
+== so sánh chuỗi theo NỘI DUNG ==
+"xin chào" == nối? true
+
+== swap + số học con trỏ ==
+sau swap: 3 1 8 2 7 9
+đã sắp xếp: 1 2 3 7 8 9
+
+== thống kê ==
+trung bình = 5.00
+trung vị   = 5.0
+độ lệch chuẩn = 3.109
+
+== tổ hợp & lý thuyết số ==
+C(10,3) = 120   P(10,3) = 720
+số ước của 360 = 24
+phi(360)       = 96
+28 hoàn hảo?   = true
+
+== ngẫu nhiên tất định (cùng hạt -> cùng dãy) ==
+gieo 2026: 6 4 4 1 5

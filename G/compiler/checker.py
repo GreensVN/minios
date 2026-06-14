@@ -11,6 +11,16 @@ from . import ast_nodes as A
 from . import types as T
 
 
+class _CTReturn(Exception):
+    """Tín hiệu 'return' trong bộ thông dịch comptime (mang theo giá trị nguyên)."""
+    def __init__(self, value):
+        self.value = value
+
+
+class _CTAbort(Exception):
+    """Bộ thông dịch comptime gặp cấu trúc không gấp được -> coi như không-hằng."""
+
+
 class CheckError(Exception):
     def __init__(self, msg, line=0, col=0, file=None):
         super().__init__(msg)
@@ -20,9 +30,29 @@ class CheckError(Exception):
         self.file = file
 
 
-BUILTINS = {"print", "println", "eprint", "eprintln", "printf",
+BUILTINS = {"print", "println", "eprint", "eprintln", "printf", "format",
             "len", "assert", "panic", "min", "max", "abs", "clamp",
-            "g_alloc", "g_free", "g_realloc", "unreachable", "todo"}
+            "g_alloc", "g_free", "g_realloc", "unreachable", "todo",
+            "typeof", "swap"}
+
+# Hàm thư viện C bị kéo vào bởi runtime (stdio/stdlib/string/math/time...). Một
+# hàm G *không* 'extern' trùng tên một trong số này sẽ gây lỗi C khó hiểu
+# (conflicting types / redefinition). Bắt sớm để báo lỗi G rõ ràng.
+LIBC_NAMES = {
+    "malloc", "calloc", "realloc", "free", "abort", "exit", "atexit", "system",
+    "getenv", "qsort", "bsearch", "atoi", "atol", "atof", "strtol", "strtod",
+    "rand", "srand", "random", "srandom",
+    "printf", "fprintf", "sprintf", "snprintf", "scanf", "sscanf", "puts",
+    "putchar", "getchar", "fopen", "fclose", "fread", "fwrite", "fgets",
+    "fputs", "perror", "remove", "rename", "fflush",
+    "strlen", "strcmp", "strncmp", "strcpy", "strncpy", "strcat", "strncat",
+    "strchr", "strrchr", "strstr", "strtok", "strdup", "strerror",
+    "memcpy", "memmove", "memset", "memcmp",
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sqrt", "cbrt",
+    "pow", "exp", "log", "log2", "log10", "floor", "ceil", "round", "trunc",
+    "fabs", "fmod", "hypot", "sinh", "cosh", "tanh",
+    "time", "clock", "difftime", "mktime", "gmtime", "localtime",
+}
 
 
 def extract_placeholders(fmt: str):
@@ -117,6 +147,15 @@ class Checker:
 
     # ---------- API ----------
     def check(self):
+        # Đăng ký sớm thân MỌI hàm cho bộ thông dịch comptime (chỉ cần tên +
+        # params + body, KHÔNG cần phân giải kiểu) — nhờ vậy việc gấp lời gọi
+        # hàm thành hằng (cỡ mảng '[sq(3)]int', giá trị const) hoạt động ở mọi
+        # giai đoạn, kể cả trước khi collect_funcs() chạy. (Trước đây '_all_funcs'
+        # không bao giờ được gán -> toàn bộ trình thông dịch comptime là mã chết.)
+        self._all_funcs = {
+            it.name: it for it in self.prog.items
+            if isinstance(it, A.Function) and it.body is not None
+        }
         self.collect_const_values()
         self.collect_types()
         self.collect_funcs()
@@ -155,7 +194,10 @@ class Checker:
                 break
 
     def _fold_const_int(self, e):
-        """Tính giá trị nguyên của biểu thức hằng (hoặc None nếu không thể)."""
+        """Tính giá trị nguyên của biểu thức hằng (hoặc None nếu không thể).
+        Hỗ trợ: literal, char, bool, tên hằng/biến thể enum, toán tử một/hai ngôi
+        (kể cả so sánh & luận lý), ternary, ép kiểu, và LỜI GỌI hàm comptime/thuần
+        (gấp qua một bộ thông dịch có giới hạn — xem _eval_const_call)."""
         if isinstance(e, A.IntLit):
             try:
                 return int(e.value, 0)
@@ -163,30 +205,233 @@ class Checker:
                 return None
         if isinstance(e, A.CharLit):
             return ord(e.value) if len(e.value) == 1 else None
+        if isinstance(e, A.BoolLit):
+            return 1 if e.value else 0
         if isinstance(e, A.Ident):
-            return self.const_ints.get(e.name)
+            v = self.const_ints.get(e.name)
+            if v is not None:
+                return v
+            if e.name in self.enum_of_variant:
+                return self.enums.get(self.enum_of_variant[e.name], {}).get(e.name)
+            return None
         if isinstance(e, A.Unary):
             v = self._fold_const_int(e.operand)
             if v is None:
                 return None
-            return {"-": -v, "~": ~v, "+": v}.get(e.op)
+            return {"-": -v, "~": ~v, "+": v, "!": (0 if v else 1)}.get(e.op)
         if isinstance(e, A.Binary):
+            if e.op in ("&&", "||"):    # đoản mạch
+                a = self._fold_const_int(e.left)
+                if a is None:
+                    return None
+                if e.op == "&&" and not a:
+                    return 0
+                if e.op == "||" and a:
+                    return 1
+                b = self._fold_const_int(e.right)
+                return None if b is None else (1 if b else 0)
             a = self._fold_const_int(e.left)
             b = self._fold_const_int(e.right)
             if a is None or b is None:
                 return None
-            try:
-                return {
-                    "+": a + b, "-": a - b, "*": a * b,
-                    "/": a // b if b else None, "%": a % b if b else None,
-                    "<<": a << b, ">>": a >> b,
-                    "&": a & b, "|": a | b, "^": a ^ b,
-                }.get(e.op)
-            except (ValueError, ZeroDivisionError):
+            return self._ct_binop(e.op, a, b)
+        if isinstance(e, A.Ternary):
+            c = self._fold_const_int(e.cond)
+            if c is None:
                 return None
+            return self._fold_const_int(e.then if c else e.els)
         if isinstance(e, A.Cast):
             return self._fold_const_int(e.expr)
+        if isinstance(e, A.Call):
+            return self._eval_const_call(e)
         return None
+
+    # ---------- bộ thông dịch comptime (gấp lời gọi hàm lúc biên dịch) ----------
+    @staticmethod
+    def _ct_binop(op, a, b):
+        """Phép toán hai ngôi trên số nguyên với ngữ nghĩa C (chia/lấy dư cắt về 0).
+        Trả về None nếu không hợp lệ (chia 0, dịch âm) — caller coi là không-hằng."""
+        if op == "/" or op == "%":
+            if b == 0:
+                return None
+            q = abs(a) // abs(b)
+            if (a < 0) != (b < 0):
+                q = -q
+            return q if op == "/" else a - q * b
+        if op in ("<<", ">>"):
+            if b < 0:
+                return None
+            return a << b if op == "<<" else a >> b
+        return {
+            "+": a + b, "-": a - b, "*": a * b,
+            "&": a & b, "|": a | b, "^": a ^ b,
+            "==": 1 if a == b else 0, "!=": 1 if a != b else 0,
+            "<": 1 if a < b else 0, ">": 1 if a > b else 0,
+            "<=": 1 if a <= b else 0, ">=": 1 if a >= b else 0,
+            "&&": 1 if (a and b) else 0, "||": 1 if (a or b) else 0,
+        }.get(op)
+
+    def _eval_const_call(self, e: A.Call):
+        """Gấp một lời gọi hàm thành hằng nguyên (nếu được). Dùng cho cỡ mảng
+        '[sq(3)]int', giá trị enum, sizeof... Đánh giá thân hàm qua một bộ thông
+        dịch CÓ GIỚI HẠN (ngân sách bước + độ sâu) trên tập con nguyên của G:
+        let/assign/if/while/for/return + số học. Bất kỳ thứ gì ngoài tập đó ->
+        None (không-hằng), an toàn rơi về chẩn đoán lỗi cũ."""
+        funcs = getattr(self, "_all_funcs", None)
+        if not funcs or not isinstance(e.func, A.Ident):
+            return None
+        argvals = []
+        for a in e.args:
+            v = self._fold_const_int(a)
+            if v is None:
+                return None
+            argvals.append(v)
+        try:
+            return self._ct_call(e.func.name, argvals, [200000], 0)
+        except (_CTAbort, _CTReturn):
+            return None
+
+    def _ct_call(self, name, argvals, budget, depth):
+        if depth > 256:
+            raise _CTAbort()
+        if name in ("min", "max", "abs", "clamp"):
+            return self._ct_builtin(name, argvals)
+        fn = self._all_funcs.get(name)
+        if fn is None or fn.body is None or len(argvals) != len(fn.params):
+            raise _CTAbort()
+        env = {p.name: v for p, v in zip(fn.params, argvals)}
+        try:
+            self._ct_body(fn.body, env, budget, depth + 1)
+        except _CTReturn as r:
+            if r.value is None:
+                raise _CTAbort()
+            return r.value
+        raise _CTAbort()   # rơi khỏi thân mà không return giá trị
+
+    @staticmethod
+    def _ct_builtin(name, argvals):
+        if name == "abs" and len(argvals) == 1:
+            return abs(argvals[0])
+        if name in ("min", "max") and len(argvals) == 2:
+            return (min if name == "min" else max)(argvals[0], argvals[1])
+        if name == "clamp" and len(argvals) == 3:
+            x, lo, hi = argvals
+            return lo if x < lo else (hi if x > hi else x)
+        raise _CTAbort()
+
+    def _ct_body(self, body, env, budget, depth):
+        for st in body:
+            self._ct_stmt(st, env, budget, depth)
+
+    def _ct_tick(self, budget):
+        budget[0] -= 1
+        if budget[0] <= 0:
+            raise _CTAbort()
+
+    def _ct_stmt(self, st, env, budget, depth):
+        self._ct_tick(budget)
+        if isinstance(st, A.Let):
+            env[st.name] = (self._ct_expr(st.value, env, budget, depth)
+                            if st.value is not None else 0)
+        elif isinstance(st, A.Assign):
+            if not isinstance(st.target, A.Ident):
+                raise _CTAbort()
+            rhs = self._ct_expr(st.value, env, budget, depth)
+            if st.op == "=":
+                env[st.target.name] = rhs
+            else:
+                cur = env.get(st.target.name)
+                if cur is None:
+                    raise _CTAbort()
+                r = self._ct_binop(st.op[:-1], cur, rhs)
+                if r is None:
+                    raise _CTAbort()
+                env[st.target.name] = r
+        elif isinstance(st, A.Return):
+            raise _CTReturn(self._ct_expr(st.value, env, budget, depth)
+                            if st.value is not None else None)
+        elif isinstance(st, A.If):
+            if self._ct_expr(st.cond, env, budget, depth):
+                self._ct_body(st.then, env, budget, depth)
+            elif st.els is not None:
+                self._ct_body(st.els, env, budget, depth)
+        elif isinstance(st, A.While):
+            while self._ct_expr(st.cond, env, budget, depth):
+                self._ct_tick(budget)
+                self._ct_body(st.body, env, budget, depth)
+        elif isinstance(st, A.For):
+            start = self._ct_expr(st.start, env, budget, depth)
+            end = self._ct_expr(st.end, env, budget, depth)
+            step = (self._ct_expr(st.step, env, budget, depth)
+                    if st.step is not None else 1)
+            if step == 0:
+                raise _CTAbort()
+            i = start
+            while (i <= end if st.inclusive else i < end) if step > 0 \
+                    else (i >= end if st.inclusive else i > end):
+                self._ct_tick(budget)
+                env[st.var] = i
+                self._ct_body(st.body, env, budget, depth)
+                i += step
+        elif isinstance(st, A.Block):
+            self._ct_body(st.body, env, budget, depth)
+        elif isinstance(st, A.ExprStmt):
+            self._ct_expr(st.expr, env, budget, depth)
+        else:
+            raise _CTAbort()   # match/defer/asm/... : không gấp được
+
+    def _ct_expr(self, e, env, budget, depth):
+        self._ct_tick(budget)
+        if isinstance(e, A.IntLit):
+            try:
+                return int(e.value, 0)
+            except ValueError:
+                raise _CTAbort()
+        if isinstance(e, A.CharLit):
+            if len(e.value) == 1:
+                return ord(e.value)
+            raise _CTAbort()
+        if isinstance(e, A.BoolLit):
+            return 1 if e.value else 0
+        if isinstance(e, A.Ident):
+            if e.name in env:
+                return env[e.name]
+            if e.name in self.const_ints:
+                return self.const_ints[e.name]
+            if e.name in self.enum_of_variant:
+                return self.enums[self.enum_of_variant[e.name]][e.name]
+            raise _CTAbort()
+        if isinstance(e, A.Unary):
+            v = self._ct_expr(e.operand, env, budget, depth)
+            if e.op == "-":
+                return -v
+            if e.op == "~":
+                return ~v
+            if e.op == "+":
+                return v
+            if e.op == "!":
+                return 0 if v else 1
+            raise _CTAbort()
+        if isinstance(e, A.Binary):
+            a = self._ct_expr(e.left, env, budget, depth)
+            if e.op == "&&":
+                return 1 if (a and self._ct_expr(e.right, env, budget, depth)) else 0
+            if e.op == "||":
+                return 1 if (a or self._ct_expr(e.right, env, budget, depth)) else 0
+            b = self._ct_expr(e.right, env, budget, depth)
+            r = self._ct_binop(e.op, a, b)
+            if r is None:
+                raise _CTAbort()
+            return r
+        if isinstance(e, A.Ternary):
+            c = self._ct_expr(e.cond, env, budget, depth)
+            return self._ct_expr(e.then if c else e.els, env, budget, depth)
+        if isinstance(e, A.Cast):
+            return self._ct_expr(e.expr, env, budget, depth)
+        if isinstance(e, A.Call) and isinstance(e.func, A.Ident):
+            argvals = [self._ct_expr(a, env, budget, depth) for a in e.args]
+            return self._ct_call(e.func.name, argvals, budget, depth)
+        raise _CTAbort()
 
     # ---------- thu thập khai báo ----------
     def collect_types(self):
@@ -237,6 +482,14 @@ class Checker:
         for it in self.prog.items:
             if isinstance(it, A.Function):
                 self.cur_file = getattr(it, "src_file", None)
+                # Hàm G (có thân, không 'extern') trùng tên hàm libc -> lỗi C khó
+                # hiểu về sau. Báo sớm bằng chẩn đoán G rõ ràng.
+                if (it.body is not None and not it.is_extern
+                        and it.name in LIBC_NAMES):
+                    self.err(
+                        f"tên hàm '{it.name}' trùng với hàm thư viện chuẩn C "
+                        f"(runtime nạp sẵn) — đổi tên (vd '{it.name}_g' hoặc một "
+                        f"tên khác) để tránh xung đột khi biên dịch", it)
                 # Định nghĩa trùng (cả hai có thân) sinh lỗi redefinition trong C.
                 # Một prototype 'extern' + một định nghĩa thì hợp lệ.
                 prev = self.func_defs.get(it.name)
@@ -400,30 +653,38 @@ class Checker:
     def resolve(self, ty: A.Type) -> T.GType:
         if ty is None:
             return T.UNKNOWN
-        base = ty.name
-        if base in T.PRIMITIVES:
-            g = T.PRIMITIVES[base]
-        elif base in self.structs:
-            g = T.GType("struct", name=base)
-        elif base in self.enums:
-            g = T.GType("enum", name=base)
-        else:
-            sug = suggest(base, self.type_names)
-            msg = f"kiểu chưa biết: '{base}'"
-            if sug:
-                msg += f" — có phải '{sug}'?"
-            raise CheckError(msg, ty.line, ty.col, self.cur_file)
-        # Mảng nhiều chiều: bọc từ chiều TRONG ra NGOÀI để [N][M]T = array(N, array(M, T)).
+        # ----- chiều mảng: fold về số nguyên & ghi lại vào node (cho codegen) -----
+        # Bọc từ chiều TRONG ra NGOÀI: [N][M]T = array(N, array(M, T)).
         dims = ty.dims if ty.dims is not None else (
             [ty.array] if ty.array is not None else [])
         dims = [self._fold_dim(d, ty) for d in dims]
-        # Ghi đè lại vào node cú pháp để codegen (đọc thẳng ty.dims/ty.array) thấy
-        # giá trị đã fold (số nguyên), không còn tên hằng tượng trưng.
         if ty.dims is not None:
             ty.dims = dims
             ty.array = dims[0] if dims else None
         elif ty.array is not None and dims:
             ty.array = dims[0]
+        # ----- kiểu cơ sở -----
+        if getattr(ty, "is_fn", False):
+            pts = tuple(self.resolve(p) for p in (ty.fn_params or []))
+            rt = self.resolve(ty.fn_ret) if ty.fn_ret is not None else T.VOID
+            g = T.GType("func", params=pts, ret=rt)
+        else:
+            base = ty.name
+            if base in T.PRIMITIVES:
+                g = T.PRIMITIVES[base]
+            elif base in self.structs:
+                g = T.GType("struct", name=base)
+            elif base in self.enums:
+                g = T.GType("enum", name=base)
+            else:
+                sug = suggest(base, self.type_names)
+                msg = f"kiểu chưa biết: '{base}'"
+                if sug:
+                    msg += f" — có phải '{sug}'?"
+                raise CheckError(msg, ty.line, ty.col, self.cur_file)
+        # con trỏ-phần-tử ([N]*T) -> bọc mảng (trong->ngoài) -> con trỏ ngoài (*[N]T)
+        for _ in range(getattr(ty, "elem_ptr", 0)):
+            g = T.ptr_of(g)
         for d in reversed(dims):
             g = T.array_of(g, d)
         for _ in range(ty.ptr):
@@ -431,20 +692,30 @@ class Checker:
         return g
 
     def _fold_dim(self, d, ty):
-        """Chuyển một chiều mảng tượng trưng (tên hằng) thành số nguyên.
-        Số / 'dyn' giữ nguyên. Tên không phải hằng nguyên -> lỗi rõ ràng."""
-        if not isinstance(d, str) or d == "dyn":
+        """Chuyển một chiều mảng thành số nguyên dương. Chấp nhận: số, tên hằng,
+        hoặc biểu thức hằng (literal/tên hằng/phép toán giữa hằng). 'dyn' giữ
+        nguyên. Không fold được hoặc không dương -> lỗi rõ ràng."""
+        if d == "dyn":
             return d
-        v = getattr(self, "const_ints", {}).get(d)
-        if v is None:
-            raise CheckError(
-                f"cỡ mảng '{d}' phải là hằng số nguyên đã biết "
-                f"(const/let bất biến gán giá trị hằng)", ty.line, ty.col,
-                self.cur_file)
+        if isinstance(d, int):
+            v = d
+        elif isinstance(d, str):   # tên hằng trần (đường cũ, giữ tương thích)
+            v = getattr(self, "const_ints", {}).get(d)
+            if v is None:
+                raise CheckError(
+                    f"cỡ mảng '{d}' phải là hằng số nguyên đã biết "
+                    f"(const/let bất biến gán giá trị hằng)", ty.line, ty.col,
+                    self.cur_file)
+        else:                      # nút biểu thức AST: '[N+1]', '[2*CAP]'...
+            v = self._fold_const_int(d)
+            if v is None:
+                raise CheckError(
+                    "cỡ mảng phải là biểu thức hằng số nguyên (literal, tên hằng, "
+                    "hoặc phép toán giữa các hằng đã biết)", ty.line, ty.col,
+                    self.cur_file)
         if v <= 0:
             raise CheckError(
-                f"cỡ mảng '{d}' = {v} phải là số dương", ty.line, ty.col,
-                self.cur_file)
+                f"cỡ mảng = {v} phải là số dương", ty.line, ty.col, self.cur_file)
         return v
 
     # ---------- scope ----------
@@ -813,6 +1084,10 @@ class Checker:
             self.err(
                 f"không thể gán cả mảng tĩnh '{self.tyname(tt)}' bằng '=' "
                 f"(sao chép từng phần tử, hoặc dùng con trỏ/[]T)", st)
+        # Số học con trỏ qua '+='/'-=' : 'p += n' / 'p -= n' với p là con trỏ (hoặc
+        # []T phân rã) và n nguyên — hợp lệ trong C, di chuyển con trỏ n phần tử.
+        if st.op in ("+=", "-=") and self._ptrlike(tt) and vt.is_integer():
+            return
         if not self.assignable(tt, vt):
             self.err(
                 f"không thể gán giá trị kiểu '{self.tyname(vt)}' cho ô nhớ kiểu "
@@ -956,6 +1231,11 @@ class Checker:
             self.infer(e.expr)
             return self.resolve(e.type)
         if isinstance(e, A.SizeOf):
+            # Fold chiều mảng tượng trưng/biểu thức khi base là KIỂU thật (kể cả
+            # kiểu hàm) — để 'sizeof([CAP+1]int)' thành hằng số biên dịch. Còn
+            # 'sizeof(biến)' (name là tên biến) thì để codegen tự lo.
+            if getattr(e.type, "is_fn", False) or e.type.name in self.type_names:
+                self.resolve(e.type)
             return T.USIZE
         if isinstance(e, A.SizeOfExpr):
             self.infer(e.expr)
@@ -993,7 +1273,20 @@ class Checker:
             msg += f" — có phải '{sug}'?"
         self.err(msg, e)
 
+    _REL_OPS = {"<", ">", "<=", ">="}
+
     def infer_binary(self, e: A.Binary):
+        # Bắt "so sánh dây chuyền" kiểu toán học: 'a < b < c' trong C/G nghĩa là
+        # '(a < b) < c' (so sánh một bool với c) — gần như luôn là lỗi. Báo lỗi
+        # rõ ràng thay vì để chương trình chạy sai âm thầm.
+        if e.op in self._REL_OPS:
+            for side in (e.left, e.right):
+                if isinstance(side, A.Binary) and side.op in self._REL_OPS:
+                    self.err(
+                        f"so sánh dây chuyền '{side.op}' ... '{e.op}' không có nghĩa "
+                        f"như toán học (kết hợp trái: '(a {side.op} b) {e.op} c' so "
+                        f"sánh một bool) — tách bằng '&&': '(a {side.op} b) && "
+                        f"(b {e.op} c)'", e)
         lt = self.infer(e.left)
         rt = self.infer(e.right)
         op = e.op
@@ -1013,6 +1306,13 @@ class Checker:
                     f"toán tử bit '{op}' cần hai số nguyên, nhận "
                     f"'{self.tyname(lt)}' và '{self.tyname(rt)}'", e)
             return lt if lt.kind == "int" else T.INT
+        # Chia/lấy dư cho HẰNG 0 là hành vi không xác định trong C — bắt sớm khi
+        # mẫu số gấp được thành 0 lúc biên dịch (literal, tên hằng, biểu thức hằng).
+        if op in ("/", "%") and not unk and lt.is_integer() and rt.is_integer():
+            if self._fold_const_int(e.right) == 0:
+                self.err(
+                    f"{'chia' if op == '/' else 'lấy dư'} cho 0 — mẫu số là hằng "
+                    f"số 0 (hành vi không xác định)", e)
         # số học con trỏ: CHỈ với con trỏ thật (*T) hoặc []T, KHÔNG với 'str'.
         # 'str' + int sẽ là số học con trỏ vào literal — gần như luôn là lỗi
         # (người dùng tưởng nối chuỗi). Chỉ '+'/'-' mới hợp lệ cho con trỏ.
@@ -1039,17 +1339,20 @@ class Checker:
     def _comparable(self, a: T.GType, b: T.GType) -> bool:
         if a.is_numeric() and b.is_numeric():
             return True
+        # Hai enum: CHỈ so sánh được khi cùng một enum (giá trị enum khác loại so
+        # với nhau gần như luôn là lỗi logic). Kiểm tra trước nhánh tập rộng bên
+        # dưới để không lọt 'EnumA == EnumB'.
+        if a.kind == "enum" and b.kind == "enum":
+            return a.name == b.name
         if {a.kind, b.kind} <= {"int", "char", "enum", "bool"}:
             return True
         if a.kind == "bool" and b.kind == "bool":
             return True
-        # con trỏ so với con trỏ / null
-        ap = a.kind in ("ptr", "str", "null") or self._is_dyn_array(a)
-        bp = b.kind in ("ptr", "str", "null") or self._is_dyn_array(b)
+        # con trỏ so với con trỏ / null (con trỏ hàm cũng là con trỏ)
+        ap = a.kind in ("ptr", "str", "null", "func") or self._is_dyn_array(a)
+        bp = b.kind in ("ptr", "str", "null", "func") or self._is_dyn_array(b)
         if ap and bp:
             return True
-        if a.kind == "enum" and b.kind == "enum":
-            return a.name == b.name
         return False
 
     def infer_unary(self, e: A.Unary):
@@ -1057,6 +1360,13 @@ class Checker:
         if e.op == "!":
             return T.BOOL
         if e.op == "&":
+            # '&' chỉ lấy được địa chỉ của một Ô NHỚ (lvalue). '&(a+b)', '&f()',
+            # '&(x as T)'... là rvalue -> C báo "lvalue required" khó hiểu; bắt sớm.
+            if not self._is_lvalue(e.operand):
+                self.err(
+                    "không thể lấy địa chỉ ('&') của giá trị tạm — chỉ lấy được "
+                    "địa chỉ của ô nhớ (biến/trường/phần tử/*con_trỏ). Gán vào một "
+                    "'let' trước rồi lấy '&' của biến đó", e)
             return T.ptr_of(ot)
         if e.op == "*":
             if ot.kind == "ptr":
@@ -1065,8 +1375,20 @@ class Checker:
                 return T.CHAR
             if ot.kind == "array":
                 return ot.elem
-            return T.UNKNOWN
+            if ot.kind == "unknown":
+                return T.UNKNOWN
+            self.err(
+                f"không thể giải tham chiếu ('*') giá trị kiểu '{self.tyname(ot)}' "
+                f"(chỉ áp dụng cho con trỏ)", e)
         return ot  # - , ~
+
+    @staticmethod
+    def _is_lvalue(e) -> bool:
+        """Biểu thức có phải ô nhớ lấy địa chỉ được (lvalue) không? Biến/trường/
+        phần tử/deref con trỏ là lvalue; lời gọi, toán tử, ép kiểu, literal là rvalue."""
+        if isinstance(e, (A.Ident, A.FieldAccess, A.Index)):
+            return True
+        return isinstance(e, A.Unary) and e.op == "*"
 
     def infer_index(self, e: A.Index):
         bt = self.infer(e.base)
@@ -1217,6 +1539,16 @@ class Checker:
                         f"'{self.tyname(pt)}' nhưng nhận '{self.tyname(at)}'", e)
             return fdef.ret
         if ft.kind == "func":
+            # Gọi qua một GIÁ TRỊ con trỏ hàm (biến/tham số/trường kiểu fn(...)->R).
+            if len(e.args) != len(ft.params):
+                self.err(
+                    f"con trỏ hàm cần {len(ft.params)} tham số nhưng nhận "
+                    f"{len(e.args)}", e)
+            for i, (at, pt) in enumerate(zip(arg_types, ft.params)):
+                if not self.assignable(pt, at):
+                    self.err(
+                        f"tham số {i + 1} (qua con trỏ hàm) cần "
+                        f"'{self.tyname(pt)}' nhưng nhận '{self.tyname(at)}'", e)
             return ft.ret
         return T.UNKNOWN
 
@@ -1319,14 +1651,49 @@ class Checker:
                     self.err(
                         f"len() cần mảng tĩnh hoặc chuỗi, nhận '{self.tyname(at)}'", e)
             return T.USIZE
-        if name in ("print", "println", "eprint", "eprintln"):
+        if name == "typeof":
+            # typeof(expr): trả về CHUỖI tên kiểu suy luận (hằng lúc biên dịch).
+            if len(e.args) != 1:
+                self.err("typeof(x) cần đúng 1 tham số", e)
+            if e.args:
+                self.infer(e.args[0])
+            return T.STR
+        if name == "swap":
+            # swap(a, b): tráo hai ô nhớ cùng kiểu (đánh giá địa chỉ đúng MỘT lần).
+            if len(e.args) != 2:
+                self.err("swap(a, b) cần đúng 2 tham số", e)
+            ta = self.infer(e.args[0]) if e.args else T.UNKNOWN
+            tb = self.infer(e.args[1]) if len(e.args) > 1 else T.UNKNOWN
+            for a in e.args:
+                self._check_lvalue_mutable(a, e)   # phải là ô nhớ khả biến
+            if not (self.assignable(ta, tb) and self.assignable(tb, ta)):
+                self.err(
+                    f"swap: hai đối số phải cùng kiểu, nhận '{self.tyname(ta)}' và "
+                    f"'{self.tyname(tb)}'", e)
+            return T.VOID
+        if name in ("print", "println", "eprint", "eprintln", "format"):
             arg_ts = [self.infer(a) for a in e.args]
+            # 'format' BẮT BUỘC có chuỗi định dạng literal đầu tiên (vì luôn dựng
+            # chuỗi kết quả); print thì cho phép in trực tiếp một giá trị.
+            if name == "format" and (not e.args
+                                     or not isinstance(e.args[0], A.StrLit)):
+                self.err("format(\"...\", ...): tham số đầu phải là chuỗi định dạng "
+                         "literal", e)
+            # print(x) (một giá trị, không chuỗi định dạng) là lối tắt hợp lệ;
+            # nhưng print(x, y, ...) KHÔNG có chuỗi định dạng thì mơ hồ — các đối
+            # số thừa sẽ bị bỏ âm thầm. Yêu cầu chuỗi định dạng tường minh.
+            if (name != "format" and len(e.args) > 1
+                    and not isinstance(e.args[0], A.StrLit)):
+                self.err(
+                    f"{name}(...) với nhiều đối số cần một chuỗi định dạng literal "
+                    f"làm tham số đầu (vd '{name}(\"{{}} {{}}\", a, b)') — nếu không, "
+                    f"các đối số sau đối số đầu sẽ bị bỏ qua", e)
             value_ts = arg_ts[1:] if (e.args and isinstance(e.args[0], A.StrLit)) else arg_ts
             for at in value_ts:
                 if at.kind in ("struct", "void") or self._is_static_array(at):
                     self.err(
-                        f"không thể in trực tiếp giá trị kiểu '{self.tyname(at)}' "
-                        f"(in từng trường/phần tử)", e)
+                        f"không thể định dạng trực tiếp giá trị kiểu "
+                        f"'{self.tyname(at)}' (dùng từng trường/phần tử)", e)
             if e.args and isinstance(e.args[0], A.StrLit):
                 keys = extract_placeholders(e.args[0].value)
                 want = len(keys)
@@ -1338,7 +1705,7 @@ class Checker:
                 # Khớp specifier tường minh với kiểu đối số (bắt UB của printf).
                 for key, at in zip(keys, value_ts):
                     self._check_fmt_spec(key, at, e)
-            return T.VOID
+            return T.STR if name == "format" else T.VOID
         if name == "assert":
             if not e.args:
                 self.err("assert(cond[, msg]) cần ít nhất 1 tham số", e)

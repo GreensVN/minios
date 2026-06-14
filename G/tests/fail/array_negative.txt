@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: cỡ mảng = -3 phải là số dương

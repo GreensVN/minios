@@ -1,0 +1,10 @@
+classify(-7) = âm
+classify(0) = không
+classify(42) = thường
+classify(500) = lớn
+bucket(30) = 15
+bucket(9) = 3
+bucket(25) = 5
+bucket(7) = 0
+dương âm khác
+total = 9

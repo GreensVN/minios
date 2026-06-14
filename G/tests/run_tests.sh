@@ -29,7 +29,14 @@ run_one() {
         cat "$TMP/$name.cc"
         fail=$((fail+1)); return
     fi
-    "$bin" >"$got" 2>&1
+    # Đầu vào tuỳ chọn: tests/input/<tên>.txt được đưa vào stdin (cho chương trình
+    # đọc input). Nếu không có, dùng /dev/null để EOF ngay (tất định, không treo).
+    local infile="$ROOT/tests/input/$name.txt"
+    if [ -f "$infile" ]; then
+        "$bin" <"$infile" >"$got" 2>&1
+    else
+        "$bin" </dev/null >"$got" 2>&1
+    fi
 
     if [ "$bless" = "1" ]; then
         cp "$got" "$exp"

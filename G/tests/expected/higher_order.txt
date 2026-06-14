@@ -1,0 +1,7 @@
+nguồn:   -2 5 0 9 -4 6 3 8 
+bình phương: 4 25 0 81 16 36 9 64 
+số dương:  5 9 6 3 8 
+tổng = 25, lớn nhất = 9
+có số chẵn? true | tất cả dương? false | đếm chẵn: 5 | vị trí chẵn đầu: 0
+x2(7) = 14
+x^2(7) = 49

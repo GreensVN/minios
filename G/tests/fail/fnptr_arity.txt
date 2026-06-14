@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: con trỏ hàm cần 2 tham số nhưng nhận 1

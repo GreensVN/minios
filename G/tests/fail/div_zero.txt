@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: chia cho 0 — mẫu số là hằng số 0 (hành vi không xác định)

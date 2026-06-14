@@ -37,6 +37,8 @@ class Codegen:
         self.global_inits = []       # (tên, biểu_thức) cho global khởi tạo lúc chạy
         self.scope_stack = []   # ngăn xếp scope cho defer (LIFO, theo block)
         self._tmp = 0
+        self.fnptr_typedefs = {}     # khoá chữ ký C -> tên typedef con trỏ hàm
+        self.fnptr_decls = []        # các dòng 'typedef R (*_gfnN)(...);' theo thứ tự
 
     # ---------- tiện ích ----------
     def w(self, line=""):
@@ -47,10 +49,39 @@ class Codegen:
         return f"{base}{self._tmp}"
 
     def c_type(self, t: A.Type) -> str:
-        """Kiểu cơ sở (gồm các mức con trỏ tường minh), KHÔNG gồm phần mảng."""
+        """Kiểu cơ sở (gồm con trỏ ngoài + con trỏ phần tử), KHÔNG gồm phần chiều
+        mảng. Kiểu hàm -> tên typedef con trỏ hàm (đã đăng ký)."""
+        if getattr(t, "is_fn", False):
+            return self._fnptr_typedef(t) + "*" * t.ptr
         base = TYPE_MAP.get(t.name, t.name)
-        base += "*" * t.ptr
+        base += "*" * (t.ptr + getattr(t, "elem_ptr", 0))
         return base
+
+    def _ctype_str(self, t) -> str:
+        """Chuỗi kiểu C ĐẦY ĐỦ cho ngữ cảnh kiểu trừu tượng (tham số typedef, cast):
+        mảng phân rã thành con trỏ; kiểu hàm -> tên typedef con trỏ hàm."""
+        if t is None:
+            return "void"
+        if getattr(t, "is_fn", False):
+            return self._fnptr_typedef(t) + "*" * t.ptr
+        base = TYPE_MAP.get(t.name, t.name)
+        stars = t.ptr + getattr(t, "elem_ptr", 0) + len(self._dims(t))
+        return base + "*" * stars
+
+    def _fnptr_typedef(self, t) -> str:
+        """Đăng ký (nếu chưa có) một typedef con trỏ hàm cho kiểu hàm 't', trả về
+        tên typedef. Dùng typedef giúp mọi nơi (biến/tham số/trường/trả về/mảng)
+        chỉ cần một tên kiểu C đơn giản — tránh cú pháp khai báo con trỏ hàm rối."""
+        params = [self._ctype_str(p) for p in (t.fn_params or [])]
+        ret = self._ctype_str(t.fn_ret)
+        key = f"{ret}({','.join(params)})"
+        name = self.fnptr_typedefs.get(key)
+        if name is None:
+            name = f"_gfn{len(self.fnptr_typedefs)}"
+            self.fnptr_typedefs[key] = name
+            plist = ", ".join(params) if params else "void"
+            self.fnptr_decls.append(f"typedef {ret} (*{name})({plist});")
+        return name
 
     def _dims(self, t: A.Type) -> list:
         """Chuẩn hóa danh sách chiều mảng từ A.Type (gộp dims/array)."""
@@ -191,6 +222,11 @@ class Codegen:
                     self.w(f"typedef struct {it.name} {it.name};")
             self.w("")
 
+        # Điểm chèn typedef con trỏ hàm: SAU enum + forward-decl struct (để typedef
+        # tham chiếu được tên struct/enum), TRƯỚC định nghĩa struct/global/hàm dùng
+        # chúng. Các typedef được gom dần khi sinh mã rồi splice vào đây ở cuối.
+        fnptr_at = len(self.out)
+
         # 1c) Định nghĩa struct theo thứ tự topo: struct nhúng struct khác THEO
         #     GIÁ TRỊ phải đứng sau struct đó (trường con trỏ không tạo ràng buộc).
         for name in self._topo_sort_structs(struct_defs):
@@ -228,6 +264,12 @@ class Codegen:
         #    khai báo (cho phép global tham chiếu global khai báo trước nó).
         self.emit_global_init_ctor()
 
+        # Splice các typedef con trỏ hàm vào vị trí đã dành sẵn (sau forward-decl).
+        if self.fnptr_decls:
+            block = ["// Con trỏ hàm (typedef sinh tự động cho kiểu fn(...)->R)."]
+            block += self.fnptr_decls + [""]
+            self.out[fnptr_at:fnptr_at] = block
+
         return "\n".join(self.out)
 
     def emit_global_init_ctor(self):
@@ -250,8 +292,12 @@ class Codegen:
         deps = {name: set() for name in struct_defs}
         for name, s in struct_defs.items():
             for f in s.fields:
-                # phụ thuộc chỉ khi nhúng trực tiếp theo giá trị (ptr=0, không mảng-con-trỏ)
-                if f.type.ptr == 0 and f.type.name in struct_defs:
+                # Phụ thuộc chỉ khi nhúng trực tiếp THEO GIÁ TRỊ: không con trỏ
+                # ngoài (*T), không con trỏ phần tử ([N]*T), không con trỏ hàm.
+                # (Mảng-theo-giá-trị '[N]T' vẫn cần kiểu đầy đủ -> vẫn là phụ thuộc.)
+                if (f.type.ptr == 0 and getattr(f.type, "elem_ptr", 0) == 0
+                        and not getattr(f.type, "is_fn", False)
+                        and f.type.name in struct_defs):
                     deps[name].add(f.type.name)
         order = []
         done = set()
@@ -477,10 +523,15 @@ class Codegen:
 
         init_c = self.gen_expr(st.value) if st.value is not None else None
         if st.type is not None:
-            self.w(self.c_decl(name, st.type, init_c, const=const) + ";")
+            if init_c is None:
+                # Không có initializer: zero-init '= {0}' (an toàn, tất định kiểu Go)
+                # thay vì để bộ nhớ rác (UB). '{0}' hợp lệ cho vô hướng/mảng/struct.
+                self.w(self.c_decl(name, st.type, "{0}", const=const) + ";")
+            else:
+                self.w(self.c_decl(name, st.type, init_c, const=const) + ";")
         else:
             if init_c is None:
-                self.w(f"int {name};")
+                self.w(f"int {name} = 0;")
             else:
                 q = "const " if const else ""
                 self.w(f"{q}__auto_type {name} = {init_c};")
@@ -496,7 +547,10 @@ class Codegen:
         return "{ " + ", ".join(parts) + " }"
 
     def _array_type_with_inferred_dims(self, decl_t: A.Type, lit: A.ArrayLit) -> A.Type:
-        """Điền các chiều mảng còn để trống bằng độ dài literal tương ứng."""
+        """Điền các chiều mảng còn để trống bằng độ dài literal tương ứng.
+        Dùng dataclasses.replace để GIỮ mọi trường khác (elem_ptr, is_fn,
+        fn_params, fn_ret...) — tránh đánh mất kiểu con trỏ hàm của phần tử."""
+        import dataclasses
         dims = self._dims(decl_t)
         if not dims:
             return decl_t
@@ -509,7 +563,7 @@ class Codegen:
             else:
                 filled.append(d)
             node = node.elements[0] if (isinstance(node, A.ArrayLit) and node.elements) else None
-        return A.Type(decl_t.name, ptr=decl_t.ptr, dims=filled, array=filled[0])
+        return dataclasses.replace(decl_t, dims=filled, array=filled[0])
 
     def _gtype_to_ctype_decl(self, gt: T.GType) -> A.Type:
         """Suy ra A.Type (cho c_decl) từ GType mảng đã suy luận (khi không có annotation)."""
@@ -523,6 +577,12 @@ class Codegen:
         while base.kind == "ptr":
             ptr += 1
             base = base.elem
+        if base.kind == "func":
+            return A.Type(
+                "fn", ptr=ptr, dims=dims or None,
+                array=(dims[0] if dims else None), is_fn=True,
+                fn_params=[self._gtype_to_ctype_decl(p) for p in base.params],
+                fn_ret=self._gtype_to_ctype_decl(base.ret))
         name = base.name if base.name else base.kind
         return A.Type(name, ptr=ptr, dims=dims or None,
                       array=(dims[0] if dims else None))
@@ -606,6 +666,10 @@ class Codegen:
             cast = self.c_decl("", ty, None, decay_first=True).strip()
             return self.c_decl(name, ty, f"({cast})({init_c})",
                                decay_first=True) + ";"
+        if elem_type is not None and elem_type.kind == "func":
+            # Phần tử là con trỏ hàm: dùng typedef (qua c_decl) để vẫn GỌI được.
+            ty = self._gtype_to_ctype_decl(elem_type)
+            return self.c_decl(name, ty, init_c) + ";"
         elem_c = T.c_type(elem_type if elem_type is not None else T.INT)
         return f"{elem_c} {name} = {init_c};"
 
@@ -654,14 +718,17 @@ class Codegen:
                 self.w("}")
 
     def gen_match(self, st: A.Match):
+        # Hạ 'match' về một chuỗi 'if' ĐỘC LẬP, mỗi nhánh khớp thì NHẢY tới nhãn
+        # cuối (goto). Cách này bảo đảm "nhánh đầu khớp thắng" mà vẫn cho nhánh có
+        # guard *rớt xuống* nhánh kế khi guard sai — điều chuỗi else-if không làm
+        # được (đã vào nhánh là khoá luôn). Nhờ đó binding + guard chạy đúng.
         subj_t = self.gtype_of(st.subject)
-        is_str = subj_t.kind == "str" or (subj_t.kind == "ptr" and subj_t.elem and subj_t.elem.kind == "char")
+        is_str = subj_t.kind == "str" or (
+            subj_t.kind == "ptr" and subj_t.elem and subj_t.elem.kind == "char")
         tmp = self.tmp("_gm")
+        end = self.tmp("_gmend")
         ctype = T.c_type(subj_t) if subj_t.kind != "unknown" else "__auto_type"
-        if ctype == "__auto_type":
-            self.w(f"{{ __auto_type {tmp} = {self.gen_expr(st.subject)};")
-        else:
-            self.w(f"{{ {ctype} {tmp} = {self.gen_expr(st.subject)};")
+        self.w(f"{{ {ctype} {tmp} = {self.gen_expr(st.subject)};")
         self.indent += 1
 
         def cond_for(pats):
@@ -678,58 +745,46 @@ class Codegen:
                     tests.append(f"strcmp({tmp}, {pc}) == 0")
                 else:
                     tests.append(f"{tmp} == {pc}")
-            return " || ".join(tests)
+            return " || ".join(tests) if tests else "1"
 
         bindings = getattr(st, "bindings", [None] * len(st.arms))
-        # Binding pattern (kiểu Rust 'x =>' / 'x if x>0 =>'): bắt subject vào biến.
-        # Khai báo MỘT lần ở scope match (giá trị subject đã ở 'tmp'), để guard và
-        # thân nhánh dùng được; mỗi nhánh binding gán lại tên đó.
-        bctype = ctype if ctype != "__auto_type" else "__auto_type"
-
-        first = True
-        default_body = None
-        default_bind = None
         for (pats, guard, body), bcname in zip(st.arms, bindings):
             is_bind = bcname is not None
-            # Mặc định tuyệt đối: '_' hoặc binding, đều KHÔNG guard -> để cuối.
-            if (pats is None or is_bind) and guard is None:
-                default_body = body
-                default_bind = bcname
-                continue
-            kw = "if" if first else "else if"
-            first = False
+            pat_cond = "1" if (is_bind or pats is None) else cond_for(pats)
             if is_bind:
-                # binding + guard: luôn khớp pattern, lọc bằng guard. Cần đưa biến
-                # binding vào phạm vi trước khi tính guard -> dùng khối + cờ.
-                self.w(f"{kw} (1) {{")
+                # Đưa biến binding (kiểu Rust 'x =>' / 'x if x>0 =>') vào phạm vi —
+                # cho cả guard lẫn thân nhánh — rồi mới kiểm guard.
+                self.w("{")
                 self.indent += 1
-                self.w(f"{bctype} {bcname} = {tmp}; (void){bcname};")
-                self.w(f"if ({self.gen_expr(guard)}) {{")
-                self.gen_scoped_body(body, is_loop=False)
-                self.w("} else goto {0};".format(self._match_next_label()))
+                self.w(f"{ctype} {bcname} = {tmp}; (void){bcname};")
+                cond = "1" if guard is None else f"({self.gen_expr(guard)})"
+                self.w(f"if ({cond}) {{")
+                self._gen_arm_body(body, end)
+                self.w("}")
                 self.indent -= 1
                 self.w("}")
-                self.w(f"{self._cur_match_label}: ;")
-                continue
-            if pats is None:
-                cond = f"({self.gen_expr(guard)})"            # '_ if g'
-            elif guard is None:
-                cond = cond_for(pats)
             else:
-                cond = f"({cond_for(pats)}) && ({self.gen_expr(guard)})"
-            self.w(f"{kw} ({cond}) {{")
-            self.gen_scoped_body(body, is_loop=False)
-            self.w("}")
-        if default_body is not None:
-            self.w("else {" if not first else "{")
-            if default_bind is not None:
-                self.indent += 1
-                self.w(f"{bctype} {default_bind} = {tmp}; (void){default_bind};")
-                self.indent -= 1
-            self.gen_scoped_body(default_body, is_loop=False)
-            self.w("}")
+                if guard is None:
+                    cond = pat_cond
+                elif pat_cond == "1":
+                    cond = f"({self.gen_expr(guard)})"            # '_ if g'
+                else:
+                    cond = f"({pat_cond}) && ({self.gen_expr(guard)})"
+                self.w(f"if ({cond}) {{")
+                self._gen_arm_body(body, end)
+                self.w("}")
+        self.w(f"{end}: ;")
         self.indent -= 1
         self.w("}")
+
+    def _gen_arm_body(self, body, end_label):
+        """Sinh thân một nhánh match rồi nhảy tới nhãn cuối (nếu thân chưa tự
+        thoát bằng return/break/continue) — bảo đảm chỉ nhánh khớp đầu tiên chạy."""
+        self.gen_scoped_body(body, is_loop=False)
+        if not (body and isinstance(body[-1], (A.Return, A.Break, A.Continue))):
+            self.indent += 1
+            self.w(f"goto {end_label};")
+            self.indent -= 1
 
     def gen_asm(self, st: A.Asm):
         lines = [l.strip() for l in st.code.split("\n") if l.strip()]
@@ -762,6 +817,15 @@ class Codegen:
                 rt = self.gtype_of(e.right)
                 if lt.kind == "float" or rt.kind == "float":
                     return f"fmod({lc}, {rc})"
+            # So sánh BẰNG NỘI DUNG cho chuỗi: 'a == b' / 'a != b' trên str dùng
+            # g_str_eq (an toàn null) thay vì so con trỏ — nhất quán với 'match'
+            # chuỗi (strcmp) và tránh bẫy so địa chỉ literal.
+            if e.op in ("==", "!="):
+                lt = self.gtype_of(e.left)
+                rt = self.gtype_of(e.right)
+                if self._is_stringy(lt) and self._is_stringy(rt):
+                    eq = f"g_str_eq({lc}, {rc})"
+                    return eq if e.op == "==" else f"(!{eq})"
             return f"({lc} {e.op} {rc})"
         if isinstance(e, A.Unary):
             return f"({e.op}{self.gen_expr(e.operand)})"
@@ -780,7 +844,8 @@ class Codegen:
         if isinstance(e, A.SizeOf):
             # Kích thước phải gồm CẢ các chiều mảng: sizeof([10]int) = 10*sizeof(int).
             # c_decl với tên rỗng sinh "int [10]" / "int (*)[3]" hợp lệ trong sizeof.
-            return f"sizeof({self.c_decl('', e.type)})"
+            op = "_Alignof" if getattr(e, "align", False) else "sizeof"
+            return f"{op}({self.c_decl('', e.type)})"
         if isinstance(e, A.SizeOfExpr):
             return f"sizeof({self.gen_expr(e.expr)})"
         if isinstance(e, A.ArrayLit):
@@ -797,6 +862,16 @@ class Codegen:
         if isinstance(e, (A.Ident, A.FieldAccess, A.Index, A.StructLit)):
             return True
         return isinstance(e, A.Unary) and e.op == "*"
+
+    @staticmethod
+    def _is_stringy(t) -> bool:
+        """Kiểu có phải 'chuỗi C' không (str hoặc *char)? Dùng để so sánh '=='/
+        '!=' theo NỘI DUNG (g_str_eq) thay vì so địa chỉ con trỏ. KHÔNG tính
+        'null' để 's == null' vẫn là phép kiểm tra con trỏ NULL thông thường."""
+        if t is None:
+            return False
+        return t.kind == "str" or (
+            t.kind == "ptr" and t.elem is not None and t.elem.kind == "char")
 
     def gen_call(self, e: A.Call):
         # method call (đã phân giải trong checker)
@@ -823,6 +898,8 @@ class Codegen:
             name = e.func.name
             if name in ("print", "println", "eprint", "eprintln"):
                 return self.gen_print(e, name)
+            if name == "format":
+                return self.gen_format(e)
             if name == "len":
                 return self.gen_len(e)
             if name == "assert":
@@ -834,6 +911,18 @@ class Codegen:
                 loc = self.gen_expr(e.args[0]) if e.args else self.c_string(
                     f"{name}() tại {getattr(e, 'line', 0)}")
                 return f"g_{name}({loc})"
+            if name == "typeof":
+                # Hằng chuỗi: tên kiểu suy luận của đối số (không đánh giá đối số).
+                gt = self.gtype_of(e.args[0]) if e.args else T.UNKNOWN
+                return self.c_string(str(gt))
+            if name == "swap":
+                # Lấy ĐỊA CHỈ hai ô nhớ một lần rồi tráo qua biến tạm — an toàn cả
+                # khi đối số có tác dụng phụ (vd swap(a[i()], a[j()])).
+                a = self.gen_expr(e.args[0])
+                b = self.gen_expr(e.args[1])
+                pa, pb, tv = self.tmp("_gpa"), self.tmp("_gpb"), self.tmp("_gtv")
+                return (f"({{ __auto_type {pa} = &({a}); __auto_type {pb} = &({b}); "
+                        f"__auto_type {tv} = *{pa}; *{pa} = *{pb}; *{pb} = {tv}; }})")
             if name in ("min", "max"):
                 op = "<" if name == "min" else ">"
                 a, b = e.args[0], e.args[1]
@@ -922,6 +1011,30 @@ class Codegen:
             return f"fprintf({stream}, {fmt}, {', '.join(c_args)})"
         return f"fprintf({stream}, {fmt})"
 
+    def gen_format(self, e: A.Call):
+        """format("...", a, b) -> chuỗi MỚI trên heap (kiểu Zig std.fmt; nhớ g_free).
+        Vật hoá đối số vào biến tạm (đánh giá đúng MỘT lần dù dùng 2 lần trong
+        snprintf), đo độ dài bằng snprintf(NULL,0,...) rồi cấp phát vừa khít."""
+        template = e.args[0].value
+        value_args = e.args[1:]
+        decls = []
+        temps = []
+        for a in value_args:
+            tv = self.tmp("_gfa")
+            decls.append(f"__auto_type {tv} = ({self.gen_expr(a)});")
+            temps.append(tv)
+        fmt, c_args = self.build_format(template, value_args, newline=False,
+                                        arg_cexprs=temps)
+        n = self.tmp("_gfn")
+        buf = self.tmp("_gfb")
+        tail = (", " + ", ".join(c_args)) if c_args else ""
+        body = (" ".join(decls) + " ") if decls else ""
+        return ("({ " + body +
+                f"int {n} = snprintf(NULL, 0, {fmt}{tail}); "
+                f"char* {buf} = (char*)malloc((size_t){n} + 1); "
+                f"if ({buf}) snprintf({buf}, (size_t){n} + 1, {fmt}{tail}); "
+                f"(const char*){buf}; }})")
+
     # key tường minh -> (specifier, kiểu_ép). Ép kiểu để specifier luôn KHỚP
     # đối số trên mọi nền tảng (int64_t có thể là 'long' hoặc 'long long').
     # Dùng biến thể 'll' cho hex/oct để không cắt cụt giá trị 64-bit.
@@ -976,15 +1089,18 @@ class Codegen:
             rest = rest[:-1] + "f"
         return "%" + align + zero + width + prec + rest
 
-    def _fmt_placeholder(self, key, arg):
+    def _fmt_placeholder(self, key, arg, ce=None):
         """Trả về (specifier, c_arg | None) cho một placeholder, kèm ép kiểu
         để printf luôn nhận đúng kiểu (an toàn đa nền tảng).
-        Hỗ trợ '{key:flags}' với flags width/precision/căn lề."""
+        Hỗ trợ '{key:flags}' với flags width/precision/căn lề.
+        'ce' (tuỳ chọn): biểu thức C của đối số đã tính sẵn (vd biến tạm trong
+        format()) — nếu None thì sinh trực tiếp từ 'arg'."""
         key, sep, flags = key.partition(":")
         if sep:
-            spec, carg = self._fmt_placeholder(key, arg)
+            spec, carg = self._fmt_placeholder(key, arg, ce)
             return self._apply_fmt_flags(spec, flags), carg
-        ce = self.gen_expr(arg) if arg is not None else None
+        if ce is None:
+            ce = self.gen_expr(arg) if arg is not None else None
         # bool tường minh -> in true/false
         if key == "b":
             if ce is not None:
@@ -1025,9 +1141,11 @@ class Codegen:
             "%g": "double", "%c": "int", "%p": "void*",
         }.get(spec)   # %s -> None (không ép)
 
-    def build_format(self, raw, value_args, newline=False):
+    def build_format(self, raw, value_args, newline=False, arg_cexprs=None):
         """Sinh chuỗi định dạng C + danh sách biểu thức C tương ứng.
-        Placeholder rỗng {} => tự suy ra theo kiểu của tham số."""
+        Placeholder rỗng {} => tự suy ra theo kiểu của tham số.
+        'arg_cexprs' (tuỳ chọn): biểu thức C đã tính sẵn cho từng đối số (vd biến
+        tạm của format()), song song với value_args."""
         result = []
         c_args = []
         ai = 0
@@ -1045,8 +1163,10 @@ class Codegen:
                     result.append("{"); i += 1; continue
                 key = raw[i + 1:j]
                 arg = value_args[ai] if ai < len(value_args) else None
+                ce = (arg_cexprs[ai] if (arg_cexprs is not None
+                                         and ai < len(arg_cexprs)) else None)
                 ai += 1
-                spec, carg = self._fmt_placeholder(key, arg)
+                spec, carg = self._fmt_placeholder(key, arg, ce)
                 result.append(spec)
                 if carg is not None:
                     c_args.append(carg)

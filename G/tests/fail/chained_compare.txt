@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: so sánh dây chuyền '<' ... '<' không có nghĩa như toán học (kết hợp trái: '(a < b) < c' so sánh một bool) — tách bằng '&&': '(a < b) && (b < c)'

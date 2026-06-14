@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể lấy địa chỉ ('&') của giá trị tạm — chỉ lấy được địa chỉ của ô nhớ (biến/trường/phần tử/*con_trỏ). Gán vào một 'let' trước rồi lấy '&' của biến đó

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: chuỗi định dạng có 2 placeholder nhưng nhận 1 đối số

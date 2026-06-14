@@ -1,0 +1,3 @@
+tổng qua mảng con trỏ = 60
+b sau khi sửa = 200
+tổng node = 600

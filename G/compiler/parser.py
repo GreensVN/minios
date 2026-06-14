@@ -223,22 +223,42 @@ class Parser:
         ptr = 0
         while self.accept("op", "*"):
             ptr += 1
-        # Mảng (có thể nhiều chiều): [N][M]T | []T | [N]T
-        # N là literal nguyên HOẶC tên hằng (vd '[CAP]int') — checker sẽ fold.
+        # Mảng (có thể nhiều chiều): [N][M]T | []T | [N]T | [N+1]T
+        # Mỗi chiều: rỗng (=> []T động), hoặc một BIỂU THỨC HẰNG (literal / tên
+        # hằng / phép toán giữa các hằng, vd '[CAP*2+1]') — checker sẽ fold.
         dims = []
         while self.is_op("["):
             self.advance()
             if self.is_op("]"):
                 dims.append("dyn")        # []T : con trỏ động
-            elif self.check("int"):
-                dims.append(int(self.advance().value, 0))
-            elif self.check("id"):
-                dims.append(self.advance().value)   # tên hằng (string) -> fold sau
             else:
-                self.error("cỡ mảng phải là số nguyên hoặc tên hằng")
+                saved = self.no_struct_lit
+                self.no_struct_lit = True
+                szexpr = self.parse_expr()
+                self.no_struct_lit = saved
+                dims.append(int(szexpr.value, 0)
+                            if isinstance(szexpr, A.IntLit) else szexpr)
             self.expect("op", "]")
-        name = self.expect("id").value
-        ty = A.Type(name, ptr=ptr, **self.pos_of(t))
+        # Con trỏ trên PHẦN TỬ: '[N]*T' = mảng các con trỏ (khác '*[N]T').
+        elem_ptr = 0
+        while self.accept("op", "*"):
+            elem_ptr += 1
+        # Kiểu con trỏ hàm: 'fn(P1, P2, ...) -> R' (R tuỳ chọn; mặc định void).
+        if self.is_kw("fn"):
+            self.advance()
+            self.expect("op", "(")
+            fparams = []
+            while not self.is_op(")"):
+                fparams.append(self.parse_type())
+                if not self.accept("op", ","):
+                    break
+            self.expect("op", ")")
+            fret = self.parse_type() if self.accept("op", "->") else None
+            ty = A.Type("fn", ptr=ptr, elem_ptr=elem_ptr, is_fn=True,
+                        fn_params=fparams, fn_ret=fret, **self.pos_of(t))
+        else:
+            name = self.expect("id").value
+            ty = A.Type(name, ptr=ptr, elem_ptr=elem_ptr, **self.pos_of(t))
         if dims:
             ty.dims = dims
             ty.array = dims[0]            # chiều ngoài cùng (giữ tương thích)
@@ -423,7 +443,7 @@ class Parser:
         return cond
 
     def parse_binary(self, min_prec):
-        left = self.parse_unary()
+        left = self.parse_cast()
         while self.cur().kind == "op" and self.cur().value in BIN_PREC:
             op = self.cur().value
             prec = BIN_PREC[op]
@@ -433,6 +453,19 @@ class Parser:
             right = self.parse_binary(prec + 1)
             left = A.Binary(op, left, right, t.line, t.col)
         return left
+
+    def parse_cast(self):
+        """Phép ép kiểu 'expr as T' — ràng buộc LỎNG hơn tiền tố (-, *, &, !, ~)
+        nhưng CHẶT hơn toán tử hai ngôi, đúng như Rust. Nhờ vậy '&x as *T' nghĩa
+        là '(&x) as *T' và '-x as int' nghĩa là '(-x) as int' (không còn bắt địa
+        chỉ/đảo dấu của chính phép ép). Cho phép chuỗi ép: 'x as int as i64'.
+        (Muốn dùng hậu tố sau ép — như '.field' — cần ngoặc: '(x as *T).f'.)"""
+        e = self.parse_unary()
+        while self.is_kw("as"):
+            t = self.advance()
+            ty = self.parse_type()
+            e = A.Cast(e, ty, t.line, t.col)
+        return e
 
     def parse_unary(self):
         if self.cur().kind == "op" and self.cur().value in ("-", "!", "*", "&", "~"):
@@ -466,10 +499,6 @@ class Parser:
             elif self.accept("op", "."):
                 fld = self.expect("id").value
                 e = A.FieldAccess(e, fld, t.line, t.col)
-            elif self.is_kw("as"):
-                self.advance()
-                ty = self.parse_type()
-                e = A.Cast(e, ty, t.line, t.col)
             else:
                 break
         return e
@@ -490,19 +519,25 @@ class Parser:
             self.advance(); return A.BoolLit(False, t.line, t.col)
         if self.is_kw("null"):
             self.advance(); return A.NullLit(t.line, t.col)
-        if self.is_kw("sizeof"):
+        if self.is_kw("sizeof") or self.is_kw("alignof"):
+            is_align = self.cur().value == "alignof"
             self.advance()
             self.expect("op", "(")
-            # sizeof(*T) / sizeof([N]T): chắc chắn là kiểu
+            # sizeof/alignof(*T) / ([N]T): chắc chắn là kiểu
             if self.is_op("*") or self.is_op("["):
                 ty = self.parse_type()
                 self.expect("op", ")")
-                return A.SizeOf(ty, t.line, t.col)
+                return A.SizeOf(ty, t.line, t.col, align=is_align)
             e = self.parse_expr()
             self.expect("op", ")")
-            # tên trần: C cho phép sizeof(name) cho cả kiểu lẫn biến
+            # tên trần: cho cả kiểu lẫn biến (C: sizeof(name) / _Alignof(Type))
             if isinstance(e, A.Ident):
-                return A.SizeOf(A.Type(e.name, line=e.line, col=e.col), t.line, t.col)
+                return A.SizeOf(A.Type(e.name, line=e.line, col=e.col),
+                                t.line, t.col, align=is_align)
+            # alignof chỉ áp dụng cho KIỂU (C11 _Alignof) — không nhận biểu thức tuỳ ý
+            if is_align:
+                self.error("alignof cần một tên kiểu (vd 'alignof(i64)', "
+                           "'alignof(*Node)', 'alignof([4]int)')")
             return A.SizeOfExpr(e, t.line, t.col)
         if self.is_op("["):    # array literal [a, b, c]
             self.advance()
