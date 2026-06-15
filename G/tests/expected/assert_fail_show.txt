@@ -1,0 +1,14 @@
+✗ so sai (dòng 7)
+    trái:  4
+    phải:  5
+✗ struct sai (dòng 8)
+    trái:  Point { x: 1, y: 2 }
+    phải:  Point { x: 1, y: 9 }
+✗ enum ne sai (dòng 9)
+    trái:  Green
+    phải:  Green
+✗ chuoi sai (dòng 10)
+    trái:  abc
+    phải:  abd
+
+✗ 4/4 ca test TRƯỢT (0 đạt)

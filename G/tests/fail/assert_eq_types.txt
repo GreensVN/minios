@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: check_eq: hai vế phải cùng kiểu để so sánh, nhận 'int' và 'str'

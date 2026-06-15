@@ -231,6 +231,15 @@ class Lexer:
                 while self.peek().isdigit() or self.peek() == "_":
                     self.advance()
         text = self.src[start:self.i].replace("_", "")
+        # Số nguyên có số 0 DẪN ĐẦU ('010') trong C là BÁT PHÂN (= 8) — một bẫy
+        # im lặng. G dùng '0o' tường minh cho bát phân, nên ở đây từ chối thẳng
+        # với gợi ý rõ ràng thay vì sinh giá trị sai. ('0' đơn lẻ vẫn hợp lệ.)
+        if not is_float and len(text) > 1 and text[0] == "0":
+            raise LexError(
+                f"số nguyên '{text}' có số 0 dẫn đầu — trong C đây là BÁT PHÂN "
+                f"(dễ nhầm). Bỏ số 0 (vd '{text.lstrip('0') or '0'}'), hoặc dùng "
+                f"'0o{text.lstrip('0') or '0'}' cho bát phân / '0x..' cho hex",
+                line, col)
         self.add("float" if is_float else "int", text, line, col)
 
     def read_string(self, line, col):

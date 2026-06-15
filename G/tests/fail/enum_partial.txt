@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: match trên enum 'Dir' chưa vét cạn — thiếu biến thể: S, W (liệt kê đủ hoặc thêm nhánh '_')

@@ -1,0 +1,1 @@
+lỗi từ vựng: số nguyên '010' có số 0 dẫn đầu — trong C đây là BÁT PHÂN (dễ nhầm). Bỏ số 0 (vd '10'), hoặc dùng '0o10' cho bát phân / '0x..' cho hex
