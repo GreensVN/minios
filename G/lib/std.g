@@ -896,3 +896,98 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
     let ad: f64 = (d < 0.0) ? -d : d
     return ad <= eps
 }
+
+// ============================================================================
+//  Tiện ích mảng SỐ THỰC (f64) — bù cho bộ hàm mảng số nguyên ở trên
+//  (truyền con trỏ + độ dài; 'array_*_f' cần n >= 1)
+// ============================================================================
+
+// Tổng các phần tử
+fn sum_slice_f(a: *f64, n: int) -> f64 {
+    let mut s: f64 = 0.0
+    for i in 0..n { s = s + a[i] }
+    return s
+}
+
+// Trung bình cộng (n == 0 -> 0.0)
+fn average_f(a: *f64, n: int) -> f64 {
+    if n == 0 { return 0.0 }
+    return sum_slice_f(a, n) / (n as f64)
+}
+
+// Phần tử lớn nhất / nhỏ nhất
+fn array_max_f(a: *f64, n: int) -> f64 {
+    let mut m: f64 = a[0]
+    for i in 1..n { if a[i] > m { m = a[i] } }
+    return m
+}
+fn array_min_f(a: *f64, n: int) -> f64 {
+    let mut m: f64 = a[0]
+    for i in 1..n { if a[i] < m { m = a[i] } }
+    return m
+}
+
+// Tích vô hướng hai vector cùng độ dài
+fn dot(a: *f64, b: *f64, n: int) -> f64 {
+    let mut s: f64 = 0.0
+    for i in 0..n { s = s + a[i] * b[i] }
+    return s
+}
+
+// Chuẩn Euclid (L2) của một vector
+fn norm(a: *f64, n: int) -> f64 { return sqrt(dot(a, a, n)) }
+
+// Nhân mọi phần tử với k / gán mọi phần tử bằng v (tại chỗ)
+fn scale_f(a: *f64, n: int, k: f64) { for i in 0..n { a[i] = a[i] * k } }
+fn fill_f(a: *f64, n: int, v: f64) { for i in 0..n { a[i] = v } }
+
+// Phương sai / độ lệch chuẩn tổng thể (f64)
+fn variance_f(a: *f64, n: int) -> f64 {
+    if n == 0 { return 0.0 }
+    let m: f64 = average_f(a, n)
+    let mut s: f64 = 0.0
+    for i in 0..n { let d: f64 = a[i] - m; s = s + d * d }
+    return s / (n as f64)
+}
+fn stddev_f(a: *f64, n: int) -> f64 { return sqrt(variance_f(a, n)) }
+
+// ============================================================================
+//  Tiện ích bổ sung (số học, ánh xạ khoảng, ký tự)
+// ============================================================================
+
+// Ánh xạ x tuyến tính từ [in_lo, in_hi] sang [out_lo, out_hi]
+fn map_range(x: f64, in_lo: f64, in_hi: f64, out_lo: f64, out_hi: f64) -> f64 {
+    if in_hi == in_lo { return out_lo }
+    return out_lo + (x - in_lo) * (out_hi - out_lo) / (in_hi - in_lo)
+}
+
+// Ký tự tại vị trí i của chuỗi (an toàn biên: ngoài [0, len) -> '\0')
+fn char_at(s: str, i: int) -> char {
+    if i < 0 || i >= (str_len(s) as int) { return '\0' }
+    return s[i]
+}
+
+// Ký tự có phải nguyên âm (ASCII) không?
+fn is_vowel(c: char) -> bool {
+    let l: char = to_lower_char(c)
+    return l == 'a' || l == 'e' || l == 'i' || l == 'o' || l == 'u'
+}
+
+// Luỹ thừa nguyên với số mũ không âm (mũ âm -> 0)
+fn ipow_nonneg(base: int, exp: int) -> i64 {
+    if exp < 0 { return 0 }
+    return ipow(base, exp)
+}
+
+// Số tam giác thứ n = 1 + 2 + ... + n (alias dễ nhớ của sum_to)
+fn triangular(n: int) -> i64 { return sum_to(n) }
+
+// Số nhỏ nhất / lớn nhất của ba số thực
+fn max3_f(a: f64, b: f64, c: f64) -> f64 {
+    let m: f64 = (a > b) ? a : b
+    return (m > c) ? m : c
+}
+fn min3_f(a: f64, b: f64, c: f64) -> f64 {
+    let m: f64 = (a < b) ? a : b
+    return (m < c) ? m : c
+}

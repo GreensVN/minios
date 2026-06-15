@@ -13,6 +13,15 @@
 #include <stddef.h>
 #include <math.h>
 #include <time.h>
+#include <unistd.h>
+
+/* Mã màu ANSI — chỉ bật khi stderr là terminal (đường ống/redirect -> chuỗi
+ * rỗng, giữ output sạch để so khớp test). Kiểm tra isatty một lần rồi nhớ. */
+static inline const char* g_tcolor(const char* code) {
+    static int tty = -1;
+    if (tty < 0) tty = isatty(fileno(stderr));
+    return tty ? code : "";
+}
 
 /* ---- Cấp phát bộ nhớ (Zig/Rust style) ---- */
 #define g_alloc(T, n)        ((T*)calloc((size_t)(n), sizeof(T)))
@@ -33,6 +42,24 @@ _Noreturn static inline void g_unreachable(const char* where) {
 _Noreturn static inline void g_todo(const char* where) {
     fprintf(stderr, "\033[1;33mG todo:\033[0m chưa cài đặt: %s\n", where);
     exit(101);
+}
+
+/* ---- Khung kiểm thử (test framework): đếm pass/fail toàn cục ----
+ * 'check_eq'/'check_ne' ghi nhận kết quả rồi tiếp tục (không dừng); 'test_summary'
+ * in tổng kết và trả về SỐ ca trượt (dùng làm mã thoát của 'main' rất tiện). */
+static int g_test_pass = 0;
+static int g_test_fail = 0;
+static inline void g_test_record(bool ok) { if (ok) g_test_pass++; else g_test_fail++; }
+static inline int g_test_summary(void) {
+    int total = g_test_pass + g_test_fail;
+    if (g_test_fail == 0)
+        fprintf(stderr, "\n%s✓ %d/%d ca test đều đạt%s\n",
+                g_tcolor("\033[1;32m"), g_test_pass, total, g_tcolor("\033[0m"));
+    else
+        fprintf(stderr, "\n%s✗ %d/%d ca test TRƯỢT%s (%d đạt)\n",
+                g_tcolor("\033[1;31m"), g_test_fail, total, g_tcolor("\033[0m"),
+                g_test_pass);
+    return g_test_fail;
 }
 
 /* ---- min/max/abs/clamp: statement-expression, đánh giá đối số đúng MỘT lần.

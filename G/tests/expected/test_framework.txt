@@ -1,0 +1,11 @@
+✓ int
+✓ int khác
+✓ float
+✓ char
+✓ bool
+✓ chuoi (noi dung)
+✓ enum
+✓ struct
+✓ struct long
+
+✓ 9/9 ca test đều đạt

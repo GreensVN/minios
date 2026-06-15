@@ -1,0 +1,5 @@
+[dbg dòng 5] 42
+[dbg dòng 6] 84
+[dbg dòng 7] ok
+[dbg dòng 8] 3.5
+[dbg dòng 9] V { a: 1, b: 2 }

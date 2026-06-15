@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể ép kiểu ('as') sang '[3]int' — chỉ ép được sang kiểu vô hướng (số/bool/char), con trỏ, enum hoặc con trỏ hàm

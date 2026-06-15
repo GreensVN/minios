@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: trường 'x' của struct 'P' được gán nhiều lần trong cùng một literal

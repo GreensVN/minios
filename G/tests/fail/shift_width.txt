@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: dịch trái 40 bit vượt bề rộng kiểu 'i32' (32 bit) — hành vi không xác định; ép kiểu rộng hơn (vd '(x as i64) << 40') hoặc giảm lượng dịch

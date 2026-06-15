@@ -213,6 +213,21 @@ comptime fn square(n: int) -> int { return n * n }
 > Compiler **kiểm tra số placeholder khớp số đối số** *và* **khớp kiểu với
 > specifier** (vd `{s}` cho số, `{d}` cho float đều báo lỗi).
 
+**In trực tiếp `struct` và `enum`** với `{}` (kiểu `{:?}` của Rust) — không cần in
+từng trường:
+```g
+enum Color { Red, Green, Blue }
+struct Point { x: int, y: int }
+struct Box { lo: Point, hi: Point, color: Color }
+
+println("{}", Point { x: 3, y: 4 })   // Point { x: 3, y: 4 }
+println("{}", Green)                   // Green  (TÊN biến thể, không phải số)
+println("{}", Box { lo: Point{x:0,y:0}, hi: Point{x:9,y:9}, color: Blue })
+// -> Box { lo: Point { x: 0, y: 0 }, hi: Point { x: 9, y: 9 }, color: Blue }
+```
+Struct lồng được in **đệ quy**; enum in ra **tên biến thể** (dùng `{d}` nếu muốn số
+nguyên). Đối số `print`/`format` được **đánh giá trái-sang-phải, đúng một lần**.
+
 **`format(...)` (kiểu Zig `std.fmt`)** — dựng một **chuỗi mới trên heap** với đúng
 cú pháp định dạng như trên (đối số được đánh giá đúng *một lần*); nhớ `g_free`:
 ```g
@@ -232,7 +247,9 @@ while !at_eof() { ... }        // lặp tới khi hết đầu vào
 ```
 
 ### Builtins
-`len(x)` · `assert(cond[, msg])` · `panic(msg)` · `unreachable([msg])` · `todo([msg])` · `min(a,b)` · `max(a,b)` · `abs(x)` · `clamp(x,lo,hi)` · `swap(a,b)` · `typeof(x)` · `format(fmt, ...)` · `g_alloc(T,n)` · `g_realloc(p,T,n)` · `g_free(p)` · `sizeof(T)` · `sizeof(expr)` · `alignof(T)`.
+`len(x)` · `assert(cond[, msg])` · `assert_eq(a,b)` · `assert_ne(a,b)` · `check_eq(a,b)` · `check_ne(a,b)` · `test_summary()` · `panic(msg)` · `unreachable([msg])` · `todo([msg])` · `min(a,b)` · `max(a,b)` · `abs(x)` · `clamp(x,lo,hi)` · `swap(a,b)` · `typeof(x)` · `dbg(x)` · `format(fmt, ...)` · `g_alloc(T,n)` · `g_realloc(p,T,n)` · `g_free(p)` · `sizeof(T)` · `sizeof(expr)` · `alignof(T)`.
+
+- `dbg(x)` in `[dbg dòng N] <giá trị>` ra **stderr** (định dạng theo kiểu suy luận, kể cả struct/enum) rồi **trả lại chính `x`** — chèn vào giữa biểu thức để soi giá trị mà không đổi luồng: `let y = dbg(a + b) * 2`. Đánh giá `x` đúng *một lần*.
 
 - `swap(a, b)` tráo nội dung hai **ô nhớ** cùng kiểu (đánh giá địa chỉ đúng *một lần* — an toàn với `swap(a[i()], a[j()])`); hai ô phải khả biến.
 - `typeof(x)` trả về **chuỗi** tên kiểu suy luận (`"i64"`, `"f64"`, `"str"`, `"fn(int) -> int"`...) — hằng lúc biên dịch, không đánh giá `x`.
@@ -240,6 +257,44 @@ while !at_eof() { ... }        // lặp tới khi hết đầu vào
 
 `unreachable()`/`todo()` không bao giờ trả về (như `panic`) nên thoả mãn phân
 tích "mọi nhánh đều return" — tiện cho nhánh mặc định hoặc hàm chưa hoàn thiện.
+
+### Kiểm thử (assert / test framework) — **generic theo mọi kiểu**
+
+G có sẵn một bộ assert/test **generic**: so sánh và hiển thị `trái`/`phải` cho *bất kỳ*
+kiểu nào — số, `bool`, `char`, **chuỗi (theo nội dung)**, **enum (theo tên biến thể)**,
+và **struct (theo từng trường, đệ quy)**. Thêm một struct/enum mới là **tự động** dùng
+được, không cần viết thêm gì (compiler sinh hàm so sánh `_g_eq_T` + bộ in cho mỗi kiểu).
+
+| Builtin | Ý nghĩa |
+|---------|---------|
+| `assert(cond[, msg])` | đúng/sai luận lý; sai thì **dừng** chương trình |
+| `assert_eq(a, b[, msg])` | `a == b`? sai thì in `trái`/`phải` rồi **dừng** |
+| `assert_ne(a, b[, msg])` | `a != b`? sai thì **dừng** |
+| `check_eq(a, b[, tên])` | như `assert_eq` nhưng **ghi nhận & tiếp tục**, trả `bool` |
+| `check_ne(a, b[, tên])` | như `assert_ne` nhưng không dừng |
+| `test_summary()` | in tổng kết, trả về **số ca trượt** (dùng làm mã thoát) |
+
+```g
+struct Point { x: int, y: int }
+fn main() -> int {
+    check_eq(2 + 2, 4, "số học")
+    check_eq(Point { x: 1, y: 2 }, Point { x: 1, y: 2 }, "struct")  // so theo trường
+    check_eq("abc", "abc", "chuỗi")                                  // so theo nội dung
+    check_eq(Point { x: 1, y: 2 }, Point { x: 1, y: 9 }, "ca sai")
+    return test_summary()        // -> mã thoát = số ca trượt
+}
+```
+Ca trượt in rõ ràng (màu chỉ bật khi ra terminal, ống dẫn/redirect thì sạch):
+```
+✗ ca sai (dòng 6)
+    trái:  Point { x: 1, y: 2 }
+    phải:  Point { x: 1, y: 9 }
+
+✗ 1/4 ca test TRƯỢT (3 đạt)
+```
+> Hai vế phải **cùng kiểu** (compiler bắt `check_eq(1, "x")`); mảng tĩnh trần không
+> so trực tiếp được (mất độ dài khi phân rã — so từng phần tử). Mọi output ra
+> **stderr** nên không lẫn với output chương trình.
 
 ### Module / `import`
 ```g
@@ -250,7 +305,9 @@ import "helpers.g"    // nạp file cùng thư mục
 - **Số học:** `gcd lcm gcd3 ipow is_prime factorial sign is_even is_odd isqrt fib powmod max3 min3 popcount sum_digits count_digits reverse_int is_palindrome_int mod_floor is_power_of_two next_power_of_two leading_zeros trailing_zeros sum_to num_divisors is_perfect totient`
 - **Tổ hợp & thống kê:** `ncr npr variance stddev median_sorted` (+ `average`)
 - **Toán f64 (libm):** `sqrt cbrt pow floor ceil round trunc fabs fmod sin cos tan atan2 exp log log2 log10 hypot lerp clampf deg2rad rad2deg sigmoid factorial_f sq_f cube_f approx_eq` (+ hằng `G_PI`, `G_E`, `G_TAU`, `G_PHI`)
-- **Mảng:** `sum_slice swap_int swap_at bubble_sort insertion_sort quicksort binary_search lower_bound upper_bound max_subarray fill array_copy reverse reverse_range array_max array_min min_index max_index index_of contains count_val is_sorted array_sum array_product array_eq rotate_left dedup_sorted prefix_sum clamp_array`
+- **Mảng (số nguyên):** `sum_slice swap_int swap_at bubble_sort insertion_sort quicksort binary_search lower_bound upper_bound max_subarray fill array_copy reverse reverse_range array_max array_min min_index max_index index_of contains count_val is_sorted array_sum array_product array_eq rotate_left dedup_sorted prefix_sum clamp_array`
+- **Mảng (số thực f64):** `sum_slice_f average_f array_max_f array_min_f dot norm scale_f fill_f variance_f stddev_f`
+- **Tiện ích khác:** `map_range char_at is_vowel ipow_nonneg triangular max3_f min3_f`
 - **Bậc cao (con trỏ hàm):** `map_into filter_into fold count_if any all find_first`
 - **Chuỗi:** `streq str_len str_concat substr str_contains starts_with ends_with parse_int parse_float int_to_str str_rev to_upper to_lower str_repeat count_char str_index trim replace_char`
 - **Ký tự (ASCII):** `is_digit is_upper is_lower is_alpha is_alnum is_space to_upper_char to_lower_char digit_to_int hex_val`
@@ -332,6 +389,16 @@ let x = a +
   báo lỗi G sạch thay vì rò lỗi C khó hiểu.
 - **Chia cho hằng 0:** `x / 0`, `x % (3-3)` (mẫu số gấp được thành 0) bị bắt sớm.
 - **`print` mơ hồ:** nhiều đối số mà thiếu chuỗi định dạng (sẽ bỏ bớt đối số) bị từ chối.
+- **Chia nguyên rồi đổi sang thực:** `let x: f64 = 7 / 2` (mất phần lẻ -> 3.0) bị bắt.
+- **Dịch bit không hợp lệ:** dịch **âm**, dịch **≥ 64 bit**, hay dịch một biến kiểu
+  hẹp **vượt bề rộng** (`x: i32 << 40`) — đều là UB trong C — bị từ chối.
+- **`match` enum chưa vét cạn:** thiếu biến thể mà không có `_` bị bắt (kèm danh
+  sách biến thể còn thiếu); pattern thuộc **enum khác** với subject cũng bị bắt.
+- **Mã chết:** câu lệnh sau `return`/`break`/`continue`/`panic` bị từ chối.
+- **`defer` thoát luồng:** `return`/`break`/`continue` trong `defer` bị cấm.
+- **Trường struct literal trùng:** `P { x: 1, x: 2 }` bị bắt.
+- **Ép kiểu vô nghĩa:** `x as [N]T` / `x as Struct` bị từ chối.
+- **Số 0 dẫn đầu:** `010` (C coi là bát phân 8) bị từ chối — dùng `0o10` cho bát phân.
 
 > **Ngữ nghĩa vòng lặp:** `for i in a..b` lượng giá cận `b` (và `step`) **đúng
 > một lần** khi vào vòng (giống Rust) — đổi `b` trong thân không làm dài thêm
@@ -346,6 +413,33 @@ let x = a +
 - Cỡ mảng là biểu thức **hằng** (chưa cỡ động lúc chạy — dùng `g_alloc`).
 
 Một nền tảng vững để mở rộng tiếp. 🚀
+
+## Mới trong 0.5.0
+
+- 🐛 **Sửa lỗi cắt cụt phép dịch hằng:** `1 << 40` trước đây cho **0** (tính trong
+  `int` 32-bit của C); nay tự nâng bề rộng 64-bit và cho đúng `1099511627776`.
+  Literal lớn cũng suy luận đúng kiểu theo giá trị (`5000000000` → `i64`).
+- 🐛 **Thứ tự đánh giá đối số tất định:** lời gọi hàm/method và `print`/`format`
+  nay đánh giá đối số **trái-sang-phải** (kiểu Rust) — `f(next(), next(), next())`
+  chạy đúng `1 2 3` thay vì phụ thuộc thứ tự không xác định của C.
+- 🐛 **Sửa crash trình biên dịch:** `return`/`break`/`continue` trong `defer` từng
+  làm trình sinh mã **đệ quy vô hạn** — nay báo lỗi G rõ ràng.
+- ✨ **In trực tiếp `struct`/`enum`:** `println("{}", point)` → `Point { x: 3, y: 4 }`
+  (đệ quy cho struct lồng); enum in ra **tên biến thể** (`Green`, không phải `1`).
+- ✨ **`dbg(x)`** (kiểu Rust): in `[dbg dòng N] <giá trị>` ra stderr rồi trả lại `x`.
+- ✨ **Khung kiểm thử generic:** `assert_eq`/`assert_ne` (dừng khi sai), `check_eq`/
+  `check_ne` (ghi nhận & tiếp tục), `test_summary()` (trả số ca trượt). Hiển thị
+  `trái`/`phải` cho **mọi kiểu** (chuỗi theo nội dung, enum theo tên, struct theo
+  trường — đệ quy); kiểu mới tự dùng được nhờ hàm so sánh sinh tự động. Màu chỉ bật
+  khi ra terminal.
+- 🛡️ **Nhiều chẩn đoán mới:** chia-nguyên-sang-thực, dịch bit không hợp lệ
+  (âm/≥64/vượt-bề-rộng), `match` enum chưa vét cạn, pattern enum sai loại, mã chết
+  sau `return`, trường literal trùng, ép kiểu sang mảng/struct, số 0 dẫn đầu.
+- 📚 **Thư viện chuẩn — mảng số thực (f64):** `sum_slice_f average_f array_max_f
+  array_min_f dot norm scale_f fill_f variance_f stddev_f`, cùng `map_range char_at
+  is_vowel ipow_nonneg triangular max3_f min3_f`.
+- ✅ **Bộ test mở rộng** (73 ca): thêm ca cho dịch bit, thứ tự đánh giá, in struct/
+  enum, `dbg`, mảng f64, và 10 ca "phải lỗi" khoá các chẩn đoán mới.
 
 ## Mới trong 0.4.0
 

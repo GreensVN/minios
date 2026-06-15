@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: chia hai số NGUYÊN rồi mới đổi sang số thực — phần lẻ bị cắt (vd '7 / 2' = 3.0, không phải 3.5). Ép một toán hạng sang thực để chia thực: '(a as f64) / b'

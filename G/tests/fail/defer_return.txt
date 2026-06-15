@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể dùng 'return' trong 'defer' — câu lệnh defer chỉ chạy khi rời phạm vi (thường là dọn dẹp); chuyển điều khiển ('return') ra ngoài là không hợp lệ

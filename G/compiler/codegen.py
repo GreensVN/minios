@@ -32,6 +32,7 @@ class Codegen:
         self.out = []
         self.indent = 0
         self.struct_names = set()
+        self.struct_defs = {}        # tên struct -> StructDef (cho print/dbg bung struct)
         self.enum_names = set()
         self.enum_variants = set()   # mọi tên variant (là hằng số C hợp lệ)
         self.global_inits = []       # (tên, biểu_thức) cho global khởi tạo lúc chạy
@@ -160,6 +161,14 @@ class Codegen:
             return any(self._has_call(v) for _, v in e.fields)
         return False
 
+    def _args_need_ordering(self, nodes) -> bool:
+        """Có cần ép thứ tự đánh giá TRÁI-SANG-PHẢI cho danh sách biểu thức này
+        không? C KHÔNG quy định thứ tự đánh giá đối số hàm (thường phải-sang-trái),
+        nên 'f(next(), next())' có thể chạy ngược trực giác. Cần ép thứ tự khi có
+        >=2 mục và ÍT NHẤT một mục có tác dụng phụ (lời gọi) — lúc đó một mục có
+        thể quan sát tác dụng của mục khác."""
+        return len(nodes) >= 2 and any(self._has_call(n) for n in nodes)
+
     def _is_const_init(self, e) -> bool:
         """Biểu thức có dùng được làm initializer tĩnh trong C không (hằng số
         biên dịch)? Literal, enum variant, sizeof, ép kiểu/toán tử trên hằng,
@@ -208,11 +217,14 @@ class Codegen:
                 self.enum_names.add(it.name)
                 for vname, _ in it.variants:
                     self.enum_variants.add(vname)
+        self.struct_defs = struct_defs   # cho phép print/dbg tự bung struct
 
         # 1a) enum trước (struct có thể nhúng enum theo giá trị)
         for it in self.prog.items:
             if isinstance(it, A.EnumDef):
                 self.gen_enum(it)
+        # Hàm tên-biến-thể cho mỗi enum: dùng khi in '{}' (Red thay vì 0).
+        self.emit_enum_name_fns()
 
         # 1b) Khai báo tiến (forward decl) MỌI struct: cho phép tự/đệ-quy tham
         #     chiếu qua con trỏ (linked list) và tham chiếu lẫn nhau.
@@ -229,8 +241,12 @@ class Codegen:
 
         # 1c) Định nghĩa struct theo thứ tự topo: struct nhúng struct khác THEO
         #     GIÁ TRỊ phải đứng sau struct đó (trường con trỏ không tạo ràng buộc).
-        for name in self._topo_sort_structs(struct_defs):
+        topo = self._topo_sort_structs(struct_defs)
+        for name in topo:
             self.gen_struct(struct_defs[name])
+        # Hàm so sánh bằng theo trường cho mỗi struct (cho assert_eq/check_eq) —
+        # sinh theo cùng thứ tự topo để eq của struct lồng có trước eq của struct cha.
+        self.emit_struct_eq_fns(topo)
 
         # 2) biến toàn cục
         for it in self.prog.items:
@@ -330,6 +346,121 @@ class Codegen:
         self.indent -= 1
         self.w("};")
         self.w("")
+
+    @staticmethod
+    def _enum_name_fn(name) -> str:
+        return f"_g_enum_{name}_name"
+
+    def emit_enum_name_fns(self):
+        """Sinh 'const char* _g_enum_E_name(E v)' trả về TÊN biến thể (chuỗi) cho
+        mỗi enum — để in '{}' ra 'Red' thay vì '0'. Nhãn 'case' khử trùng theo GIÁ
+        TRỊ (hai biến thể cùng giá trị -> chỉ lấy tên đầu) để C không lỗi trùng case.
+        Giá trị không khớp -> '?'. ('{d}' tường minh vẫn in số nguyên.)"""
+        tables = getattr(self.prog, "enum_tables", {})
+        emitted = False
+        for it in self.prog.items:
+            if not isinstance(it, A.EnumDef):
+                continue
+            emitted = True
+            self.w(f"static inline const char* {self._enum_name_fn(it.name)}"
+                   f"({it.name} _v) {{")
+            self.indent += 1
+            self.w("switch ((long long)_v) {")
+            self.indent += 1
+            seen = set()
+            table = tables.get(it.name, {})
+            for vname, _ in it.variants:
+                val = table.get(vname)
+                if val is not None:
+                    if val in seen:
+                        continue
+                    seen.add(val)
+                self.w(f'case {vname}: return "{vname}";')
+            self.indent -= 1
+            self.w("}")
+            self.w('return "?";')
+            self.indent -= 1
+            self.w("}")
+        if emitted:
+            self.w("")
+
+    # ---------- so sánh bằng generic (cho assert_eq / check_eq) ----------
+    @staticmethod
+    def _struct_eq_fn(name) -> str:
+        return f"_g_eq_{name}"
+
+    def emit_struct_eq_fns(self, order):
+        """Sinh 'bool _g_eq_T(T a, T b)' so sánh bằng theo TỪNG TRƯỜNG cho mỗi
+        struct — nền tảng generic của assert_eq/check_eq. Đệ quy cho trường struct
+        lồng; chuỗi so theo nội dung (g_str_eq); mảng so theo byte (memcmp); con
+        trỏ/con trỏ hàm so theo địa chỉ. Thêm một struct mới -> tự có so sánh."""
+        if not order:
+            return
+        self.w("// So sánh bằng theo trường — dùng cho assert_eq/check_eq trên struct.")
+        for name in order:
+            sdef = self.struct_defs[name]
+            self.w(f"static inline bool {self._struct_eq_fn(name)}"
+                   f"({name} _a, {name} _b) {{")
+            self.indent += 1
+            if not sdef.fields:
+                self.w("(void)_a; (void)_b; return true;")
+            else:
+                conds = [self._field_eq(f.type, f"_a.{f.name}", f"_b.{f.name}")
+                         for f in sdef.fields]
+                self.w("return " + " && ".join(conds) + ";")
+            self.indent -= 1
+            self.w("}")
+        self.w("")
+
+    def _field_eq(self, t: A.Type, l, r) -> str:
+        """Biểu thức C so sánh bằng MỘT trường (theo A.Type của trường)."""
+        if self._dims(t):                              # mảng -> so byte
+            return f"(memcmp(&({l}), &({r}), sizeof({l})) == 0)"
+        if getattr(t, "is_fn", False):
+            return f"(({l}) == ({r}))"
+        if t.ptr > 0 or getattr(t, "elem_ptr", 0) > 0:
+            if t.name == "char" and t.ptr == 1:        # *char -> so nội dung
+                return f"g_str_eq({l}, {r})"
+            return f"(({l}) == ({r}))"                  # con trỏ khác -> địa chỉ
+        if t.name in self.struct_defs:                 # struct lồng -> đệ quy
+            return f"{self._struct_eq_fn(t.name)}({l}, {r})"
+        if t.name == "str":
+            return f"g_str_eq({l}, {r})"
+        return f"(({l}) == ({r}))"                      # vô hướng / enum
+
+    def _gen_eq(self, gt: T.GType, l, r) -> str:
+        """Biểu thức C so sánh bằng hai giá trị kiểu gt (cho assert_eq/check_eq):
+        struct -> hàm _g_eq_T; chuỗi/'*char' -> g_str_eq; còn lại -> '=='."""
+        if gt.kind == "struct" and gt.name in self.struct_defs:
+            return f"{self._struct_eq_fn(gt.name)}({l}, {r})"
+        if self._is_stringy(gt):
+            return f"g_str_eq({l}, {r})"
+        return f"(({l}) == ({r}))"
+
+    def _gen_ord(self, gt: T.GType, l, r, op) -> str:
+        """Biểu thức C so sánh THỨ TỰ hai giá trị (cho assert_lt/le/gt/ge):
+        chuỗi/'*char' -> strcmp(l, r) op 0; vô hướng/char/enum -> 'l op r'."""
+        if self._is_stringy(gt):
+            return f"(strcmp({l}, {r}) {op} 0)"
+        return f"(({l}) {op} ({r}))"
+
+    def _gtype_print_frag(self, gt: T.GType, cexpr):
+        """(đoạn_fmt, [c_args]) để in MỘT giá trị kiểu gt — generic cho mọi kiểu.
+        struct -> bung trường; enum -> tên biến thể; chuỗi -> %s; con trỏ -> %p;
+        vô hướng -> specifier theo kiểu. 'cexpr' phải ổn định (đã vật hoá)."""
+        if gt.kind == "struct" and gt.name in self.struct_defs:
+            return self._struct_print_fragment(gt.name, cexpr)
+        if gt.kind == "enum" and gt.name in self.enum_names:
+            return "%s", [f"{self._enum_name_fn(gt.name)}({cexpr})"]
+        if self._is_stringy(gt):
+            return "%s", [cexpr]
+        if gt.kind in ("ptr", "null", "func"):
+            return "%p", [f"(void*)({cexpr})"]
+        spec, is_bool = T.printf_spec(gt)
+        if is_bool:
+            return "%s", [f'(({cexpr}) ? "true" : "false")']
+        cast = self._spec_cast(spec)
+        return spec, [f"({cast})({cexpr})" if cast else cexpr]
 
     def gen_enum(self, e: A.EnumDef):
         parts = []
@@ -535,6 +666,25 @@ class Codegen:
             else:
                 q = "const " if const else ""
                 self.w(f"{q}__auto_type {name} = {init_c};")
+
+    @staticmethod
+    def _int_literal_c(e: A.IntLit) -> str:
+        """Render một literal nguyên thành hằng C có HẬU TỐ bề rộng đúng, để C
+        không tính trong 'int' 32-bit rồi cắt cụt (vd '1 << 40', '5000000000',
+        '0x8000000000000000'). Quy tắc:
+          vừa i32           -> không hậu tố (int)
+          vượt i32, vừa i64 -> 'LL'
+          vượt i63, vừa u64 -> 'ULL' (literal không âm; số âm là Unary('-', lit))
+        Lexer đã chuẩn hoá 0x/0b/0o về thập phân nên ở đây luôn là chuỗi số 10."""
+        try:
+            v = int(e.value, 0)
+        except ValueError:
+            return e.value
+        if v <= (1 << 31) - 1:
+            return e.value
+        if v <= (1 << 63) - 1:
+            return e.value + "LL"
+        return e.value + "ULL"
 
     def gen_array_init(self, lit: A.ArrayLit) -> str:
         """Sinh initializer { ... } (đệ quy cho mảng lồng nhau)."""
@@ -795,7 +945,7 @@ class Codegen:
     # ---------- biểu thức ----------
     def gen_expr(self, e) -> str:
         if isinstance(e, A.IntLit):
-            return e.value
+            return self._int_literal_c(e)
         if isinstance(e, A.FloatLit):
             return e.value
         if isinstance(e, A.StrLit):
@@ -826,6 +976,15 @@ class Codegen:
                 if self._is_stringy(lt) and self._is_stringy(rt):
                     eq = f"g_str_eq({lc}, {rc})"
                     return eq if e.op == "==" else f"(!{eq})"
+            # Dịch trái mà kết quả suy luận là 64-bit: ép TOÁN HẠNG TRÁI sang kiểu
+            # 64-bit để C tính trong 64-bit (không phải 'int' 32-bit rồi cắt cụt).
+            # vd '1 << 40' -> '((int64_t)(1) << 40)'.
+            if e.op == "<<":
+                rgt = self.gtype_of(e)
+                lt0 = self.gtype_of(e.left)
+                if (rgt.kind == "int" and rgt.bits >= 64
+                        and not (lt0.kind == "int" and lt0.bits >= 64)):
+                    return f"(({T.c_type(rgt)})({lc}) << {rc})"
             return f"({lc} {e.op} {rc})"
         if isinstance(e, A.Unary):
             return f"({e.op}{self.gen_expr(e.operand)})"
@@ -878,21 +1037,38 @@ class Codegen:
         if getattr(e, "is_method", False):
             recv_c = self.gen_expr(e.recv)
             arg_c = [self.gen_expr(a) for a in e.args]
-
-            def call_with(ptr_c):
-                return f"{e.struct}__{e.method}({', '.join([ptr_c] + arg_c)})"
-
-            # Ép '(Struct*)' để xoá 'const' khi recv là binding 'let' (bất biến);
-            # checker đã cấm method GHI vào self trên recv bất biến nên an toàn.
+            addressable = e.recv_is_ptr or self._is_addressable(e.recv)
+            # Ép thứ tự TRÁI-SANG-PHẢI (recv rồi từng đối số) khi: recv là rvalue
+            # (bắt buộc vật hoá để lấy '&'), HOẶC có tác dụng phụ giữa recv/đối số.
+            ordered = (not addressable
+                       or self._args_need_ordering(e.args)
+                       or (self._has_call(e.recv) and e.args))
+            if not ordered:
+                # Ép '(Struct*)' để xoá 'const' khi recv là binding 'let' (bất
+                # biến); checker đã cấm method GHI vào self trên recv bất biến.
+                ptr = (f"({e.struct}*)({recv_c})" if e.recv_is_ptr
+                       else f"({e.struct}*)&({recv_c})")
+                return f"{e.struct}__{e.method}({', '.join([ptr] + arg_c)})"
+            decls = []
             if e.recv_is_ptr:
-                return call_with(f"({e.struct}*)({recv_c})")
-            if self._is_addressable(e.recv):
-                return call_with(f"({e.struct}*)&({recv_c})")
-            # recv là rvalue (vd b.add(1).add(2)): vật hoá vào biến tạm rồi lấy
-            # địa chỉ — '&' trên rvalue là không hợp lệ trong C.
-            tmp = self.tmp("_grecv")
-            return (f"({{ {e.struct} {tmp} = ({recv_c}); "
-                    f"{call_with('&' + tmp)}; }})")
+                rp = self.tmp("_grp")
+                decls.append(f"{e.struct}* {rp} = ({e.struct}*)({recv_c});")
+            elif self._is_addressable(e.recv):
+                rp = self.tmp("_grp")
+                decls.append(f"{e.struct}* {rp} = ({e.struct}*)&({recv_c});")
+            else:
+                # recv là rvalue (vd b.add(1).add(2)): vật hoá vào biến tạm rồi
+                # lấy địa chỉ — '&' trên rvalue là không hợp lệ trong C.
+                rv = self.tmp("_grecv")
+                decls.append(f"{e.struct} {rv} = ({recv_c});")
+                rp = "&" + rv
+            names = []
+            for c in arg_c:
+                n = self.tmp("_gca")
+                decls.append(f"__auto_type {n} = ({c});")
+                names.append(n)
+            call = f"{e.struct}__{e.method}({', '.join([rp] + names)})"
+            return f"({{ {' '.join(decls)} {call}; }})"
         # builtin
         if isinstance(e.func, A.Ident):
             name = e.func.name
@@ -904,6 +1080,10 @@ class Codegen:
                 return self.gen_len(e)
             if name == "assert":
                 return self.gen_assert(e)
+            if name in ("assert_eq", "assert_ne", "check_eq", "check_ne"):
+                return self.gen_assert_cmp(e, name)
+            if name == "test_summary":
+                return "g_test_summary()"
             if name == "panic":
                 msg = self.gen_expr(e.args[0]) if e.args else '"panic"'
                 return f"g_panic({msg})"
@@ -915,6 +1095,25 @@ class Codegen:
                 # Hằng chuỗi: tên kiểu suy luận của đối số (không đánh giá đối số).
                 gt = self.gtype_of(e.args[0]) if e.args else T.UNKNOWN
                 return self.c_string(str(gt))
+            if name == "dbg":
+                # Vật hoá x MỘT lần, in '[dbg dòng N] <giá trị>' ra stderr theo kiểu
+                # suy luận, rồi trả lại x (xuyên suốt). Dùng _fmt_placeholder để có
+                # đúng specifier + ép kiểu như print.
+                arg = e.args[0]
+                ce = self.gen_expr(arg)
+                tv = self.tmp("_gdbg")
+                line = getattr(e, "line", 0)
+                gt = self.gtype_of(arg)
+                if gt.kind == "struct" and gt.name in self.struct_defs:
+                    frag, cargs = self._struct_print_fragment(gt.name, tv)
+                    fmt = self.c_string(f"[dbg dòng {line}] {frag}\n")
+                    tail = (", " + ", ".join(cargs)) if cargs else ""
+                else:
+                    spec, carg = self._fmt_placeholder("", arg, tv)
+                    fmt = self.c_string(f"[dbg dòng {line}] {spec}\n")
+                    tail = f", {carg}" if carg is not None else ""
+                return (f"({{ __auto_type {tv} = ({ce}); "
+                        f"fprintf(stderr, {fmt}{tail}); {tv}; }})")
             if name == "swap":
                 # Lấy ĐỊA CHỈ hai ô nhớ một lần rồi tráo qua biến tạm — an toàn cả
                 # khi đối số có tác dụng phụ (vd swap(a[i()], a[j()])).
@@ -961,8 +1160,24 @@ class Codegen:
                         parts.append(self.gen_expr(a))
                 return f"{name}({', '.join(parts)})"
         fn = self.gen_expr(e.func)
-        args = ", ".join(self.gen_expr(a) for a in e.args)
-        return f"{fn}({args})"
+        arg_cs = [self.gen_expr(a) for a in e.args]
+        # Ép đánh giá TRÁI-SANG-PHẢI khi cần: vật hoá callee (nếu có tác dụng phụ)
+        # rồi từng đối số vào biến tạm, theo đúng thứ tự nguồn.
+        callee_side = self._has_call(e.func)
+        if self._args_need_ordering(e.args) or (callee_side and e.args):
+            decls = []
+            callee = fn
+            if callee_side:
+                ct = self.tmp("_gfp")
+                decls.append(f"__auto_type {ct} = ({fn});")
+                callee = ct
+            names = []
+            for c in arg_cs:
+                n = self.tmp("_gca")
+                decls.append(f"__auto_type {n} = ({c});")
+                names.append(n)
+            return f"({{ {' '.join(decls)} {callee}({', '.join(names)}); }})"
+        return f"{fn}({', '.join(arg_cs)})"
 
     def _type_expr_to_c(self, arg) -> str:
         """Render đối-số-là-kiểu (cho g_alloc/g_realloc) thành tên kiểu C.
@@ -994,6 +1209,50 @@ class Codegen:
             msg = self.c_string(f"assertion failed: {cond}")
         return f"(({cond}) ? (void)0 : g_panic({msg}))"
 
+    def gen_assert_cmp(self, e: A.Call, fname):
+        """assert_eq/assert_ne (dừng khi sai) và check_eq/check_ne (ghi nhận rồi
+        tiếp tục, trả về bool). Hiển thị 'trái'/'phải' GENERIC cho mọi kiểu (vô
+        hướng/chuỗi/enum/struct lồng) qua hạ tầng định dạng; đánh giá mỗi vế đúng
+        MỘT lần (vật hoá vào biến tạm). Ra stderr để không lẫn output chương trình."""
+        is_ne = fname.endswith("_ne")
+        is_check = fname.startswith("check")
+        a, b = e.args[0], e.args[1]
+        gt = self.gtype_of(a)
+        l, r = self.tmp("_gel"), self.tmp("_ger")
+        line = getattr(e, "line", 0)
+        eq = self._gen_eq(gt, l, r)
+        passed = f"(!({eq}))" if is_ne else eq          # điều kiện ĐẠT
+        lfmt, largs = self._gtype_print_frag(gt, l)
+        rfmt, rargs = self._gtype_print_frag(gt, r)
+        decls = f"__auto_type {l} = ({self.gen_expr(a)}); " \
+                f"__auto_type {r} = ({self.gen_expr(b)});"
+        red = r'g_tcolor("\033[1;31m")'
+        green = r'g_tcolor("\033[32m")'
+        rst = r'g_tcolor("\033[0m")'
+        if is_check:
+            name_c = (self.gen_expr(e.args[2]) if len(e.args) > 2
+                      else self.c_string(fname))
+            ok = self.tmp("_gok")
+            ok_fmt = self.c_string("%s✓ %s%s\n")           # màu, tên, reset
+            fparts = [f"%s✗ %s (dòng {line})%s\n",
+                      "    trái:  ", lfmt, "\n", "    phải:  ", rfmt, "\n"]
+            fail_fmt = self.c_string("".join(fparts))
+            fail_args = ", ".join([red, name_c, rst] + largs + rargs)
+            return (f"({{ {decls} bool {ok} = {passed}; g_test_record({ok}); "
+                    f"if ({ok}) fprintf(stderr, {ok_fmt}, {green}, {name_c}, {rst}); "
+                    f"else fprintf(stderr, {fail_fmt}, {fail_args}); {ok}; }})")
+        # assert_eq/assert_ne: in khối trái/phải rồi DỪNG chương trình (exit 101).
+        parts = [f"%s✗ {fname} thất bại (dòng {line})%s\n",
+                 "    trái:  ", lfmt, "\n", "    phải:  ", rfmt, "\n"]
+        all_args = [red, rst] + list(largs) + list(rargs)
+        if len(e.args) > 2:
+            parts += ["    ", "%s", "\n"]
+            all_args.append(self.gen_expr(e.args[2]))
+        fail_fmt = self.c_string("".join(parts))
+        tail = ", " + ", ".join(all_args)
+        return (f"({{ {decls} if (!({passed})) {{ "
+                f"fprintf(stderr, {fail_fmt}{tail}); exit(101); }} }})")
+
     def gen_print(self, e: A.Call, name):
         stream = "stderr" if name.startswith("e") else "stdout"
         newline = name.endswith("ln")
@@ -1006,6 +1265,23 @@ class Codegen:
         else:
             template = "{}"
             value_args = e.args
+        # Đánh giá đối số TRÁI-SANG-PHẢI khi có tác dụng phụ (như format()): vật
+        # hoá vào biến tạm theo thứ tự nguồn rồi mới truyền cho fprintf — tránh
+        # thứ tự đối số không xác định của C ('print("{} {}", f(), g())'). Cũng vật
+        # hoá khi có đối số STRUCT (để base ổn định khi bung từng trường một lần).
+        has_struct = any(self.gtype_of(a).kind == "struct" for a in value_args)
+        if self._args_need_ordering(value_args) or has_struct:
+            decls = []
+            temps = []
+            for a in value_args:
+                tv = self.tmp("_gpa")
+                decls.append(f"__auto_type {tv} = ({self.gen_expr(a)});")
+                temps.append(tv)
+            fmt, c_args = self.build_format(template, value_args, newline,
+                                           arg_cexprs=temps)
+            tail = (", " + ", ".join(c_args)) if c_args else ""
+            return (f"({{ {' '.join(decls)} "
+                    f"fprintf({stream}, {fmt}{tail}); }})")
         fmt, c_args = self.build_format(template, value_args, newline)
         if c_args:
             return f"fprintf({stream}, {fmt}, {', '.join(c_args)})"
@@ -1109,6 +1385,11 @@ class Codegen:
         # tự suy luận theo kiểu đối số
         if key in ("", "v"):
             gt = self.gtype_of(arg) if arg is not None else T.UNKNOWN
+            # enum -> in TÊN biến thể (Red) thay vì số ('{d}' vẫn in số nguyên).
+            if gt.kind == "enum" and gt.name in self.enum_names:
+                if ce is None:
+                    return "%s", None
+                return "%s", f"{self._enum_name_fn(gt.name)}({ce})"
             spec, is_bool = T.printf_spec(gt)
             if ce is None:
                 return spec, None
@@ -1141,6 +1422,51 @@ class Codegen:
             "%g": "double", "%c": "int", "%p": "void*",
         }.get(spec)   # %s -> None (không ép)
 
+    def _struct_print_fragment(self, sname, base):
+        """(đoạn_fmt, [c_args]) để in một struct dạng 'Tên { f: v, ... }'. 'base'
+        là biểu thức C của giá trị struct (ổn định, không tác dụng phụ — đã vật
+        hoá vào biến tạm). Đệ quy cho trường struct lồng; con trỏ -> %p (hoặc %s
+        nếu '*char'); mảng/con trỏ hàm -> nhãn rút gọn để không bao giờ sinh C sai."""
+        sdef = self.struct_defs.get(sname)
+        if sdef is None or not sdef.fields:
+            return f"{sname} {{}}", []
+        parts = [f"{sname} {{ "]
+        cargs = []
+        for i, f in enumerate(sdef.fields):
+            if i:
+                parts.append(", ")
+            frag, fa = self._field_print_frag(f.type, f"({base}).{f.name}")
+            parts.append(f"{f.name}: ")
+            parts.append(frag)
+            cargs += fa
+        parts.append(" }")
+        return "".join(parts), cargs
+
+    def _field_print_frag(self, t: A.Type, fexpr):
+        """(đoạn_fmt, [c_args]) cho MỘT trường khi in struct, dựa trên A.Type."""
+        if self._dims(t):
+            return "[…]", []                       # mảng theo giá trị: nhãn rút gọn
+        if getattr(t, "is_fn", False):
+            return "<fn>", []
+        if t.ptr > 0 or getattr(t, "elem_ptr", 0) > 0:
+            if t.name == "char" and t.ptr == 1:    # *char -> chuỗi
+                return "%s", [f"({fexpr})"]
+            return "%p", [f"(void*)({fexpr})"]
+        if t.name in self.struct_defs:             # struct lồng -> đệ quy
+            return self._struct_print_fragment(t.name, fexpr)
+        if t.name in self.enum_names:              # enum -> TÊN biến thể
+            return "%s", [f"{self._enum_name_fn(t.name)}({fexpr})"]
+        if t.name == "str":
+            return "%s", [fexpr]
+        gt = T.PRIMITIVES.get(t.name)
+        if gt is None:                             # kiểu khác -> số nguyên
+            return "%d", [f"(int)({fexpr})"]
+        spec, is_bool = T.printf_spec(gt)
+        if is_bool:
+            return "%s", [f'(({fexpr}) ? "true" : "false")']
+        cast = self._spec_cast(spec)
+        return spec, [f"({cast})({fexpr})" if cast else fexpr]
+
     def build_format(self, raw, value_args, newline=False, arg_cexprs=None):
         """Sinh chuỗi định dạng C + danh sách biểu thức C tương ứng.
         Placeholder rỗng {} => tự suy ra theo kiểu của tham số.
@@ -1166,6 +1492,18 @@ class Codegen:
                 ce = (arg_cexprs[ai] if (arg_cexprs is not None
                                          and ai < len(arg_cexprs)) else None)
                 ai += 1
+                # struct với '{}'/'{v}' tự bung 'Tên { f: v, ... }'. 'base' phải
+                # ổn định: dùng biến tạm (ce) nếu có, nếu không thì biểu thức trực
+                # tiếp (gen_print đã vật hoá struct nên nhánh None chỉ gặp tên trần).
+                gt = self.gtype_of(arg) if arg is not None else T.UNKNOWN
+                if (gt.kind == "struct" and gt.name in self.struct_defs
+                        and key.partition(":")[0] in ("", "v")):
+                    base = ce if ce is not None else self.gen_expr(arg)
+                    frag, sargs = self._struct_print_fragment(gt.name, base)
+                    result.append(frag)
+                    c_args.extend(sargs)
+                    i = j + 1
+                    continue
                 spec, carg = self._fmt_placeholder(key, arg, ce)
                 result.append(spec)
                 if carg is not None:
