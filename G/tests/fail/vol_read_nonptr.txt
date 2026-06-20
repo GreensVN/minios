@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: vol_read cần một con trỏ '*T', nhận 'int'

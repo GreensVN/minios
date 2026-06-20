@@ -175,10 +175,28 @@ defer println("chạy thứ 2")
 defer println("chạy thứ 1")    // in trước
 ```
 
-### Inline Assembly
+### Inline Assembly (cơ bản & **mở rộng** kiểu GCC)
 ```g
-asm { "nop" "nop" }
+asm { "nop" "nop" }                 // cơ bản: ghép chuỗi lệnh
+
+// MỞ RỘNG — có toán hạng (đọc/ghi thanh ghi, MSR, control register...):
+fn read_cr0() -> u64 {
+    let mut v: u64 = 0
+    asm {
+        "mov %%cr0, %0"
+        : "=r"(v)                   // outputs:  "ràng buộc"(ô_nhớ)
+    }
+    return v
+}
+asm {
+    "lgdt (%0)"
+    :                               // (không output)
+    : "r"(gdt_ptr)                  // inputs:   "ràng buộc"(biểu_thức)
+    : "memory"                      // clobbers: danh sách chuỗi
+}
 ```
+Toán hạng output phải là **ô nhớ khả biến** (compiler kiểm tra); biến trong toán
+hạng được phân giải đúng tên C (shadowing). Xem thêm phần **Phát triển hệ điều hành**.
 
 ### `comptime` (Zig) — gợi ý tính/inline lúc biên dịch
 ```g
@@ -247,7 +265,9 @@ while !at_eof() { ... }        // lặp tới khi hết đầu vào
 ```
 
 ### Builtins
-`len(x)` · `assert(cond[, msg])` · `assert_eq(a,b)` · `assert_ne(a,b)` · `check_eq(a,b)` · `check_ne(a,b)` · `test_summary()` · `panic(msg)` · `unreachable([msg])` · `todo([msg])` · `min(a,b)` · `max(a,b)` · `abs(x)` · `clamp(x,lo,hi)` · `swap(a,b)` · `typeof(x)` · `dbg(x)` · `format(fmt, ...)` · `g_alloc(T,n)` · `g_realloc(p,T,n)` · `g_free(p)` · `sizeof(T)` · `sizeof(expr)` · `alignof(T)`.
+`len(x)` · `assert(cond[, msg])` · `assert_eq(a,b)` · `assert_ne(a,b)` · `check_eq(a,b)` · `check_ne(a,b)` · `test_summary()` · `panic(msg)` · `unreachable([msg])` · `todo([msg])` · `min(a,b)` · `max(a,b)` · `abs(x)` · `clamp(x,lo,hi)` · `swap(a,b)` · `typeof(x)` · `dbg(x)` · `format(fmt, ...)` · `g_alloc(T,n)` · `g_realloc(p,T,n)` · `g_free(p)` · `sizeof(T)` · `sizeof(expr)` · `alignof(T)` · `static_assert(cond, "msg")`.
+
+**Intrinsics phát triển hệ điều hành** (xem phần dưới): `memcpy` · `memset` · `memmove` · `memcmp` · `vol_read` · `vol_write` · `popcount` · `clz` · `ctz` · `bswap` · `rotl` · `rotr` · `halt` · `cli` · `sti` · `pause` · `breakpoint` · `io_wait` · `rdtsc` · `inb`/`outb`/`inw`/`outw`/`inl`/`outl`.
 
 - `dbg(x)` in `[dbg dòng N] <giá trị>` ra **stderr** (định dạng theo kiểu suy luận, kể cả struct/enum) rồi **trả lại chính `x`** — chèn vào giữa biểu thức để soi giá trị mà không đổi luồng: `let y = dbg(a + b) * 2`. Đánh giá `x` đúng *một lần*.
 
@@ -316,6 +336,112 @@ import "helpers.g"    // nạp file cùng thư mục
 
 > Các hàm chuỗi trả chuỗi mới (vd `str_concat`, `substr`, `int_to_str`) cấp phát
 > trên heap — nhớ `g_free` khi dùng xong.
+
+---
+
+## 🖥️ Phát triển hệ điều hành (OS / kernel / freestanding)
+
+G được thiết kế để viết được phần mềm hệ thống ở mức thấp nhất — kernel, firmware,
+trình điều khiển — chạy **không cần libc, không cần hệ điều hành bên dưới**.
+👉 Ví dụ hoàn chỉnh, boot được trong QEMU: [`examples/kernel/`](examples/kernel/).
+
+### Chế độ freestanding & xuất file đối tượng
+
+| Cờ | Ý nghĩa |
+|----|---------|
+| `--freestanding` | Không libc: `-ffreestanding -nostdlib`, không cần `main`, runtime tự cài `memcpy`/`memset`/`memmove`/`memcmp` và `panic`=dừng CPU |
+| `-c`, `--compile-obj` | Xuất file đối tượng `.o` (không liên kết) — để ghép với bootloader/linker script |
+| `-S`, `--emit-asm` | Xuất mã assembly `.s` |
+
+```bash
+gc kernel.g --freestanding -c -o kernel.o     # -> .o không phụ thuộc libc
+```
+Ở chế độ freestanding, runtime chỉ nạp header tuân thủ freestanding (`stdint`/
+`stddef`/`stdbool`); **không có** heap (`g_alloc`), in ấn (`print`), hay đọc stdin
+(những thứ này cần libc). Bạn tự viết driver màn hình/serial qua MMIO & cổng I/O.
+
+### MMIO — đọc/ghi bộ nhớ qua `volatile`
+
+Thanh ghi phần cứng ánh xạ vào bộ nhớ có thể đổi giá trị ngoài tầm CPU; phải
+truy cập qua `volatile` để trình biên dịch không tối ưu bỏ:
+```g
+let vga = 0xB8000 as *u16
+vol_write(vga + 80, 0x0F41)        // ghi ô VGA (ký tự 'A', màu trắng)
+let status = vol_read(uart + 5)    // đọc thanh ghi trạng thái
+```
+
+### Cổng I/O & điều khiển CPU (x86)
+
+```g
+outb(0x3F8, byte)          inb(0x3F8) -> u8          // 8-bit
+outw(port, w)              inw(port)  -> u16         // 16-bit
+outl(port, dw)             inl(port)  -> u32         // 32-bit
+cli()  sti()               // tắt/bật ngắt
+halt()                     // hlt — dừng CPU tới ngắt kế
+pause()                    // gợi ý spin-loop (chạy được cả user-space)
+breakpoint()               // int3
+io_wait()                  // trễ ~1µs
+rdtsc() -> u64             // bộ đếm chu kỳ (đọc được ở user-space)
+```
+> Các lệnh **đặc quyền** (`in*`/`out*`/`hlt`/`cli`/`sti`) chỉ chạy ở **ring 0**
+> (kernel). `pause`/`rdtsc`/`breakpoint` thì dùng được cả ở user-space.
+
+### Thao tác bit (tôn trọng **bề rộng kiểu**, giống Rust)
+
+```g
+popcount(0xFF)        // 8 — đếm bit 1
+clz(1 as u8)          // 7 — số 0 dẫn đầu trong 8 bit (không phải 63!)
+ctz(0x80 as u8)       // 7 — số 0 theo sau
+bswap(0x1234 as u16)  // 0x3412 — đảo byte
+rotl(x, n)  rotr(x, n)// xoay bit trong đúng bề rộng của kiểu x
+```
+
+### Bộ nhớ thô
+
+```g
+memset(ptr, byte, n)        memcpy(dst, src, n)
+memmove(dst, src, n)        memcmp(a, b, n) -> int
+```
+Hoạt động ở cả hai chế độ — hosted (libc) lẫn freestanding (runtime tự cài).
+
+### Thuộc tính `@` (ABI & bố cục)
+
+| Thuộc tính | Áp cho | Sinh ra |
+|------------|--------|---------|
+| `@packed` | struct | `__attribute__((packed))` — không đệm (bố cục thanh ghi/giao thức) |
+| `@align(N)` | struct/fn/global | `aligned(N)` (N là luỹ thừa 2) |
+| `@naked` | fn | `naked` — không prologue/epilogue (handler ngắt, stub) |
+| `@noreturn` | fn | `noreturn` |
+| `@interrupt` | fn | `interrupt` — ABI handler ngắt x86 |
+| `@inline` | fn | `inline __attribute__((always_inline))` |
+| `@section("..")` | fn/global | `section(...)` — đặt vào section linker |
+| `@used` | fn/global | `used` — giữ lại dù không tham chiếu |
+
+```g
+@packed
+struct GdtPtr { limit: u16, base: u64 }     // đúng 10 byte, không đệm
+
+@align(4096)
+let page_table: [512]u64 = ...              // căn theo trang
+
+@noreturn @section(".text.boot")
+fn _entry() { ... }
+```
+
+### Ký hiệu ngoài (linker / assembly)
+
+```g
+extern let _kernel_start: u8                // do linker script cấp
+extern let _bss_end: u8
+let size = (&_bss_end as u64) - (&_kernel_start as u64)
+```
+
+### Khẳng định lúc biên dịch
+
+```g
+static_assert(sizeof(GdtPtr) == 10, "GDT pointer phải 10 byte")
+```
+Bắt ngay khi biên dịch nếu điều kiện (hằng) sai — khoá bố cục struct/ABI.
 
 ---
 
@@ -407,12 +533,39 @@ let x = a +
 ## Giới hạn hiện tại
 
 - `match` so khớp bằng `==`/`strcmp`/khoảng + guard `if` (chưa destructuring struct/enum dữ liệu).
-- `asm` là *basic asm* GCC (chưa ràng buộc toán tử `%0/%1`).
 - Chưa có generic, trait, ownership/borrow-checker đầy đủ.
 - Có **con trỏ hàm** (`fn(T)->R`) nhưng **chưa có closure** bắt biến môi trường.
 - Cỡ mảng là biểu thức **hằng** (chưa cỡ động lúc chạy — dùng `g_alloc`).
+- Cổng I/O & nhiều intrinsic CPU là **đặc quyền x86** (chỉ chạy ở ring 0); ngoài
+  x86 chúng biên dịch thành no-op an toàn.
 
 Một nền tảng vững để mở rộng tiếp. 🚀
+
+## Mới trong 0.6.0 — 🖥️ Hướng phát triển hệ điều hành
+
+- 🧱 **Chế độ freestanding** (`--freestanding`): biên dịch **không libc**
+  (`-ffreestanding -nostdlib`) — viết được kernel/firmware. Runtime tự cài
+  `memcpy`/`memset`/`memmove`/`memcmp` và `panic`=dừng CPU. Thêm `-c` (xuất `.o`)
+  và `-S` (xuất `.s`). Ví dụ boot được trong QEMU: [`examples/kernel/`](examples/kernel/).
+- ⚙️ **Intrinsics phần cứng:** MMIO `vol_read`/`vol_write` (volatile); cổng I/O
+  x86 `inb`/`outb`/`inw`/`outw`/`inl`/`outl`; điều khiển CPU `halt`/`cli`/`sti`/
+  `pause`/`breakpoint`/`io_wait`/`rdtsc`.
+- 🔢 **Thao tác bit theo bề rộng kiểu** (giống Rust): `popcount`/`clz`/`ctz`/
+  `bswap`/`rotl`/`rotr` — `clz(1 as u8)`=7 chứ không phải 63.
+- 🧮 **Bộ nhớ thô:** `memcpy`/`memset`/`memmove`/`memcmp` (hosted & freestanding).
+- 🏷️ **Thuộc tính `@`:** `@packed`/`@align(N)` (struct/global), `@naked`/
+  `@noreturn`/`@interrupt`/`@inline`/`@section`/`@used` (fn) — mô tả bố cục thanh
+  ghi phần cứng & điểm vào kernel. Checker kiểm đích & đối số.
+- 🛠️ **Inline asm MỞ RỘNG** (kiểu GCC): `asm { "..." : outputs : inputs : clobbers }`
+  với `"ràng buộc"(biểu_thức)` — đọc/ghi thanh ghi, control register, MSR.
+- 🔗 **`extern let`:** tham chiếu ký hiệu do assembly/linker script cấp
+  (`extern let _bss_end: u8`).
+- ✅ **`static_assert(cond, "msg")`:** khẳng định hằng lúc biên dịch (khoá bố cục).
+- 🧪 **Bộ test mở rộng (86 ca):** thêm ca chạy cho intrinsics OS, một section
+  **freestanding** biên dịch kernel thật bằng `--freestanding -c`, và các ca
+  "phải lỗi" khoá chẩn đoán mới (thuộc tính, static_assert, MMIO sai kiểu).
+- 🐛 **Sửa shadowing hàm/tham số:** tham số (con trỏ hàm) trùng tên một hàm toàn
+  cục từng bị phân giải nhầm về hàm đó (số tham số sai); nay biến cục bộ che đúng.
 
 ## Mới trong 0.5.0
 

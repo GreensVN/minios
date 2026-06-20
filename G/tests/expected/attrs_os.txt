@@ -1,0 +1,4 @@
+sizeof Packed=6 Plain=12
+alignof Packed=1
+dbl(21)=42
+cache_line[2]=3

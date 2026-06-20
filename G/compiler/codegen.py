@@ -199,6 +199,121 @@ class Codegen:
     def gtype_of(self, e) -> T.GType:
         return getattr(e, "gtype", T.UNKNOWN)
 
+    # ---------- thuộc tính @ -> __attribute__ của GCC/Clang ----------
+    def _gnu_attrs(self, attrs):
+        """Trả về (quals, attr_str): 'quals' là từ khoá đứng trước khai báo (vd
+        'inline'); 'attr_str' là '__attribute__((...))' (hoặc rỗng). Checker đã
+        kiểm hợp lệ nên ở đây chỉ dịch."""
+        if not attrs:
+            return "", ""
+        parts = []
+        quals = []
+        for a in attrs:
+            n = a.name
+            if n == "packed":
+                parts.append("packed")
+            elif n in ("align", "aligned"):
+                parts.append(f"aligned({self.gen_expr(a.args[0])})")
+            elif n == "naked":
+                parts.append("naked")
+            elif n == "noreturn":
+                parts.append("noreturn")
+            elif n == "interrupt":
+                parts.append("interrupt")
+            elif n == "used":
+                parts.append("used")
+            elif n == "section":
+                parts.append(f"section({self.gen_expr(a.args[0])})")
+            elif n == "inline":
+                quals.append("inline")
+                parts.append("always_inline")
+        attr = f"__attribute__(({', '.join(parts)}))" if parts else ""
+        return " ".join(quals), attr
+
+    # ---------- intrinsics phát triển hệ điều hành ----------
+    # Ánh xạ intrinsic CPU/thời gian không-toán-hạng -> hàm runtime.
+    _OS_CALL_MAP = {
+        "halt": "g_hlt", "cli": "g_cli", "sti": "g_sti", "pause": "g_pause",
+        "breakpoint": "g_breakpoint", "io_wait": "g_io_wait", "rdtsc": "g_rdtsc",
+    }
+    _OS_BUILTINS = ({"memcpy", "memset", "memmove", "memcmp", "vol_read",
+                     "vol_write", "popcount", "clz", "ctz", "bswap", "rotl",
+                     "rotr", "inb", "outb", "inw", "outw", "inl", "outl",
+                     "static_assert"} | set(_OS_CALL_MAP))
+
+    @staticmethod
+    def _int_width(gt) -> int:
+        """Bề rộng (bit) của một kiểu nguyên đã suy luận; 64 nếu không rõ."""
+        return gt.bits if (gt is not None and gt.kind == "int" and gt.bits) else 64
+
+    @staticmethod
+    def _uctype(w) -> str:
+        return {8: "uint8_t", 16: "uint16_t", 32: "uint32_t",
+                64: "uint64_t"}.get(w, "uint64_t")
+
+    @staticmethod
+    def _wmask(w) -> str:
+        return "~0ULL" if w >= 64 else f"((1ULL << {w}) - 1)"
+
+    def _gen_os_call(self, e: A.Call, name) -> str:
+        """Sinh C cho một intrinsic phát triển hệ điều hành (xem BUILTINS trong
+        checker). Các phép theo-bề-rộng (clz/ctz/bswap/rotl/rotr) tôn trọng đúng
+        bề rộng kiểu của đối số (giống Rust u8/u32/...); đối số được vật hoá nên
+        đánh giá đúng MỘT lần."""
+        if name in self._OS_CALL_MAP:                       # halt/cli/sti/.../rdtsc
+            return f"{self._OS_CALL_MAP[name]}()"
+        if name in ("memcpy", "memmove", "memset", "memcmp"):
+            return f"{name}({', '.join(self.gen_expr(a) for a in e.args)})"
+        if name in ("vol_read", "vol_write"):
+            pt = self.gtype_of(e.args[0])
+            elem = pt.elem if pt.kind == "ptr" and pt.elem is not None else None
+            ct = T.c_type(elem) if elem is not None and elem.kind != "unknown" else "uint64_t"
+            ptr_c = self.gen_expr(e.args[0])
+            if name == "vol_read":
+                return f"(*(volatile {ct}*)({ptr_c}))"
+            return f"(*(volatile {ct}*)({ptr_c}) = ({self.gen_expr(e.args[1])}))"
+        if name == "popcount":
+            return f"g_popcount((uint64_t)({self.gen_expr(e.args[0])}))"
+        if name in ("clz", "ctz"):
+            w = self._int_width(self.gtype_of(e.args[0]))
+            v = self.tmp("_gbit")
+            body = f"uint64_t {v} = (uint64_t)({self.gen_expr(e.args[0])}) & {self._wmask(w)};"
+            if name == "clz":
+                return f"({{ {body} {v} ? (__builtin_clzll({v}) - {64 - w}) : {w}; }})"
+            return f"({{ {body} {v} ? __builtin_ctzll({v}) : {w}; }})"
+        if name == "bswap":
+            gt = self.gtype_of(e.args[0])
+            w = self._int_width(gt)
+            ct = T.c_type(gt) if gt.kind == "int" else "uint64_t"
+            xc = self.gen_expr(e.args[0])
+            if w <= 8:
+                return f"({ct})({xc})"
+            fn = "g_bswap16" if w <= 16 else ("g_bswap32" if w <= 32 else "g_bswap64")
+            ut = "uint16_t" if w <= 16 else ("uint32_t" if w <= 32 else "uint64_t")
+            return f"({ct})({fn}(({ut})({xc})))"
+        if name in ("rotl", "rotr"):
+            gt = self.gtype_of(e.args[0])
+            w = self._int_width(gt)
+            ct = T.c_type(gt) if gt.kind == "int" else "uint64_t"
+            ut = self._uctype(w)
+            v, nn = self.tmp("_grv"), self.tmp("_grn")
+            main = "<<" if name == "rotl" else ">>"
+            back = ">>" if name == "rotl" else "<<"
+            return (f"({{ {ut} {v} = ({ut})({self.gen_expr(e.args[0])}); "
+                    f"unsigned {nn} = (unsigned)({self.gen_expr(e.args[1])}) & {w - 1}u; "
+                    f"({ct})({nn} ? (({v} {main} {nn}) | "
+                    f"({v} {back} ({w} - {nn}))) : {v}); }})")
+        if name in ("inb", "inw", "inl"):
+            return f"g_{name}((uint16_t)({self.gen_expr(e.args[0])}))"
+        if name in ("outb", "outw", "outl"):
+            vt = {"outb": "uint8_t", "outw": "uint16_t", "outl": "uint32_t"}[name]
+            return (f"g_{name}((uint16_t)({self.gen_expr(e.args[0])}), "
+                    f"({vt})({self.gen_expr(e.args[1])}))")
+        if name == "static_assert":
+            return (f"_Static_assert(({self.gen_expr(e.args[0])}), "
+                    f"{self.gen_expr(e.args[1])})")
+        raise CodegenError(f"intrinsic OS chưa hỗ trợ: {name}")
+
     def emit_var_decl(self, name, t: A.Type, init_c=None, const=False):
         return self.c_decl(name, t, init_c, const=const) + ";"
 
@@ -344,7 +459,9 @@ class Codegen:
         for f in s.fields:
             self.w(self.emit_var_decl(f.name, f.type))
         self.indent -= 1
-        self.w("};")
+        # Thuộc tính bố cục (@packed/@align) đặt sau '}' của định nghĩa struct.
+        _, attr = self._gnu_attrs(getattr(s, "attrs", []))
+        self.w("}" + (f" {attr}" if attr else "") + ";")
         self.w("")
 
     @staticmethod
@@ -473,6 +590,14 @@ class Codegen:
         self.w("")
 
     def gen_global(self, g: A.GlobalVar):
+        _, attr = self._gnu_attrs(getattr(g, "attrs", []))
+        attr_sp = (attr + " ") if attr else ""
+        # Ký hiệu ngoài (extern): chỉ khai báo, KHÔNG cấp phát/static — địa chỉ/giá
+        # trị do assembly hoặc linker script cung cấp (vd '_kernel_end', '_bss_start').
+        if getattr(g, "is_extern", False):
+            self.w("extern " + attr_sp
+                   + self.c_decl(g.name, g.type, None, const=False) + ";")
+            return
         # A.Type dùng cho khai báo: lấy từ annotation, hoặc suy ra từ kiểu đã infer
         # (không dùng __auto_type vì nó cấm khai báo không-initializer).
         if g.type is not None:
@@ -489,14 +614,15 @@ class Codegen:
                 init = self.gen_array_init(g.value)
             else:
                 init = self.gen_expr(g.value) if g.value is not None else None
-            self.w("static " + self.c_decl(g.name, decl_type, init,
-                                           const=g.is_const) + ";")
+            self.w("static " + attr_sp + self.c_decl(g.name, decl_type, init,
+                                                     const=g.is_const) + ";")
             return
 
         # Initializer KHÔNG phải hằng số biên dịch (tham chiếu global khác, lời gọi
         # hàm, g_alloc...): C cấm. -> khai báo storage zero-init, gán lúc chạy trong
         # constructor. Bỏ 'const' ở mức C để gán được (G-checker vẫn cấm gán lại).
-        self.w("static " + self.c_decl(g.name, decl_type, None, const=False) + ";")
+        self.w("static " + attr_sp
+               + self.c_decl(g.name, decl_type, None, const=False) + ";")
         self._defer_global_init(g.name, g.value)
 
     def _defer_global_init(self, lhs, value):
@@ -523,7 +649,10 @@ class Codegen:
             qual = "static inline "
         elif fn.is_extern:
             qual = "extern "
-        return f"{qual}{ret} {self.mangle(fn)}({params})"
+        # Thuộc tính @ (naked/noreturn/section/align/inline/...) đặt trước khai báo.
+        quals, attr = self._gnu_attrs(getattr(fn, "attrs", []))
+        prefix = (attr + " " if attr else "") + qual + (quals + " " if quals else "")
+        return f"{prefix}{ret} {self.mangle(fn)}({params})"
 
     def gen_fn(self, fn: A.Function):
         self.w(self.fn_signature(fn) + " {")
@@ -940,7 +1069,16 @@ class Codegen:
         lines = [l.strip() for l in st.code.split("\n") if l.strip()]
         joined = "\\n\\t".join(lines)
         vol = " __volatile__" if st.volatile else ""
-        self.w(f'__asm__{vol}("{joined}");')
+        if not getattr(st, "extended", False):
+            self.w(f'__asm__{vol}("{joined}");')
+            return
+        # asm mở rộng (GCC): "template" : outputs : inputs : clobbers
+        def render_ops(ops):
+            return ", ".join(f'"{c}" ({self.gen_expr(e)})' for c, e in ops)
+        outs = render_ops(st.outputs)
+        ins = render_ops(st.inputs)
+        clob = ", ".join(f'"{c}"' for c in st.clobbers)
+        self.w(f'__asm__{vol}("{joined}" : {outs} : {ins} : {clob});')
 
     # ---------- biểu thức ----------
     def gen_expr(self, e) -> str:
@@ -1159,6 +1297,8 @@ class Codegen:
                     else:
                         parts.append(self.gen_expr(a))
                 return f"{name}({', '.join(parts)})"
+            if name in self._OS_BUILTINS:
+                return self._gen_os_call(e, name)
         fn = self.gen_expr(e.func)
         arg_cs = [self.gen_expr(a) for a in e.args]
         # Ép đánh giá TRÁI-SANG-PHẢI khi cần: vật hoá callee (nếu có tác dụng phụ)

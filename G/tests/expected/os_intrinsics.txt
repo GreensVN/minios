@@ -1,0 +1,8 @@
+popcount(0xFF)=8
+clz_u8(1)=7 ctz_u8(0x80)=7
+bswap32(0x11223344)=44332211
+bswap16(0x0102)=201
+rotl_u8(1,1)=2 rotr_u8(1,1)=128
+memcpy dst[0]=A memcmp=0
+vol_read=cafe
+static_assert OK

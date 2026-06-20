@@ -15,7 +15,7 @@ from .checker import Checker, CheckError
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -187,18 +187,38 @@ def find_cc(preferred=None):
     return "cc"
 
 
-def build_executable(args, extra, result):
-    """Biên dịch mã C đã sinh ra file thực thi qua cc; trả về mã thoát."""
+def _cc_common_flags(args):
+    """Cờ cc dùng chung cho mọi chế độ biên dịch native (exe/obj/asm)."""
+    flags = [f"-O{args.O}", "-I", RUNTIME_DIR, "-std=gnu11", "-w"]
+    if args.freestanding:
+        # Không phụ thuộc libc/môi trường lưu trữ — dùng cho kernel/firmware.
+        # Tắt bảo vệ stack & PIC vì kernel tự quản lý mọi thứ; bật runtime
+        # freestanding (memcpy/memset tự cài, panic = dừng CPU).
+        flags += ["-ffreestanding", "-fno-stack-protector", "-fno-pic",
+                  "-DG_FREESTANDING"]
+    return flags
+
+
+def build_native(args, extra, result):
+    """Biên dịch mã C đã sinh ra: file thực thi (mặc định), file đối tượng .o
+    (-c, để ghép với bootloader/linker script), hoặc assembly .s (-S).
+    Trả về mã thoát."""
     c_code = result["c"]
-    if not result["has_main"]:
+    mode = "obj" if args.compile_obj else ("asm" if args.emit_asm else "exe")
+
+    # Chỉ chế độ 'exe' HOSTED mới bắt buộc có 'main' (cần điểm vào để liên kết).
+    # Freestanding/đối tượng/asm: điểm vào do người dùng/linker quyết định.
+    if mode == "exe" and not args.freestanding and not result["has_main"]:
         print("gc: \033[1;31mlỗi:\033[0m không tìm thấy hàm 'main' "
-              "(cần 'fn main() -> int { ... }' để tạo file thực thi)",
+              "(cần 'fn main() -> int { ... }' để tạo file thực thi; hoặc dùng "
+              "'-c' để xuất file đối tượng, hoặc '--freestanding' cho kernel)",
               file=sys.stderr)
         return 1
 
     base = os.path.splitext(os.path.basename(args.input))[0]
     out_dir = os.path.dirname(os.path.abspath(args.input)) or "."
-    out_path = args.output or os.path.join(out_dir, base)
+    default_ext = {"obj": ".o", "asm": ".s", "exe": ""}[mode]
+    out_path = args.output or os.path.join(out_dir, base + default_ext)
 
     cc = find_cc(args.cc)
     if args.keep_c:
@@ -212,8 +232,15 @@ def build_executable(args, extra, result):
         c_path = tf.name
         keep = False
 
-    cmd = [cc, c_path, "-o", out_path, f"-O{args.O}", "-I", RUNTIME_DIR,
-           "-std=gnu11", "-lm", "-w"] + extra
+    cmd = [cc, c_path, "-o", out_path] + _cc_common_flags(args)
+    if mode == "obj":
+        cmd.append("-c")
+    elif mode == "asm":
+        cmd.append("-S")
+    cmd += extra
+    if mode == "exe":
+        # Liên kết: freestanding bỏ libc; hosted cần libm cho lib/std (toán f64).
+        cmd += ["-nostdlib"] if args.freestanding else ["-lm"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     finally:
@@ -226,10 +253,12 @@ def build_executable(args, extra, result):
         print(proc.stderr, file=sys.stderr)
         return 1
 
-    print(f"gc: \033[32mđã biên dịch\033[0m -> {out_path}"
+    label = {"obj": "đã tạo đối tượng", "asm": "đã xuất assembly",
+             "exe": "đã biên dịch"}[mode]
+    print(f"gc: \033[32m{label}\033[0m -> {out_path}"
           + (f"  (giữ {c_path})" if keep else ""))
 
-    if args.run:
+    if args.run and mode == "exe" and not args.freestanding:
         print(f"gc: chạy {out_path}\n" + "-" * 44)
         sys.stdout.flush()
         rc = subprocess.run([out_path]).returncode
@@ -250,6 +279,14 @@ def main(argv):
     ap.add_argument("--tokens", action="store_true", help="in danh sách token")
     ap.add_argument("--ast", action="store_true", help="in cây cú pháp AST")
     ap.add_argument("--cc", default=None, help="trình biên dịch C (mặc định tự dò)")
+    ap.add_argument("--freestanding", action="store_true",
+                    help="chế độ không libc (kernel/firmware): -ffreestanding "
+                         "-nostdlib, không cần 'main', runtime tự cài memcpy/panic")
+    ap.add_argument("-c", "--compile-obj", action="store_true",
+                    help="biên dịch thành file đối tượng .o (không liên kết) — "
+                         "để ghép với bootloader/linker script")
+    ap.add_argument("-S", "--emit-asm", action="store_true",
+                    help="xuất mã assembly .s của chương trình")
     ap.add_argument("-O", default="2", help="mức tối ưu (0,1,2,3,s,g), mặc định 2")
     ap.add_argument("--debug", action="store_true",
                     help="in traceback đầy đủ khi gặp lỗi nội bộ")
@@ -302,4 +339,4 @@ def main(argv):
             print(result["c"])
         return 0
 
-    return build_executable(args, extra, result)
+    return build_native(args, extra, result)

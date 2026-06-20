@@ -34,7 +34,26 @@ BUILTINS = {"print", "println", "eprint", "eprintln", "printf", "format",
             "len", "assert", "panic", "min", "max", "abs", "clamp",
             "g_alloc", "g_free", "g_realloc", "unreachable", "todo",
             "typeof", "swap", "dbg",
-            "assert_eq", "assert_ne", "check_eq", "check_ne", "test_summary"}
+            "assert_eq", "assert_ne", "check_eq", "check_ne", "test_summary",
+            # ----- intrinsics phát triển hệ điều hành -----
+            # bộ nhớ thô (libc hosted / runtime freestanding tự cài):
+            "memcpy", "memset", "memmove", "memcmp",
+            # MMIO (đọc/ghi qua 'volatile'):
+            "vol_read", "vol_write",
+            # thao tác bit (theo bề rộng kiểu):
+            "popcount", "clz", "ctz", "bswap", "rotl", "rotr",
+            # điều khiển CPU & thời gian (x86; lệnh đặc quyền chạy ở ring 0):
+            "halt", "cli", "sti", "pause", "breakpoint", "io_wait", "rdtsc",
+            # cổng I/O x86 (đặc quyền):
+            "inb", "outb", "inw", "outw", "inl", "outl",
+            # khẳng định lúc biên dịch:
+            "static_assert"}
+
+# Nhóm intrinsics đơn giản dùng chung khi suy luận kiểu.
+_OS_NULLARY_VOID = {"halt", "cli", "sti", "pause", "breakpoint", "io_wait"}
+_OS_PORT_OUT = {"outb", "outw", "outl"}
+_OS_BIT_TO_INT = {"popcount", "clz", "ctz"}    # trả về int
+_OS_BIT_SAME = {"bswap", "rotl", "rotr"}       # trả về kiểu của đối số đầu
 
 # Hàm thư viện C bị kéo vào bởi runtime (stdio/stdlib/string/math/time...). Một
 # hàm G *không* 'extern' trùng tên một trong số này sẽ gây lỗi C khó hiểu
@@ -164,6 +183,18 @@ class Checker:
         self.prog.enum_tables = self.enums
         self.collect_funcs()
         self.collect_globals()
+        # Kiểm tra thuộc tính @ (đích hợp lệ, số/kiểu đối số) trước khi sinh mã.
+        for it in self.prog.items:
+            self.cur_file = getattr(it, "src_file", None)
+            if isinstance(it, A.Function):
+                self.validate_attrs(getattr(it, "attrs", []), "fn", it)
+            elif isinstance(it, A.StructDef):
+                self.validate_attrs(getattr(it, "attrs", []), "struct", it)
+            elif isinstance(it, A.GlobalVar):
+                self.validate_attrs(getattr(it, "attrs", []), "global", it)
+            elif isinstance(it, A.Impl):
+                for m in it.methods:
+                    self.validate_attrs(getattr(m, "attrs", []), "fn", m)
         for it in self.prog.items:
             self.cur_file = getattr(it, "src_file", None)
             if isinstance(it, A.Function) and it.body is not None:
@@ -173,6 +204,48 @@ class Checker:
                     if m.body is not None:
                         self.check_function(m)
         return self.prog
+
+    # ---------- thuộc tính @ (ABI/bố cục cho phát triển hệ điều hành) ----------
+    # tên -> (đích hợp lệ, số đối số, loại đối số)  loại: None | 'int' | 'str'
+    _ATTR_TABLE = {
+        "packed":    ({"struct"}, 0, None),
+        "align":     ({"struct", "fn", "global"}, 1, "int"),
+        "aligned":   ({"struct", "fn", "global"}, 1, "int"),
+        "naked":     ({"fn"}, 0, None),
+        "noreturn":  ({"fn"}, 0, None),
+        "interrupt": ({"fn"}, 0, None),
+        "inline":    ({"fn"}, 0, None),
+        "used":      ({"fn", "global"}, 0, None),
+        "section":   ({"fn", "global"}, 1, "str"),
+    }
+
+    def validate_attrs(self, attrs, kind, node):
+        for a in attrs:
+            spec = self._ATTR_TABLE.get(a.name)
+            if spec is None:
+                sug = suggest(a.name, set(self._ATTR_TABLE))
+                msg = f"thuộc tính '@{a.name}' không nhận ra"
+                if sug:
+                    msg += f" — có phải '@{sug}'?"
+                self.err(msg, a)
+            targets, arity, argkind = spec
+            if kind not in targets:
+                self.err(
+                    f"thuộc tính '@{a.name}' không áp dụng cho {kind} "
+                    f"(chỉ: {', '.join(sorted(targets))})", a)
+            if len(a.args) != arity:
+                self.err(
+                    f"thuộc tính '@{a.name}' cần {arity} đối số, nhận {len(a.args)}", a)
+            if argkind == "int":
+                v = self._fold_const_int(a.args[0])
+                if v is None or v <= 0 or (v & (v - 1)) != 0:
+                    self.err(
+                        f"'@{a.name}' cần một hằng số nguyên dương là LUỸ THỪA CỦA "
+                        f"HAI (vd 8, 16, 4096)", a)
+            elif argkind == "str":
+                if not isinstance(a.args[0], A.StrLit):
+                    self.err(f"'@{a.name}' cần một chuỗi literal "
+                             f"(vd '@{a.name}(\".text.boot\")')", a)
 
     # ---------- thu thập hằng nguyên (cho cỡ mảng tượng trưng) ----------
     def collect_const_values(self):
@@ -1091,7 +1164,17 @@ class Checker:
                 self.err("'continue' nằm ngoài vòng lặp", st)
         elif isinstance(st, A.ExprStmt):
             self.infer(st.expr)
-        # Asm: không cần kiểm tra
+        elif isinstance(st, A.Asm):
+            # asm mở rộng: phân giải các toán hạng (gắn gtype/c_name, bắt biến chưa
+            # khai báo). Toán hạng output phải là ô nhớ (lvalue) khả biến.
+            for cons, ex in getattr(st, "outputs", []):
+                self.infer(ex)
+                if not self._is_lvalue(ex):
+                    self.err("toán hạng output ('=...') của asm phải là một ô nhớ "
+                             "(biến/trường/phần tử/*con_trỏ)", st)
+                self._check_lvalue_mutable(ex, st)
+            for cons, ex in getattr(st, "inputs", []):
+                self.infer(ex)
 
     def check_for(self, st: A.For):
         st_t = self.infer(st.start)
@@ -1836,19 +1919,23 @@ class Checker:
         # ----- builtin -----
         if isinstance(e.func, A.Ident) and e.func.name in BUILTINS:
             return self.infer_builtin(e)
-        # ----- gọi định danh không phải hàm? (biến thường) -----
+        # ----- gọi qua một định danh: biến/tham số CHE (shadow) hàm cùng tên -----
+        # Một biến cục bộ/tham số/global trùng tên với hàm toàn cục phải được ưu
+        # tiên (gọi như con trỏ hàm) — KHÔNG phân giải nhầm về hàm toàn cục. (Trước
+        # đây 'name in self.funcs' được kiểm trước, nên 'fn f' toàn cục che mất một
+        # tham số tên 'f' — vd 'fold(..., f)' trong std — gây lỗi số tham số sai.)
         if isinstance(e.func, A.Ident):
             nm = e.func.name
-            if nm not in self.funcs:
-                info = self.lookup(nm)
-                if info is not None and info[0].kind not in ("func", "unknown"):
-                    self.err(
-                        f"'{nm}' kiểu '{self.tyname(info[0])}' không phải hàm "
-                        f"để gọi", e)
+            binding = self.lookup(nm)
+            if binding is not None and binding[0].kind not in ("func", "unknown"):
+                self.err(
+                    f"'{nm}' kiểu '{self.tyname(binding[0])}' không phải hàm "
+                    f"để gọi", e)
         # ----- hàm thường -----
         ft = self.infer(e.func)
         arg_types = [self.infer(a) for a in e.args]
-        if isinstance(e.func, A.Ident) and e.func.name in self.funcs:
+        if (isinstance(e.func, A.Ident) and e.func.name in self.funcs
+                and self.lookup(e.func.name) is None):
             fdef = self.funcs[e.func.name]
             if len(e.args) != len(fdef.params):
                 self.err(
@@ -2077,6 +2164,90 @@ class Checker:
             if e.args:
                 self.err("test_summary() không nhận tham số", e)
             return T.INT
+        # ===== intrinsics phát triển hệ điều hành =====
+        if name in _OS_NULLARY_VOID:
+            if e.args:
+                self.err(f"{name}() không nhận tham số", e)
+            return T.VOID
+        if name == "rdtsc":
+            if e.args:
+                self.err("rdtsc() không nhận tham số", e)
+            return T.U64
+        if name in ("memcpy", "memmove", "memset", "memcmp"):
+            if len(e.args) != 3:
+                self.err(f"{name}(dst, {'src' if name != 'memset' else 'byte'}, n) "
+                         f"cần đúng 3 tham số", e)
+            ts = [self.infer(a) for a in e.args]
+            if e.args:
+                dt = ts[0]
+                if not (self._ptrlike(dt) or dt.kind in ("array", "unknown")):
+                    self.err(f"{name}: tham số đầu phải là con trỏ/mảng, nhận "
+                             f"'{self.tyname(dt)}'", e)
+            return T.INT if name == "memcmp" else (ts[0] if ts else T.ptr_of(T.VOID))
+        if name == "vol_read":
+            if len(e.args) != 1:
+                self.err("vol_read(ptr) cần đúng 1 tham số", e)
+                return T.UNKNOWN
+            pt = self.infer(e.args[0])
+            if pt.kind == "ptr":
+                return pt.elem
+            if pt.kind == "unknown":
+                return T.UNKNOWN
+            self.err(f"vol_read cần một con trỏ '*T', nhận '{self.tyname(pt)}'", e)
+        if name == "vol_write":
+            if len(e.args) != 2:
+                self.err("vol_write(ptr, val) cần đúng 2 tham số", e)
+                return T.VOID
+            pt = self.infer(e.args[0])
+            vt = self.infer(e.args[1])
+            if pt.kind == "ptr":
+                if not self.assignable(pt.elem, vt):
+                    self.err(
+                        f"vol_write: giá trị kiểu '{self.tyname(vt)}' không gán được "
+                        f"cho ô '{self.tyname(pt.elem)}'", e)
+            elif pt.kind != "unknown":
+                self.err(f"vol_write cần một con trỏ '*T', nhận '{self.tyname(pt)}'", e)
+            return T.VOID
+        if name in _OS_BIT_TO_INT:
+            if len(e.args) != 1:
+                self.err(f"{name}(x) cần đúng 1 tham số", e)
+            if e.args:
+                xt = self.infer(e.args[0])
+                if not xt.is_integer() and xt.kind != "unknown":
+                    self.err(f"{name}(x) cần số nguyên, nhận '{self.tyname(xt)}'", e)
+            return T.INT
+        if name in _OS_BIT_SAME:
+            nargs = 1 if name == "bswap" else 2
+            if len(e.args) != nargs:
+                self.err(f"{name}(...) cần đúng {nargs} tham số", e)
+            xt = self.infer(e.args[0]) if e.args else T.U64
+            for a in e.args[1:]:
+                self.infer(a)
+            if not xt.is_integer() and xt.kind != "unknown":
+                self.err(f"{name}: cần số nguyên, nhận '{self.tyname(xt)}'", e)
+            return xt if xt.kind != "unknown" else T.U64
+        if name in ("inb", "inw", "inl"):
+            if len(e.args) != 1:
+                self.err(f"{name}(port) cần đúng 1 tham số", e)
+            if e.args:
+                self.infer(e.args[0])
+            return {"inb": T.U8, "inw": T.U16, "inl": T.U32}[name]
+        if name in _OS_PORT_OUT:
+            if len(e.args) != 2:
+                self.err(f"{name}(port, val) cần đúng 2 tham số", e)
+            for a in e.args:
+                self.infer(a)
+            return T.VOID
+        if name == "static_assert":
+            if len(e.args) != 2 or not isinstance(e.args[1], A.StrLit):
+                self.err('static_assert(điều_kiện, "thông điệp"): cần một điều kiện '
+                         "hằng và một chuỗi literal", e)
+                return T.VOID
+            self.infer(e.args[0])
+            cv = self._fold_const_int(e.args[0])
+            if cv is not None and cv == 0:
+                self.err(f"static_assert thất bại lúc biên dịch: {e.args[1].value}", e)
+            return T.VOID
         # printf/panic/g_free và khác
         for a in e.args:
             self.infer(a)

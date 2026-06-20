@@ -30,6 +30,14 @@ class Program:
 
 
 @dataclass
+class Attr:                     # @name | @name(arg, ...)  — thuộc tính C/ABI
+    name: str
+    args: list = field(default_factory=list)   # list[expr]
+    line: int = 0
+    col: int = 0
+
+
+@dataclass
 class Param:
     name: str
     type: Type
@@ -44,6 +52,7 @@ class Function:
     is_comptime: bool = False
     is_extern: bool = False
     recv: Optional[str] = None     # tên struct nếu là method (impl)
+    attrs: list = field(default_factory=list)   # list[Attr]
     line: int = 0
     col: int = 0
 
@@ -52,6 +61,7 @@ class Function:
 class StructDef:
     name: str
     fields: list        # list[Param]
+    attrs: list = field(default_factory=list)   # list[Attr]
     line: int = 0
     col: int = 0
 
@@ -77,6 +87,9 @@ class GlobalVar:
     value: object
     mutable: bool
     is_const: bool
+    is_extern: bool = False     # 'extern let/const': ký hiệu định nghĩa nơi khác
+                                # (assembly/linker script) — chỉ khai báo, không cấp
+    attrs: list = field(default_factory=list)   # list[Attr]
     line: int = 0
     col: int = 0
 
@@ -173,7 +186,13 @@ class Defer:
 @dataclass
 class Asm:
     code: str
+    outputs: list = field(default_factory=list)   # list[(constraint:str, expr)]
+    inputs: list = field(default_factory=list)     # list[(constraint:str, expr)]
+    clobbers: list = field(default_factory=list)   # list[str]
     volatile: bool = True
+    extended: bool = False     # True nếu có toán hạng (asm mở rộng kiểu GCC)
+    line: int = 0
+    col: int = 0
 
 
 @dataclass
