@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: static_assert thất bại lúc biên dịch: không bao giờ đúng

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể gán cho 'x' (bất biến — dùng 'let mut')

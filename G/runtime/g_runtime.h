@@ -1,16 +1,155 @@
 /* === G Language Runtime ===
  * Header nền tảng tự động include vào mọi chương trình G.
  * Cầu nối tới thư viện chuẩn C + các tiện ích lấy cảm hứng từ Rust/Zig.
+ *
+ * Hai chế độ:
+ *   - HOSTED (mặc định): liên kết libc đầy đủ (stdio/stdlib/string/math/...).
+ *   - FREESTANDING (-DG_FREESTANDING, bật bởi 'gc --freestanding'): KHÔNG libc —
+ *     dùng để viết hệ điều hành/kernel/firmware. Chỉ các header tuân thủ
+ *     freestanding (stdint/stddef/stdbool) được nạp; runtime tự cài memcpy/
+ *     memset/memmove/memcmp (trình biên dịch C có thể sinh lời gọi tới chúng) và
+ *     g_panic/halt. Không có heap (g_alloc), in ấn (print), hay đọc stdin.
  */
 #ifndef G_RUNTIME_H
 #define G_RUNTIME_H
 
+/* Header tuân thủ freestanding (C11 §4) — an toàn ở mọi chế độ. */
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+/* ===================================================================== */
+/*  INTRINSICS phần cứng/CPU — luôn sẵn có (kể cả freestanding).          */
+/*  Nền tảng để viết hệ điều hành: cổng I/O, điều khiển CPU, thao tác bit.*/
+/* ===================================================================== */
+
+/* ---- Đọc/ghi BỘ NHỚ qua 'volatile' (MMIO) ----
+ * Trình biên dịch không được tối ưu bỏ các truy cập này (thanh ghi phần cứng
+ * ánh xạ vào bộ nhớ có thể đổi giá trị ngoài tầm kiểm soát của CPU). Cài đặt
+ * cụ thể do codegen sinh: '*(volatile T*)p'. (Xem builtin vol_read/vol_write.) */
+
+/* ---- Thao tác bit an toàn (bao bọc __builtin_*; UB-trên-0 được xử lý) ---- */
+static inline int g_popcount(uint64_t x) { return __builtin_popcountll(x); }
+static inline int g_clz(uint64_t x) { return x ? __builtin_clzll(x) : 64; }
+static inline int g_ctz(uint64_t x) { return x ? __builtin_ctzll(x) : 64; }
+static inline uint16_t g_bswap16(uint16_t x) { return __builtin_bswap16(x); }
+static inline uint32_t g_bswap32(uint32_t x) { return __builtin_bswap32(x); }
+static inline uint64_t g_bswap64(uint64_t x) { return __builtin_bswap64(x); }
+static inline uint64_t g_rotl64(uint64_t x, unsigned n) {
+    n &= 63u; return n ? ((x << n) | (x >> (64 - n))) : x;
+}
+static inline uint64_t g_rotr64(uint64_t x, unsigned n) {
+    n &= 63u; return n ? ((x >> n) | (x << (64 - n))) : x;
+}
+
+/* ---- Điều khiển CPU & cổng I/O (x86) ----
+ * Các lệnh ĐẶC QUYỀN (hlt/cli/sti/in/out) chỉ chạy ở ring 0 (kernel) — gọi từ
+ * không gian người dùng sẽ #GP (SIGSEGV). 'pause'/'nop'/'rdtsc' thì luôn dùng
+ * được. Trên kiến trúc khác x86, các hàm đặc quyền là no-op an toàn để mã vẫn
+ * biên dịch (cổng I/O không tồn tại ngoài x86). */
+#if defined(__x86_64__) || defined(__i386__)
+static inline void g_hlt(void)   { __asm__ __volatile__("hlt"); }
+static inline void g_cli(void)   { __asm__ __volatile__("cli"); }
+static inline void g_sti(void)   { __asm__ __volatile__("sti"); }
+static inline void g_pause(void) { __asm__ __volatile__("pause"); }
+static inline void g_nop(void)   { __asm__ __volatile__("nop"); }
+static inline void g_breakpoint(void) { __asm__ __volatile__("int3"); }
+static inline uint64_t g_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline void g_outb(uint16_t port, uint8_t val) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline void g_outw(uint16_t port, uint16_t val) {
+    __asm__ __volatile__("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline void g_outl(uint16_t port, uint32_t val) {
+    __asm__ __volatile__("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline uint8_t g_inb(uint16_t port) {
+    uint8_t r; __asm__ __volatile__("inb %1, %0" : "=a"(r) : "Nd"(port)); return r;
+}
+static inline uint16_t g_inw(uint16_t port) {
+    uint16_t r; __asm__ __volatile__("inw %1, %0" : "=a"(r) : "Nd"(port)); return r;
+}
+static inline uint32_t g_inl(uint16_t port) {
+    uint32_t r; __asm__ __volatile__("inl %1, %0" : "=a"(r) : "Nd"(port)); return r;
+}
+static inline void g_io_wait(void) {  /* trễ ~1us bằng ghi vào cổng không dùng */
+    __asm__ __volatile__("outb %%al, $0x80" : : "a"((uint8_t)0));
+}
+#else
+static inline void g_hlt(void)   { for (;;) {} }
+static inline void g_cli(void)   {}
+static inline void g_sti(void)   {}
+static inline void g_pause(void) { __asm__ __volatile__("" ::: "memory"); }
+static inline void g_nop(void)   {}
+static inline void g_breakpoint(void) {}
+static inline uint64_t g_rdtsc(void) { return 0; }
+static inline void g_outb(uint16_t port, uint8_t val) { (void)port; (void)val; }
+static inline void g_outw(uint16_t port, uint16_t val) { (void)port; (void)val; }
+static inline void g_outl(uint16_t port, uint32_t val) { (void)port; (void)val; }
+static inline uint8_t  g_inb(uint16_t port) { (void)port; return 0; }
+static inline uint16_t g_inw(uint16_t port) { (void)port; return 0; }
+static inline uint32_t g_inl(uint16_t port) { (void)port; return 0; }
+static inline void g_io_wait(void) {}
+#endif
+
+/* ===================================================================== */
+#ifdef G_FREESTANDING
+/* --------------------- CHẾ ĐỘ FREESTANDING (không libc) --------------- */
+/* Trình biên dịch C (kể cả -ffreestanding) vẫn có thể sinh lời gọi tới
+ * memcpy/memset/memmove/memcmp (sao chép struct, khởi tạo mảng). Phải tự cài.
+ * Tắt 'tree-loop-distribute-patterns' để GCC không biến vòng lặp dưới đây
+ * THÀNH chính memcpy/memset (đệ quy vô hạn). */
+#if defined(__GNUC__) && !defined(__clang__)
+#define G_NOBUILTIN __attribute__((optimize("no-tree-loop-distribute-patterns")))
+#else
+#define G_NOBUILTIN
+#endif
+
+G_NOBUILTIN void* memcpy(void* d, const void* s, size_t n) {
+    unsigned char* dp = (unsigned char*)d; const unsigned char* sp = (const unsigned char*)s;
+    for (size_t i = 0; i < n; i++) dp[i] = sp[i];
+    return d;
+}
+G_NOBUILTIN void* memmove(void* d, const void* s, size_t n) {
+    unsigned char* dp = (unsigned char*)d; const unsigned char* sp = (const unsigned char*)s;
+    if (dp < sp) { for (size_t i = 0; i < n; i++) dp[i] = sp[i]; }
+    else { for (size_t i = n; i > 0; i--) dp[i - 1] = sp[i - 1]; }
+    return d;
+}
+G_NOBUILTIN void* memset(void* d, int c, size_t n) {
+    unsigned char* dp = (unsigned char*)d;
+    for (size_t i = 0; i < n; i++) dp[i] = (unsigned char)c;
+    return d;
+}
+G_NOBUILTIN int memcmp(const void* a, const void* b, size_t n) {
+    const unsigned char* pa = (const unsigned char*)a; const unsigned char* pb = (const unsigned char*)b;
+    for (size_t i = 0; i < n; i++) if (pa[i] != pb[i]) return (int)pa[i] - (int)pb[i];
+    return 0;
+}
+G_NOBUILTIN size_t strlen(const char* s) { size_t n = 0; while (s[n]) n++; return n; }
+
+/* panic/unreachable/todo: không có stderr/exit -> dừng CPU vĩnh viễn. */
+_Noreturn static inline void g_panic(const char* msg) { (void)msg; g_cli(); for (;;) g_hlt(); }
+_Noreturn static inline void g_unreachable(const char* w) { (void)w; g_cli(); for (;;) g_hlt(); }
+_Noreturn static inline void g_todo(const char* w) { (void)w; g_cli(); for (;;) g_hlt(); }
+
+#define g_min(a, b)      ({ __auto_type _ga = (a); __auto_type _gb = (b); _ga < _gb ? _ga : _gb; })
+#define g_max(a, b)      ({ __auto_type _ga = (a); __auto_type _gb = (b); _ga > _gb ? _ga : _gb; })
+#define g_abs(x)         ({ __auto_type _gx = (x); _gx < 0 ? -_gx : _gx; })
+#define g_clamp(x, lo, hi) ({ __auto_type _gc = (x); __auto_type _gl = (lo); __auto_type _gh = (hi); \
+                              _gc < _gl ? _gl : (_gc > _gh ? _gh : _gc); })
+#define g_swap(T, a, b)  do { T _gt = (a); (a) = (b); (b) = _gt; } while (0)
+
+#else
+/* --------------------- CHẾ ĐỘ HOSTED (libc đầy đủ) -------------------- */
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <string.h>
-#include <stddef.h>
 #include <math.h>
 #include <time.h>
 #include <unistd.h>
@@ -304,5 +443,7 @@ static inline double g_clock_secs(void) {
 #define G_U16_MAX  65535u
 #define G_U32_MAX  4294967295u
 #define G_U64_MAX  18446744073709551615ULL
+
+#endif /* G_FREESTANDING */
 
 #endif /* G_RUNTIME_H */

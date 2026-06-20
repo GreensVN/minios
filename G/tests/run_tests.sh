@@ -94,6 +94,23 @@ run_fail() {
     fi
 }
 
+# Test "freestanding": chương trình phát triển hệ điều hành (kernel/firmware)
+# phải BIÊN DỊCH được ở chế độ --freestanding -c (không libc) thành file đối
+# tượng. KHÔNG chạy (có thể chứa lệnh đặc quyền hlt/cli/inb...). Khoá lại khả
+# năng biên dịch không-libc của các intrinsic OS, @attributes, extern, asm mở rộng.
+run_fs() {
+    local src="$1"
+    local name; name="$(basename "$src" .g)"
+    if "$GC" "$src" --freestanding -c -o "$TMP/$name.o" >"$TMP/$name.fs" 2>&1; then
+        echo -e "${GREEN}PASS${RST}         $name (freestanding)"
+        pass=$((pass+1))
+    else
+        echo -e "${RED}FAIL${RST}         $name (freestanding)"
+        cat "$TMP/$name.fs"
+        fail=$((fail+1))
+    fi
+}
+
 echo "=== Bộ test ngôn ngữ G ==="
 for src in "$ROOT"/examples/*.g "$ROOT"/tests/cases/*.g; do
     [ -e "$src" ] || continue
@@ -102,6 +119,10 @@ done
 for src in "$ROOT"/tests/fail/*.g; do
     [ -e "$src" ] || continue
     run_fail "$src"
+done
+for src in "$ROOT"/tests/freestanding/*.g "$ROOT"/examples/kernel/*.g; do
+    [ -e "$src" ] || continue
+    run_fs "$src"
 done
 
 echo "-------------------------"

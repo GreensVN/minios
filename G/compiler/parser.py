@@ -104,26 +104,68 @@ class Parser:
             self.skip_semis()
             if self.check("eof"):
                 break
+            # Thuộc tính '@name'/'@name(arg)' đứng trước khai báo (fn/struct/global).
+            attrs = self.parse_attrs()
             if self.is_kw("import"):
+                if attrs:
+                    self.error("'import' không nhận thuộc tính @")
                 self.advance()
                 if self.check("str"):
                     prog.imports.append(self.advance().value)
                 else:
                     prog.imports.append(self.expect("id").value)
                 self.skip_semis()
-            elif self.is_kw("fn") or self.is_kw("comptime") or self.is_kw("extern"):
-                prog.items.append(self.parse_fn())
+            elif self.is_kw("fn") or self.is_kw("comptime"):
+                prog.items.append(self._with_attrs(self.parse_fn(), attrs))
+            elif self.is_kw("extern"):
+                # 'extern fn ...' (hàm libc) | 'extern let/const ...' (ký hiệu
+                # linker/assembly — vd 'extern let _kernel_end: u8').
+                if self.at(1).kind == "kw" and self.at(1).value in ("let", "const"):
+                    prog.items.append(self._with_attrs(self.parse_global(), attrs))
+                else:
+                    prog.items.append(self._with_attrs(self.parse_fn(), attrs))
             elif self.is_kw("struct"):
-                prog.items.append(self.parse_struct())
+                prog.items.append(self._with_attrs(self.parse_struct(), attrs))
             elif self.is_kw("enum"):
+                if attrs:
+                    self.error("'enum' không nhận thuộc tính @")
                 prog.items.append(self.parse_enum())
             elif self.is_kw("impl"):
+                if attrs:
+                    self.error("'impl' không nhận thuộc tính @ (đặt @ trên method)")
                 prog.items.append(self.parse_impl())
             elif self.is_kw("let") or self.is_kw("const"):
-                prog.items.append(self.parse_global())
+                prog.items.append(self._with_attrs(self.parse_global(), attrs))
             else:
                 self.error("cần khai báo cấp cao (fn/struct/enum/impl/let/const/import)")
         return prog
+
+    def parse_attrs(self):
+        """Đọc danh sách thuộc tính '@name' / '@name(arg, ...)' (kiểu Rust/C) đứng
+        trước một khai báo. Cho phép xuống dòng giữa các thuộc tính (ASI chèn ';')."""
+        attrs = []
+        while self.is_op("@"):
+            t = self.advance()
+            name = self.expect("id").value
+            args = []
+            if self.accept("op", "("):
+                while not self.is_op(")"):
+                    args.append(self.parse_expr())
+                    if not self.accept("op", ","):
+                        break
+                self.expect("op", ")")
+            attrs.append(A.Attr(name, args, t.line, t.col))
+            self.skip_semis()
+        return attrs
+
+    @staticmethod
+    def _with_attrs(item, attrs):
+        if attrs:
+            try:
+                item.attrs = attrs
+            except Exception:
+                pass
+        return item
 
     def parse_fn(self, recv=None) -> A.Function:
         t = self.cur()
@@ -196,13 +238,15 @@ class Parser:
         methods = []
         self.skip_semis()
         while not self.is_op("}"):
-            methods.append(self.parse_fn(recv=struct))
+            mattrs = self.parse_attrs()
+            methods.append(self._with_attrs(self.parse_fn(recv=struct), mattrs))
             self.skip_semis()
         self.expect("op", "}")
         return A.Impl(struct, methods)
 
     def parse_global(self) -> A.GlobalVar:
         t = self.cur()
+        is_extern = bool(self.accept("kw", "extern"))
         is_const = bool(self.accept("kw", "const"))
         if not is_const:
             self.expect("kw", "let")
@@ -215,7 +259,16 @@ class Parser:
         if self.accept("op", "="):
             value = self.parse_expr()
         self.skip_semis()
-        return A.GlobalVar(name, typ, value, mutable, is_const, **self.pos_of(t))
+        if is_extern:
+            # Ký hiệu ngoài: chỉ khai báo (kiểu bắt buộc, không giá trị khởi tạo).
+            if typ is None:
+                self.error("'extern let/const' cần chú thích kiểu "
+                           "(vd 'extern let _kernel_end: u8')")
+            if value is not None:
+                self.error("'extern let/const' không được gán giá trị "
+                           "(ký hiệu được định nghĩa ở nơi khác)")
+        return A.GlobalVar(name, typ, value, mutable, is_const,
+                           is_extern=is_extern, **self.pos_of(t))
 
     # ---------- kiểu ----------
     def parse_type(self) -> A.Type:
@@ -417,16 +470,48 @@ class Parser:
         return lo
 
     def parse_asm(self) -> A.Asm:
+        """asm cơ bản:    asm { "nop" "nop" }
+        asm mở rộng (GCC, có toán hạng — đọc/ghi thanh ghi, MSR, control reg...):
+            asm {
+                "mov %%cr3, %0"
+                : "=r"(out)          // outputs:  "ràng buộc"(ô_nhớ)
+                : "r"(in)            // inputs:   "ràng buộc"(biểu_thức)
+                : "memory"           // clobbers: danh sách chuỗi
+            }
+        Bên trong '{ }', ASI chèn ';' sau mỗi chuỗi/')' trên dòng mới — bỏ qua."""
+        t = self.cur()
         self.expect("kw", "asm")
-        volatile = True
         self.expect("op", "{")
         parts = []
-        while not self.is_op("}") and not self.check("eof"):
-            tk = self.advance()
-            if tk.kind == "str":
-                parts.append(tk.value)
+        self.skip_semis()
+        while self.check("str"):              # template: tới ':' hoặc '}'
+            parts.append(self.advance().value)
+            self.skip_semis()
+        outputs, inputs, clobbers = [], [], []
+        extended = False
+        section = 0                           # 0=outputs, 1=inputs, 2=clobbers
+        while self.is_op(":"):
+            self.advance()
+            extended = True
+            self.skip_semis()
+            while self.check("str"):
+                s = self.advance().value
+                if section < 2:
+                    self.expect("op", "(")
+                    ex = self.parse_expr()
+                    self.expect("op", ")")
+                    (outputs if section == 0 else inputs).append((s, ex))
+                else:
+                    clobbers.append(s)
+                self.skip_semis()
+                self.accept("op", ",")
+                self.skip_semis()
+            section += 1
+            if section >= 3:
+                break
         self.expect("op", "}")
-        return A.Asm("\n".join(parts), volatile)
+        return A.Asm("\n".join(parts), outputs, inputs, clobbers,
+                     volatile=True, extended=extended, **self.pos_of(t))
 
     # ---------- biểu thức ----------
     def parse_expr(self):

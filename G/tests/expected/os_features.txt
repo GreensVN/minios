@@ -1,0 +1,9 @@
+=== G — tính năng phát triển hệ điều hành ===
+sizeof(UartRegs) đóng gói = 4 byte
+MMIO[0]=deadbeef MMIO[1]=cafe
+flags=0x7 popcount=3 ctz=0
+đổi byte 0x12345678 = 0x78563412
+xoay trái u8 0x81 <<< 1 = 3
+đếm 0 dẫn đầu của u32 0x0000FFFF = 16
+memcpy b=[10, 20, 30, 40] giống a? true
+rdtsc đo được vòng lặp (sink=499500, tốn >0 chu kỳ? true)

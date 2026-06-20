@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: thuộc tính '@packed' không áp dụng cho fn (chỉ: struct)
