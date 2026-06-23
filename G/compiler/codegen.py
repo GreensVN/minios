@@ -235,11 +235,15 @@ class Codegen:
     _OS_CALL_MAP = {
         "halt": "g_hlt", "cli": "g_cli", "sti": "g_sti", "pause": "g_pause",
         "breakpoint": "g_breakpoint", "io_wait": "g_io_wait", "rdtsc": "g_rdtsc",
+        # nullary: đọc control register & quản lý cache (không toán hạng)
+        "read_cr0": "g_read_cr0", "read_cr2": "g_read_cr2",
+        "read_cr3": "g_read_cr3", "read_cr4": "g_read_cr4", "wbinvd": "g_wbinvd",
     }
     _OS_BUILTINS = ({"memcpy", "memset", "memmove", "memcmp", "vol_read",
                      "vol_write", "popcount", "clz", "ctz", "bswap", "rotl",
                      "rotr", "inb", "outb", "inw", "outw", "inl", "outl",
-                     "static_assert"} | set(_OS_CALL_MAP))
+                     "static_assert", "write_cr0", "write_cr3", "write_cr4",
+                     "invlpg", "rdmsr", "wrmsr"} | set(_OS_CALL_MAP))
 
     @staticmethod
     def _int_width(gt) -> int:
@@ -312,6 +316,15 @@ class Codegen:
         if name == "static_assert":
             return (f"_Static_assert(({self.gen_expr(e.args[0])}), "
                     f"{self.gen_expr(e.args[1])})")
+        if name in ("write_cr0", "write_cr3", "write_cr4"):
+            return f"g_{name}((uint64_t)({self.gen_expr(e.args[0])}))"
+        if name == "invlpg":
+            return f"g_invlpg((void*)(uintptr_t)({self.gen_expr(e.args[0])}))"
+        if name == "rdmsr":
+            return f"g_rdmsr((uint32_t)({self.gen_expr(e.args[0])}))"
+        if name == "wrmsr":
+            return (f"g_wrmsr((uint32_t)({self.gen_expr(e.args[0])}), "
+                    f"(uint64_t)({self.gen_expr(e.args[1])}))")
         raise CodegenError(f"intrinsic OS chưa hỗ trợ: {name}")
 
     def emit_var_decl(self, name, t: A.Type, init_c=None, const=False):
@@ -1027,6 +1040,7 @@ class Codegen:
             return " || ".join(tests) if tests else "1"
 
         bindings = getattr(st, "bindings", [None] * len(st.arms))
+        label_used = False
         for (pats, guard, body), bcname in zip(st.arms, bindings):
             is_bind = bcname is not None
             pat_cond = "1" if (is_bind or pats is None) else cond_for(pats)
@@ -1038,7 +1052,7 @@ class Codegen:
                 self.w(f"{ctype} {bcname} = {tmp}; (void){bcname};")
                 cond = "1" if guard is None else f"({self.gen_expr(guard)})"
                 self.w(f"if ({cond}) {{")
-                self._gen_arm_body(body, end)
+                label_used |= self._gen_arm_body(body, end)
                 self.w("}")
                 self.indent -= 1
                 self.w("}")
@@ -1050,20 +1064,27 @@ class Codegen:
                 else:
                     cond = f"({pat_cond}) && ({self.gen_expr(guard)})"
                 self.w(f"if ({cond}) {{")
-                self._gen_arm_body(body, end)
+                label_used |= self._gen_arm_body(body, end)
                 self.w("}")
-        self.w(f"{end}: ;")
+        # Chỉ phát nhãn cuối khi THỰC SỰ có 'goto' nhảy tới — nếu mọi nhánh đều tự
+        # thoát (return/break/continue) thì không có goto nào, nhãn sẽ thừa
+        # (C cảnh báo 'unused label'). Bỏ nhãn cho mã C sạch.
+        if label_used:
+            self.w(f"{end}: ;")
         self.indent -= 1
         self.w("}")
 
-    def _gen_arm_body(self, body, end_label):
+    def _gen_arm_body(self, body, end_label) -> bool:
         """Sinh thân một nhánh match rồi nhảy tới nhãn cuối (nếu thân chưa tự
-        thoát bằng return/break/continue) — bảo đảm chỉ nhánh khớp đầu tiên chạy."""
+        thoát bằng return/break/continue) — bảo đảm chỉ nhánh khớp đầu tiên chạy.
+        Trả về True nếu có phát 'goto' (để caller biết nhãn cuối có được dùng)."""
         self.gen_scoped_body(body, is_loop=False)
         if not (body and isinstance(body[-1], (A.Return, A.Break, A.Continue))):
             self.indent += 1
             self.w(f"goto {end_label};")
             self.indent -= 1
+            return True
+        return False
 
     def gen_asm(self, st: A.Asm):
         lines = [l.strip() for l in st.code.split("\n") if l.strip()]

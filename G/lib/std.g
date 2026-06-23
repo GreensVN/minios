@@ -991,3 +991,45 @@ fn min3_f(a: f64, b: f64, c: f64) -> f64 {
     let m: f64 = (a < b) ? a : b
     return (m < c) ? m : c
 }
+
+// ============================================================================
+//  Căn chỉnh & thao tác bit địa chỉ (tiện cho cấp phát/phân trang, OS dev)
+//  'align' PHẢI là luỹ thừa của hai. Làm việc trên u64 cho địa chỉ/cờ.
+// ============================================================================
+
+// Làm tròn LÊN bội số gần nhất của 'align' (luỹ thừa hai): align_up(13, 8) = 16
+fn align_up(x: u64, align: u64) -> u64 {
+    return (x + align - 1) & ~(align - 1)
+}
+
+// Làm tròn XUỐNG bội số gần nhất của 'align': align_down(13, 8) = 8
+fn align_down(x: u64, align: u64) -> u64 {
+    return x & ~(align - 1)
+}
+
+// x đã căn theo 'align' (luỹ thừa hai) chưa?
+fn is_aligned(x: u64, align: u64) -> bool {
+    return (x & (align - 1)) == 0
+}
+
+// Đặt / xoá / lật / kiểm tra bit thứ n (0-based) của một u64
+fn bit_set(x: u64, n: int) -> u64 { return x | (1 as u64 << n) }
+fn bit_clear(x: u64, n: int) -> u64 { return x & ~(1 as u64 << n) }
+fn bit_toggle(x: u64, n: int) -> u64 { return x ^ (1 as u64 << n) }
+fn bit_test(x: u64, n: int) -> bool { return ((x >> n) & 1) == 1 }
+
+// log2 sàn của một u64 dương (x == 0 -> -1). Vd: int_log2(8) = 3, int_log2(9) = 3
+fn int_log2(x: u64) -> int {
+    if x == 0 { return -1 }
+    let mut v: u64 = x
+    let mut r: int = 0
+    while v > 1 { v = v >> 1; r += 1 }
+    return r
+}
+
+// Trích 'width' bit bắt đầu từ vị trí 'lo' (0-based) của một u64
+fn bits_extract(x: u64, lo: int, width: int) -> u64 {
+    if width <= 0 { return 0 }
+    if width >= 64 { return x >> lo }
+    return (x >> lo) & ((1 as u64 << width) - 1)
+}

@@ -1,0 +1,6 @@
+16 8 4096
+true false
+8 13 32
+true false
+3 3 0
+255
