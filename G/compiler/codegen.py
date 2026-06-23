@@ -806,8 +806,20 @@ class Codegen:
             if init_c is None:
                 self.w(f"int {name} = 0;")
             else:
-                q = "const " if const else ""
-                self.w(f"{q}__auto_type {name} = {init_c};")
+                gt = self.gtype_of(st.value)
+                # Kiểu VÔ HƯỚNG cụ thể (int/char/bool/float đã suy luận) -> khai báo
+                # bằng đúng kiểu C đó thay vì '__auto_type'. '__auto_type' lấy kiểu
+                # đã THĂNG CẤP của C ('u8 + u8' -> int) nên 'let c = a + b' (u8) sẽ
+                # giữ 300 thay vì wrap về 44 — lệch với 'let c: u8 = ...', với global
+                # cùng biểu thức, và với 'typeof(c)' (báo u8). Khai báo hẹp lại cho
+                # nhất quán. Mảng/con trỏ/struct/enum/hàm/unknown giữ '__auto_type'
+                # (phân rã mảng-> con trỏ & suy kiểu phức là hành vi mong muốn ở đó).
+                if gt is not None and gt.kind in ("int", "char", "bool", "float"):
+                    ty = self._gtype_to_ctype_decl(gt)
+                    self.w(self.c_decl(name, ty, init_c, const=const) + ";")
+                else:
+                    q = "const " if const else ""
+                    self.w(f"{q}__auto_type {name} = {init_c};")
 
     @staticmethod
     def _int_literal_c(e: A.IntLit) -> str:
@@ -1239,7 +1251,7 @@ class Codegen:
                 return self.gen_len(e)
             if name == "assert":
                 return self.gen_assert(e)
-            if name in ("assert_eq", "assert_ne", "check_eq", "check_ne"):
+            if name in self._CMP_BUILTINS:
                 return self.gen_assert_cmp(e, name)
             if name == "test_summary":
                 return "g_test_summary()"
@@ -1370,19 +1382,31 @@ class Codegen:
             msg = self.c_string(f"assertion failed: {cond}")
         return f"(({cond}) ? (void)0 : g_panic({msg}))"
 
+    # Họ builtin so sánh + ánh xạ hậu tố -> toán tử thứ tự (cho _gen_ord).
+    _ASSERT_OPS = {"lt": "<", "le": "<=", "gt": ">", "ge": ">="}
+    _CMP_BUILTINS = {
+        "assert_eq", "assert_ne", "assert_lt", "assert_le", "assert_gt", "assert_ge",
+        "check_eq", "check_ne", "check_lt", "check_le", "check_gt", "check_ge",
+    }
+
     def gen_assert_cmp(self, e: A.Call, fname):
-        """assert_eq/assert_ne (dừng khi sai) và check_eq/check_ne (ghi nhận rồi
-        tiếp tục, trả về bool). Hiển thị 'trái'/'phải' GENERIC cho mọi kiểu (vô
-        hướng/chuỗi/enum/struct lồng) qua hạ tầng định dạng; đánh giá mỗi vế đúng
-        MỘT lần (vật hoá vào biến tạm). Ra stderr để không lẫn output chương trình."""
-        is_ne = fname.endswith("_ne")
+        """assert_* (dừng khi sai) và check_* (ghi nhận rồi tiếp tục, trả về bool)
+        cho cả so sánh BẰNG/KHÁC (eq/ne) lẫn THỨ TỰ (lt/le/gt/ge). Hiển thị 'trái'/
+        'phải' GENERIC cho mọi kiểu (vô hướng/chuỗi/enum/struct lồng) qua hạ tầng
+        định dạng; đánh giá mỗi vế đúng MỘT lần (vật hoá vào biến tạm). Ra stderr để
+        không lẫn output chương trình."""
+        suffix = fname.rsplit("_", 1)[1]                # eq/ne/lt/le/gt/ge
         is_check = fname.startswith("check")
         a, b = e.args[0], e.args[1]
         gt = self.gtype_of(a)
         l, r = self.tmp("_gel"), self.tmp("_ger")
         line = getattr(e, "line", 0)
-        eq = self._gen_eq(gt, l, r)
-        passed = f"(!({eq}))" if is_ne else eq          # điều kiện ĐẠT
+        if suffix == "eq":
+            passed = self._gen_eq(gt, l, r)             # điều kiện ĐẠT
+        elif suffix == "ne":
+            passed = f"(!({self._gen_eq(gt, l, r)}))"
+        else:                                            # lt/le/gt/ge: so thứ tự
+            passed = self._gen_ord(gt, l, r, self._ASSERT_OPS[suffix])
         lfmt, largs = self._gtype_print_frag(gt, l)
         rfmt, rargs = self._gtype_print_frag(gt, r)
         decls = f"__auto_type {l} = ({self.gen_expr(a)}); " \
@@ -1499,15 +1523,25 @@ class Codegen:
 
     @staticmethod
     def _apply_fmt_flags(spec, flags):
-        """Chèn width/precision/căn lề (kiểu Zig/Rust) vào một printf specifier.
-        flags: [<|>|^][0]?[width]?(.prec)?  ví dụ '5', '<8', '08', '.2', '8.3'.
-          '<' = căn trái (-), '>'/'^' = mặc định, '0' = đệm số 0.
+        """Chèn width/precision/căn lề/dấu (kiểu Zig/Rust) vào một printf specifier.
+        flags: [<|>|^][+| ]?[#]?[0]?[width]?(.prec)?  ví dụ '5', '<8', '08', '.2',
+        '8.3', '+', '+08', '#x', '+.2'.
+          '<' = căn trái (-), '>'/'^' = mặc định;
+          '+' = luôn in dấu, ' ' = chèn khoảng trắng cho số dương;
+          '#' = dạng thay thế (tiền tố 0x/0o cho hex/oct);
+          '0' = đệm số 0.
         Float có precision: %g -> %f (precision = số chữ số sau dấu phẩy)."""
         align = ""
         i = 0
         if i < len(flags) and flags[i] in "<>^":
             align = "-" if flags[i] == "<" else ""
             i += 1
+        sign = ""           # '+' luôn in dấu; ' ' chèn khoảng trắng cho số dương
+        if i < len(flags) and flags[i] in "+ ":
+            sign = flags[i]; i += 1
+        alt = ""            # '#' -> dạng thay thế (0x/0o)
+        if i < len(flags) and flags[i] == "#":
+            alt = "#"; i += 1
         zero = ""
         if i < len(flags) and flags[i] == "0":
             zero = "0"
@@ -1524,16 +1558,25 @@ class Codegen:
         rest = spec[1:]   # length-modifier + conversion (vd 'lld', 'g', 's')
         if prec and rest and rest[-1] == "g":
             rest = rest[:-1] + "f"
-        return "%" + align + zero + width + prec + rest
+        return "%" + align + sign + alt + zero + width + prec + rest
+
+    # Chữ kiểu đơn (cho phép đặt SAU dấu ':' kiểu Rust: '{:x}', '{:08x}', '{:.2f}').
+    _FMT_TYPE_CHARS = set("duxXofgescb")
 
     def _fmt_placeholder(self, key, arg, ce=None):
         """Trả về (specifier, c_arg | None) cho một placeholder, kèm ép kiểu
         để printf luôn nhận đúng kiểu (an toàn đa nền tảng).
-        Hỗ trợ '{key:flags}' với flags width/precision/căn lề.
+        Hỗ trợ '{key:flags}' với flags width/precision/căn lề/dấu.
         'ce' (tuỳ chọn): biểu thức C của đối số đã tính sẵn (vd biến tạm trong
         format()) — nếu None thì sinh trực tiếp từ 'arg'."""
         key, sep, flags = key.partition(":")
         if sep:
+            # Hỗ trợ CẢ hai quy ước: '{x:08}' (chữ kiểu TRƯỚC ':') và '{:08x}'
+            # (kiểu Rust — chữ kiểu ở CUỐI cờ). Khi key rỗng/'v' và cờ kết thúc
+            # bằng một chữ kiểu, tách nó ra làm key. Nhờ vậy '{:x}'/'{:.2f}' hoạt
+            # động như Rust thay vì âm thầm rơi về thập phân.
+            if key in ("", "v") and flags and flags[-1] in self._FMT_TYPE_CHARS:
+                key, flags = flags[-1], flags[:-1]
             spec, carg = self._fmt_placeholder(key, arg, ce)
             return self._apply_fmt_flags(spec, flags), carg
         if ce is None:

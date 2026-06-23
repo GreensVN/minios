@@ -176,6 +176,10 @@ class Parser:
         self.expect("op", "(")
         params = []
         while not self.is_op(")"):
+            # 'mut' tuỳ chọn trước tên tham số (gồm 'mut self'): tham số trong G vốn
+            # đã là ô nhớ khả biến, nên 'mut' ở đây chỉ mang tính tài liệu (báo hiệu
+            # 'method này sửa self' / 'tham số này bị ghi'). Chấp nhận & bỏ qua.
+            self.accept("kw", "mut")
             pname = self.expect("id").value
             # 'self' trong method có thể không cần kiểu
             if pname == "self" and recv and not self.is_op(":"):
