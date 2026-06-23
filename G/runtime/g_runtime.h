@@ -80,6 +80,29 @@ static inline uint32_t g_inl(uint16_t port) {
 static inline void g_io_wait(void) {  /* trễ ~1us bằng ghi vào cổng không dùng */
     __asm__ __volatile__("outb %%al, $0x80" : : "a"((uint8_t)0));
 }
+/* ---- Thanh ghi điều khiển / TLB / cache / MSR (đặc quyền, ring 0) ----
+ * Nền tảng để bật phân trang (CR3), chế độ bảo vệ/long mode (CR0/CR4), và đọc
+ * /ghi MSR (vd EFER, APIC base). Dùng 'unsigned long' (đúng độ rộng word: 32-bit
+ * trên i386, 64-bit trên x86_64) rồi mở rộng về uint64_t cho giao diện G đồng
+ * nhất. CR2 chỉ-đọc (địa chỉ lỗi trang) nên không có g_write_cr2. */
+static inline uint64_t g_read_cr0(void) { unsigned long v; __asm__ __volatile__("mov %%cr0, %0" : "=r"(v)); return (uint64_t)v; }
+static inline uint64_t g_read_cr2(void) { unsigned long v; __asm__ __volatile__("mov %%cr2, %0" : "=r"(v)); return (uint64_t)v; }
+static inline uint64_t g_read_cr3(void) { unsigned long v; __asm__ __volatile__("mov %%cr3, %0" : "=r"(v)); return (uint64_t)v; }
+static inline uint64_t g_read_cr4(void) { unsigned long v; __asm__ __volatile__("mov %%cr4, %0" : "=r"(v)); return (uint64_t)v; }
+static inline void g_write_cr0(uint64_t v) { __asm__ __volatile__("mov %0, %%cr0" : : "r"((unsigned long)v) : "memory"); }
+static inline void g_write_cr3(uint64_t v) { __asm__ __volatile__("mov %0, %%cr3" : : "r"((unsigned long)v) : "memory"); }
+static inline void g_write_cr4(uint64_t v) { __asm__ __volatile__("mov %0, %%cr4" : : "r"((unsigned long)v) : "memory"); }
+static inline void g_invlpg(void* addr) { __asm__ __volatile__("invlpg (%0)" : : "r"(addr) : "memory"); }
+static inline void g_wbinvd(void) { __asm__ __volatile__("wbinvd" : : : "memory"); }
+static inline uint64_t g_rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline void g_wrmsr(uint32_t msr, uint64_t val) {
+    uint32_t lo = (uint32_t)val, hi = (uint32_t)(val >> 32);
+    __asm__ __volatile__("wrmsr" : : "a"(lo), "d"(hi), "c"(msr));
+}
 #else
 static inline void g_hlt(void)   { for (;;) {} }
 static inline void g_cli(void)   {}
@@ -95,6 +118,18 @@ static inline uint8_t  g_inb(uint16_t port) { (void)port; return 0; }
 static inline uint16_t g_inw(uint16_t port) { (void)port; return 0; }
 static inline uint32_t g_inl(uint16_t port) { (void)port; return 0; }
 static inline void g_io_wait(void) {}
+/* Ngoài x86: control register/TLB/MSR không tồn tại — no-op an toàn để biên dịch. */
+static inline uint64_t g_read_cr0(void) { return 0; }
+static inline uint64_t g_read_cr2(void) { return 0; }
+static inline uint64_t g_read_cr3(void) { return 0; }
+static inline uint64_t g_read_cr4(void) { return 0; }
+static inline void g_write_cr0(uint64_t v) { (void)v; }
+static inline void g_write_cr3(uint64_t v) { (void)v; }
+static inline void g_write_cr4(uint64_t v) { (void)v; }
+static inline void g_invlpg(void* addr) { (void)addr; }
+static inline void g_wbinvd(void) {}
+static inline uint64_t g_rdmsr(uint32_t msr) { (void)msr; return 0; }
+static inline void g_wrmsr(uint32_t msr, uint64_t val) { (void)msr; (void)val; }
 #endif
 
 /* ===================================================================== */

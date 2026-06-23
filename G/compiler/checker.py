@@ -46,14 +46,22 @@ BUILTINS = {"print", "println", "eprint", "eprintln", "printf", "format",
             "halt", "cli", "sti", "pause", "breakpoint", "io_wait", "rdtsc",
             # cổng I/O x86 (đặc quyền):
             "inb", "outb", "inw", "outw", "inl", "outl",
+            # điều khiển bộ nhớ ảo / thanh ghi điều khiển / MSR (đặc quyền, ring 0):
+            "read_cr0", "read_cr2", "read_cr3", "read_cr4",
+            "write_cr0", "write_cr3", "write_cr4",
+            "invlpg", "wbinvd", "rdmsr", "wrmsr",
             # khẳng định lúc biên dịch:
             "static_assert"}
 
 # Nhóm intrinsics đơn giản dùng chung khi suy luận kiểu.
-_OS_NULLARY_VOID = {"halt", "cli", "sti", "pause", "breakpoint", "io_wait"}
+_OS_NULLARY_VOID = {"halt", "cli", "sti", "pause", "breakpoint", "io_wait",
+                    "wbinvd"}
 _OS_PORT_OUT = {"outb", "outw", "outl"}
 _OS_BIT_TO_INT = {"popcount", "clz", "ctz"}    # trả về int
 _OS_BIT_SAME = {"bswap", "rotl", "rotr"}       # trả về kiểu của đối số đầu
+# Thanh ghi điều khiển (control register) — đọc trả u64, ghi nhận 1 giá trị.
+_OS_CR_READ = {"read_cr0", "read_cr2", "read_cr3", "read_cr4"}   # () -> u64
+_OS_CR_WRITE = {"write_cr0", "write_cr3", "write_cr4"}           # (v) -> void
 
 # Hàm thư viện C bị kéo vào bởi runtime (stdio/stdlib/string/math/time...). Một
 # hàm G *không* 'extern' trùng tên một trong số này sẽ gây lỗi C khó hiểu
@@ -319,9 +327,32 @@ class Checker:
             return self._fold_const_int(e.then if c else e.els)
         if isinstance(e, A.Cast):
             return self._fold_const_int(e.expr)
+        if isinstance(e, A.SizeOf) and not getattr(e, "align", False):
+            # sizeof của kiểu nguyên thủy BỀ RỘNG CỐ ĐỊNH là hằng số biên dịch
+            # độc lập nền tảng (i64 luôn 8 byte...) — gấp được để dùng làm cỡ
+            # mảng '[sizeof(u32)]byte' hay giá trị enum. (alignof và sizeof của
+            # int/usize/con trỏ/struct phụ thuộc ABI -> để codegen tự lo.)
+            return self._sizeof_fixed(e.type)
         if isinstance(e, A.Call):
             return self._eval_const_call(e)
         return None
+
+    # Cỡ (byte) các kiểu nguyên thủy bề rộng cố định — KHỚP <stdint.h> trên mọi
+    # nền tảng (không gồm 'int'/'usize'/'isize'/con trỏ vì phụ thuộc ABI/word-size).
+    _FIXED_SIZE = {
+        "i8": 1, "u8": 1, "i16": 2, "u16": 2, "i32": 4, "u32": 4,
+        "i64": 8, "u64": 8, "f32": 4, "f64": 8, "float": 4, "double": 8,
+        "char": 1, "bool": 1,
+    }
+
+    def _sizeof_fixed(self, ty):
+        """Cỡ byte của một kiểu VÔ HƯỚNG bề rộng cố định (hằng đa nền tảng), hoặc
+        None nếu không chắc chắn (con trỏ/mảng/struct/int/usize...)."""
+        if ty is None or getattr(ty, "is_fn", False):
+            return None
+        if ty.ptr or getattr(ty, "elem_ptr", 0) or ty.dims or ty.array is not None:
+            return None
+        return self._FIXED_SIZE.get(ty.name)
 
     # ---------- bộ thông dịch comptime (gấp lời gọi hàm lúc biên dịch) ----------
     @staticmethod
@@ -532,7 +563,10 @@ class Checker:
                     self.structs[it.name][f.name] = self.resolve(f.type)
                     self.struct_order[it.name].append(f.name)
             elif isinstance(it, A.EnumDef):
-                table = {}
+                # Ghi DẦN vào chính dict đã tạo ở lượt 1 (không tạo dict mới), để
+                # một biến thể tham chiếu được biến thể TRƯỚC trong cùng enum khi
+                # gấp hằng (vd 'enum E { A = 1 << 2, B, C = A + 10 }').
+                table = self.enums[it.name]
                 nxt = 0
                 for vname, vval in it.variants:
                     if vname in table:
@@ -544,16 +578,21 @@ class Checker:
                             f"'{self.enum_of_variant[vname]}' — tên biến thể phải "
                             f"duy nhất trên toàn chương trình (C dùng chung không "
                             f"gian tên cho hằng enum)", it)
-                    if vval is not None and isinstance(vval, A.IntLit):
-                        nxt = int(vval.value, 0)
-                    elif vval is not None and (
-                            isinstance(vval, A.Unary) and vval.op == "-"
-                            and isinstance(vval.operand, A.IntLit)):
-                        nxt = -int(vval.operand.value, 0)
+                    # Giá trị biến thể là một BIỂU THỨC HẰNG (không chỉ literal):
+                    # '1 << 2', 'A + 10', '-1', tên hằng... Gấp về số nguyên để
+                    # bảng enum của checker KHỚP giá trị C thật. (Trước đây chỉ
+                    # nhận IntLit/-IntLit nên mọi biểu thức khác bị ghi sai giá
+                    # trị -> sai cỡ mảng '[V]int', sai gấp comptime, và nhãn
+                    # 'case' trùng giá trị không được khử -> lỗi biên dịch C.)
+                    if vval is not None:
+                        folded = self._fold_const_int(vval)
+                        if folded is not None:
+                            nxt = folded
+                        # Không gấp được (vd 'sizeof' struct): giữ bộ đếm tự tăng
+                        # như cũ — codegen vẫn phát sinh đúng biểu thức cho C.
                     table[vname] = nxt
                     self.enum_of_variant[vname] = it.name
                     nxt += 1
-                self.enums[it.name] = table
         self._check_struct_value_cycles()
 
     def _check_struct_value_cycles(self):
@@ -2173,6 +2212,51 @@ class Checker:
             if e.args:
                 self.err("rdtsc() không nhận tham số", e)
             return T.U64
+        # ----- thanh ghi điều khiển / TLB / MSR (đặc quyền, ring 0) -----
+        if name in _OS_CR_READ:
+            if e.args:
+                self.err(f"{name}() không nhận tham số", e)
+            return T.U64
+        if name in _OS_CR_WRITE:
+            if len(e.args) != 1:
+                self.err(f"{name}(giá_trị) cần đúng 1 tham số", e)
+            if e.args:
+                vt = self.infer(e.args[0])
+                if not vt.is_integer() and vt.kind != "unknown":
+                    self.err(f"{name}: giá trị phải là số nguyên, nhận "
+                             f"'{self.tyname(vt)}'", e)
+            return T.VOID
+        if name == "invlpg":
+            # invlpg(địa_chỉ): vô hiệu một mục TLB cho trang chứa địa chỉ. Nhận
+            # con trỏ '*T' hoặc địa chỉ nguyên (usize).
+            if len(e.args) != 1:
+                self.err("invlpg(địa_chỉ) cần đúng 1 tham số", e)
+            if e.args:
+                at = self.infer(e.args[0])
+                if not (at.kind in ("ptr", "unknown") or at.is_integer()):
+                    self.err("invlpg: cần con trỏ hoặc địa chỉ nguyên, nhận "
+                             f"'{self.tyname(at)}'", e)
+            return T.VOID
+        if name == "rdmsr":
+            # rdmsr(msr): đọc Model-Specific Register -> u64 (edx:eax).
+            if len(e.args) != 1:
+                self.err("rdmsr(msr) cần đúng 1 tham số", e)
+            if e.args:
+                mt = self.infer(e.args[0])
+                if not mt.is_integer() and mt.kind != "unknown":
+                    self.err(f"rdmsr: số hiệu MSR phải là số nguyên, nhận "
+                             f"'{self.tyname(mt)}'", e)
+            return T.U64
+        if name == "wrmsr":
+            # wrmsr(msr, giá_trị): ghi Model-Specific Register (giá trị u64).
+            if len(e.args) != 2:
+                self.err("wrmsr(msr, giá_trị) cần đúng 2 tham số", e)
+            for a in e.args:
+                at = self.infer(a)
+                if not at.is_integer() and at.kind != "unknown":
+                    self.err(f"wrmsr: tham số phải là số nguyên, nhận "
+                             f"'{self.tyname(at)}'", e)
+            return T.VOID
         if name in ("memcpy", "memmove", "memset", "memcmp"):
             if len(e.args) != 3:
                 self.err(f"{name}(dst, {'src' if name != 'memset' else 'byte'}, n) "
