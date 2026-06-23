@@ -1033,3 +1033,75 @@ fn bits_extract(x: u64, lo: int, width: int) -> u64 {
     if width >= 64 { return x >> lo }
     return (x >> lo) & ((1 as u64 << width) - 1)
 }
+
+// Đảo ngược thứ tự 64 bit của một u64 (bit 0 <-> bit 63, ...)
+fn reverse_bits(x: u64) -> u64 {
+    let mut r: u64 = 0
+    let mut v: u64 = x
+    for _i in 0..64 { r = (r << 1) | (v & 1); v = v >> 1 }
+    return r
+}
+
+// Chẵn/lẻ của số bit 1: 0 = chẵn, 1 = lẻ
+fn parity(x: u64) -> int { return popcount(x) % 2 }
+
+// Ghép hai u32 (cao, thấp) thành một u64
+fn make_u64(hi: u32, lo: u32) -> u64 { return (hi as u64 << 32) | (lo as u64) }
+
+// Tách nửa cao / nửa thấp 32 bit của một u64
+fn hi32(x: u64) -> u32 { return (x >> 32) as u32 }
+fn lo32(x: u64) -> u32 { return x as u32 }
+
+// ============================================================================
+//  f64: min / max / abs / dấu / kẹp về [0,1]  (bù cho bộ số nguyên)
+// ============================================================================
+fn min_f(a: f64, b: f64) -> f64 { if a < b { return a } return b }
+fn max_f(a: f64, b: f64) -> f64 { if a > b { return a } return b }
+fn abs_f(x: f64) -> f64 { if x < 0.0 { return -x } return x }
+fn sign_f(x: f64) -> f64 {
+    if x > 0.0 { return 1.0 }
+    if x < 0.0 { return -1.0 }
+    return 0.0
+}
+fn saturate(x: f64) -> f64 { return clampf(x, 0.0, 1.0) }
+
+// ============================================================================
+//  Tiện ích mảng số nguyên & chuỗi bổ sung
+// ============================================================================
+
+// Đếm phần tử PHÂN BIỆT trong mảng ĐÃ SẮP XẾP (a[i] không giảm)
+fn count_distinct_sorted(a: *int, n: int) -> int {
+    if n == 0 { return 0 }
+    let mut c: int = 1
+    for i in 1..n { if a[i] != a[i - 1] { c += 1 } }
+    return c
+}
+
+// Tổng các số nguyên trong khoảng đóng [lo, hi] (lo > hi -> 0)
+fn sum_range(lo: int, hi: int) -> i64 {
+    if lo > hi { return 0 }
+    return sum_to(hi) - sum_to(lo - 1)
+}
+
+// Phần tử lớn thứ nhì (n >= 2). Khi mọi phần tử bằng nhau, trả về chính giá trị đó.
+fn second_max(a: *int, n: int) -> int {
+    let mut m1: int = a[0]
+    let mut m2: int = a[0]
+    let mut seen: bool = false
+    for i in 1..n {
+        if a[i] > m1 { m2 = m1; m1 = a[i]; seen = true }
+        else if a[i] < m1 { if !seen || a[i] > m2 { m2 = a[i]; seen = true } }
+    }
+    return m2
+}
+
+// Chuỗi rỗng?
+fn is_empty(s: str) -> bool { return str_len(s) == 0 }
+
+// Ký tự đầu / cuối của chuỗi (rỗng -> '\0')
+fn first_char(s: str) -> char { return char_at(s, 0) }
+fn last_char(s: str) -> char {
+    let n: int = str_len(s) as int
+    if n == 0 { return '\0' }
+    return char_at(s, n - 1)
+}

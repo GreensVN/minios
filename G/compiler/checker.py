@@ -35,6 +35,9 @@ BUILTINS = {"print", "println", "eprint", "eprintln", "printf", "format",
             "g_alloc", "g_free", "g_realloc", "unreachable", "todo",
             "typeof", "swap", "dbg",
             "assert_eq", "assert_ne", "check_eq", "check_ne", "test_summary",
+            # so sánh THỨ TỰ (số/char/enum/chuỗi): dừng (assert_*) / ghi nhận (check_*)
+            "assert_lt", "assert_le", "assert_gt", "assert_ge",
+            "check_lt", "check_le", "check_gt", "check_ge",
             # ----- intrinsics phát triển hệ điều hành -----
             # bộ nhớ thô (libc hosted / runtime freestanding tự cài):
             "memcpy", "memset", "memmove", "memcmp",
@@ -114,6 +117,8 @@ def count_placeholders(fmt: str) -> int:
 # tra khớp giữa placeholder và kiểu đối số trong print/println.
 _INT_SPECS = {"d", "ld", "u", "lu", "x", "X", "o", "lx", "lX", "lo"}
 _FLOAT_SPECS = {"f", "lf", "g", "e", "lg", "le"}
+# Chữ kiểu đơn được phép đặt SAU dấu ':' (kiểu Rust: '{:x}', '{:08x}', '{:.2f}').
+_FMT_TYPE_CHARS = set("duxXofgescb")
 
 
 def edit_distance(a: str, b: str) -> int:
@@ -1664,6 +1669,14 @@ class Checker:
 
     _REL_OPS = {"<", ">", "<=", ">="}
 
+    # Họ builtin so sánh hai giá trị (hiển thị trái/phải khi sai). assert_* dừng
+    # chương trình, check_* ghi nhận rồi tiếp tục. eq/ne so BẰNG (gồm struct/chuỗi
+    # theo nội dung); lt/le/gt/ge so THỨ TỰ (số/char/enum/chuỗi).
+    _CMP_BUILTINS = {
+        "assert_eq", "assert_ne", "assert_lt", "assert_le", "assert_gt", "assert_ge",
+        "check_eq", "check_ne", "check_lt", "check_le", "check_gt", "check_ge",
+    }
+
     def infer_binary(self, e: A.Binary):
         # Bắt "so sánh dây chuyền" kiểu toán học: 'a < b < c' trong C/G nghĩa là
         # '(a < b) < c' (so sánh một bool với c) — gần như luôn là lỗi. Báo lỗi
@@ -2003,8 +2016,13 @@ class Checker:
     def _check_fmt_spec(self, key, at: T.GType, node):
         """Kiểm tra một specifier tường minh có khớp kiểu đối số không.
         '{}'/'{v}' tự suy luận nên luôn hợp lệ; bool dùng '{}' hoặc '{b}'.
-        Bỏ phần ':flags' (width/precision) trước khi kiểm tra kiểu."""
-        key = key.split(":", 1)[0]
+        Bỏ phần ':flags' (width/precision) trước khi kiểm tra kiểu — nhưng nếu
+        cờ kết thúc bằng một chữ kiểu kiểu-Rust ('{:08x}') thì chữ đó MỚI là kiểu."""
+        base, sep, flags = key.partition(":")
+        if (sep and base in ("", "v") and flags
+                and flags[-1] in _FMT_TYPE_CHARS):
+            base = flags[-1]
+        key = base
         if at.kind == "unknown":
             return
         if key in ("", "v", "b"):
@@ -2176,10 +2194,11 @@ class Checker:
             for a in e.args:
                 self.infer(a)
             return T.VOID
-        if name in ("assert_eq", "assert_ne", "check_eq", "check_ne"):
-            # So sánh BẰNG/KHÁC generic, hiển thị 'trái'/'phải'. assert_* dừng khi
-            # sai; check_* ghi nhận pass/fail rồi tiếp tục (trả bool). Tham số thứ
-            # ba tuỳ chọn: assert_* coi là thông điệp, check_* coi là TÊN ca test.
+        if name in self._CMP_BUILTINS:
+            # So sánh BẰNG/KHÁC/THỨ TỰ generic, hiển thị 'trái'/'phải'. assert_*
+            # dừng khi sai; check_* ghi nhận pass/fail rồi tiếp tục (trả bool). Tham
+            # số thứ ba tuỳ chọn: assert_* coi là thông điệp, check_* coi là TÊN ca test.
+            ordered = name.rsplit("_", 1)[1] in ("lt", "le", "gt", "ge")
             if len(e.args) < 2:
                 self.err(f"{name}(trái, phải[, "
                          f"{'tên' if name.startswith('check') else 'msg'}]) cần ít "
@@ -2194,10 +2213,16 @@ class Checker:
                     self.err(
                         f"{name}: không so sánh/in được giá trị kiểu "
                         f"'{self.tyname(t)}' (mảng tĩnh: so từng phần tử thủ công)", e)
-            if not self._eq_comparable(ta, tb):
+            # So sánh THỨ TỰ chỉ áp cho số/char/enum/chuỗi (không struct — không có
+            # thứ tự tự nhiên theo trường). So sánh BẰNG còn cho phép struct cùng loại.
+            ok = self._comparable(ta, tb) if ordered else self._eq_comparable(ta, tb)
+            if not ok:
+                extra = (" — so sánh thứ tự cần số/char/enum/chuỗi"
+                         if ordered and (ta.kind == "struct" or tb.kind == "struct")
+                         else "")
                 self.err(
                     f"{name}: hai vế phải cùng kiểu để so sánh, nhận "
-                    f"'{self.tyname(ta)}' và '{self.tyname(tb)}'", e)
+                    f"'{self.tyname(ta)}' và '{self.tyname(tb)}'{extra}", e)
             return T.BOOL if name.startswith("check") else T.VOID
         if name == "test_summary":
             if e.args:
