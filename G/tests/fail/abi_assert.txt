@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: static_assert thất bại lúc biên dịch: Hdr phai dung 8 byte

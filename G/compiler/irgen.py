@@ -143,10 +143,12 @@ class IRGen:
                 align = 0
                 for a in getattr(it, "attrs", []) or []:
                     if getattr(a, "name", "") == "align":
-                        try:
-                            align = int(getattr(a, "arg", 0) or 0)
-                        except (TypeError, ValueError):
-                            align = 0
+                        av = (getattr(a, "args", None) or [None])[0]
+                        if av is not None and hasattr(av, "value"):
+                            try:
+                                align = int(av.value, 0)
+                            except (TypeError, ValueError):
+                                align = 0
                 self.mod.structs.append(
                     I.StructLayout(it.name, fields, packed=packed, align=align))
             elif isinstance(it, A.EnumDef):

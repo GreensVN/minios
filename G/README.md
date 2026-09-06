@@ -566,6 +566,32 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.15.0 — 📐 ABI / bố cục theo target
+
+- 🐛 **`usize`/`isize` hardcode 64-bit.** `Target.ptr_bits` đã tồn tại nhưng
+  `types.py` bỏ qua nó, nên trên target 32-bit (`wasm32`) `usize` vẫn là 64-bit:
+  `let n: usize = 5_000_000_000` lọt qua checker rồi **tràn âm thầm** lúc chạy.
+  Nay bề rộng và biên giá trị đều theo target.
+- 📐 **Engine bố cục độc lập C** (`compiler/layout.py`): tính `sizeof`/`alignof`/
+  offset trường cho **bất kỳ target nào**, theo quy tắc ABI chuẩn, kể cả
+  `@packed` và `@align(N)`. Trước đây việc này giao hết cho trình biên dịch C —
+  nghĩa là backend LLVM/WASM tương lai sẽ không có gì để dựa vào, và không thể
+  hỏi "struct này bố cục ra sao trên wasm32?" khi đang chạy trên x86.
+- ✅ **`static_assert(sizeof(T) == N)` nay báo lỗi ở TẦNG G**, đúng dòng nguồn G,
+  thay vì lọt xuống C rồi nổ với thông báo của C trỏ vào file `/tmp`. Và nó
+  **kiểm theo target**: cùng một assert đúng trên x86_64 và sai trên wasm32.
+- 🐛 **`@align(N)` bị bỏ qua khi tính bố cục** — `Attr` lưu đối số trong `args`
+  (danh sách node) chứ không phải `arg`, nên cả `layout.py` lẫn `irgen.py` đọc
+  nhầm thành `None`.
+- 🐛 **`==` trên struct có trường `slice` sinh C không hợp lệ** (`invalid operands
+  to binary ==`). Nay so sánh theo `(ptr, len)`.
+- 🧪 **Đối chiếu với C** (`tests/test_layout.py`, 11 ca): sinh chương trình C in
+  `sizeof`/`_Alignof`/`offsetof` rồi so từng con số với G. Thêm một lần quét
+  toàn bộ codebase: **41 struct, 0 sai lệch**. Một "nguồn chân lý thứ hai" chỉ
+  có giá trị nếu nó khớp nguồn thứ nhất.
+- 🧪 **Bộ test: 225 ca** + target 21 + panic 4 + IR 97 + IR-unit 25 + layout 11
+  + ASan 93; fuzz 50 000 vòng, 0 crash.
+
 ## Mới trong 0.14.0 — 🎯 Lớp Target/HAL
 
 - 🐛 **Sửa lỗi âm thầm nguy hiểm nhất từng có trong G.** `outb`/`inb`/`cli`/

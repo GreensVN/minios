@@ -68,8 +68,13 @@ U16 = GType("int", "u16", 16, False)
 U32 = GType("int", "u32", 32, False)
 U64 = GType("int", "u64", 64, False)
 INT = GType("int", "int", 32, True)
+# 'usize'/'isize' theo BỀ RỘNG CON TRỎ của target. Giá trị dưới đây là mặc định
+# 64-bit; trên target 32-bit (vd wasm32) chúng được thay bằng bản 32-bit qua
+# 'sized_primitives(ptr_bits)'. KHÔNG hardcode 64 ở nơi khác — dùng bảng đó.
 USIZE = GType("int", "usize", 64, False)
 ISIZE = GType("int", "isize", 64, True)
+USIZE32 = GType("int", "usize", 32, False)
+ISIZE32 = GType("int", "isize", 32, True)
 F32 = GType("float", "f32", 32)
 F64 = GType("float", "f64", 64)
 
@@ -80,6 +85,38 @@ PRIMITIVES = {
     "int": INT, "usize": USIZE, "isize": ISIZE,
     "f32": F32, "f64": F64, "float": F32, "double": F64,
 }
+
+
+def sized_primitives(ptr_bits: int) -> dict:
+    """Bảng kiểu nguyên thuỷ cho một bề rộng con trỏ cụ thể.
+
+    Chỉ 'usize'/'isize' phụ thuộc target; các kiểu bề rộng CỐ ĐỊNH (i32, u64...)
+    giống nhau ở mọi nơi — đó là lý do chúng tồn tại."""
+    if ptr_bits >= 64:
+        return PRIMITIVES
+    tbl = dict(PRIMITIVES)
+    tbl["usize"] = USIZE32
+    tbl["isize"] = ISIZE32
+    return tbl
+
+
+def int_bounds(ptr_bits: int) -> dict:
+    """Biên giá trị hợp lệ của từng kiểu nguyên, theo bề rộng con trỏ."""
+    b = {
+        "i8": (-(1 << 7), (1 << 7) - 1),
+        "i16": (-(1 << 15), (1 << 15) - 1),
+        "i32": (-(1 << 31), (1 << 31) - 1),
+        "int": (-(1 << 31), (1 << 31) - 1),
+        "i64": (-(1 << 63), (1 << 63) - 1),
+        "u8": (0, (1 << 8) - 1),
+        "u16": (0, (1 << 16) - 1),
+        "u32": (0, (1 << 32) - 1),
+        "u64": (0, (1 << 64) - 1),
+    }
+    n = ptr_bits if ptr_bits in (32, 64) else 64
+    b["isize"] = (-(1 << (n - 1)), (1 << (n - 1)) - 1)
+    b["usize"] = (0, (1 << n) - 1)
+    return b
 
 
 def ptr_of(elem):

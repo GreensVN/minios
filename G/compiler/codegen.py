@@ -659,6 +659,11 @@ class Codegen:
             if t.name == "char" and t.ptr == 1:        # *char -> so nội dung
                 return f"g_str_eq({l}, {r})"
             return f"(({l}) == ({r}))"                  # con trỏ khác -> địa chỉ
+        if getattr(t, "slice_elem", None) is not None:
+            # slice = { ptr, len }: so sánh BẰNG là cùng vùng nhớ + cùng độ dài
+            # (so danh tính, không so nội dung — nội dung dùng vòng lặp). C không
+            # cho '==' trên struct nên phải so từng thành phần.
+            return f"(({l}).ptr == ({r}).ptr && ({l}).len == ({r}).len)"
         if t.name in self.struct_defs:                 # struct lồng -> đệ quy
             return f"{self._struct_eq_fn(t.name)}({l}, {r})"
         if t.name == "str":
@@ -670,6 +675,8 @@ class Codegen:
         struct -> hàm _g_eq_T; chuỗi/'*char' -> g_str_eq; còn lại -> '=='."""
         if gt.kind == "struct" and gt.name in self.struct_defs:
             return f"{self._struct_eq_fn(gt.name)}({l}, {r})"
+        if gt.kind == "slice":
+            return f"(({l}).ptr == ({r}).ptr && ({l}).len == ({r}).len)"
         if self._is_stringy(gt):
             return f"g_str_eq({l}, {r})"
         return f"(({l}) == ({r}))"

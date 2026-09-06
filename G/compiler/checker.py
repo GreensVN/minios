@@ -209,6 +209,11 @@ class Checker:
         self.prog = program
         self.freestanding = freestanding
         self.target = target if target is not None else _tgt.default_target()
+        # 'usize'/'isize' theo BỀ RỘNG CON TRỎ của target (wasm32 -> 32-bit).
+        # Trước đây cả hai bảng đều hardcode 64-bit, nên trên target 32-bit
+        # 'let n: usize = 5_000_000_000' lọt qua rồi tràn âm thầm lúc chạy.
+        self.primitives = T.sized_primitives(self.target.ptr_bits)
+        self.int_bounds = T.int_bounds(self.target.ptr_bits)
         self.warnings = []         # [(msg, line, col, file)] — không chặn biên dịch
         self._decl_nodes = {}      # id(info) -> node khai báo (cho cảnh báo không dùng)
         self._used_names = set()   # tên đã được ĐỌC ở đâu đó
@@ -217,6 +222,9 @@ class Checker:
         self.cur_src_file = None
         self.structs = {}          # name -> {field: GType}
         self.struct_order = {}     # name -> [field names]
+        self.struct_attrs = {}     # name -> {"packed": bool, "align": int}
+        self._layout_cache = None  # engine bố cục (layout.py), dựng lười
+        self._layout_gen = -1
         self.enums = {}            # name -> {variant: value_int}
         self.enum_of_variant = {}  # variant -> enum name
         self.methods = {}          # struct -> {method: Function}
@@ -452,12 +460,12 @@ class Checker:
             return self._fold_const_int(e.then if c else e.els)
         if isinstance(e, A.Cast):
             return self._fold_const_int(e.expr)
-        if isinstance(e, A.SizeOf) and not getattr(e, "align", False):
-            # sizeof của kiểu nguyên thủy BỀ RỘNG CỐ ĐỊNH là hằng số biên dịch
-            # độc lập nền tảng (i64 luôn 8 byte...) — gấp được để dùng làm cỡ
-            # mảng '[sizeof(u32)]byte' hay giá trị enum. (alignof và sizeof của
-            # int/usize/con trỏ/struct phụ thuộc ABI -> để codegen tự lo.)
-            return self._sizeof_fixed(e.type)
+        if isinstance(e, A.SizeOf):
+            # sizeof/alignof gấp được NGAY trong G nhờ engine bố cục theo target
+            # (compiler/layout.py) — kể cả struct/con trỏ/usize. Nhờ vậy
+            # 'static_assert(sizeof(Hdr) == 8)' báo lỗi ở tầng G, thay vì lọt
+            # xuống C rồi nổ với thông báo của C trỏ vào file /tmp.
+            return self._layout_sizeof(e)
         if isinstance(e, A.Call):
             return self._eval_const_call(e)
         return None
@@ -469,6 +477,33 @@ class Checker:
         "i64": 8, "u64": 8, "f32": 4, "f64": 8, "float": 4, "double": 8,
         "char": 1, "bool": 1,
     }
+
+    def _layout_sizeof(self, e):
+        """Gấp 'sizeof(T)'/'alignof(T)' bằng engine bố cục. Trả None nếu chưa
+        tính được (kiểu chưa phân giải xong / struct chưa khai báo đủ) — khi đó
+        codegen phát 'sizeof(...)' của C như trước."""
+        try:
+            gt = self.resolve(e.type)
+        except CheckError:
+            return None
+        if gt is None or gt.kind == "unknown":
+            return None
+        try:
+            lay = self._layout()
+            return (lay.align_of(gt) if getattr(e, "align", False)
+                    else lay.size_of(gt))
+        except Exception:
+            return None
+
+    def _layout(self):
+        """Engine bố cục cho target hiện tại (dựng lười, dùng lại)."""
+        lay = getattr(self, "_layout_cache", None)
+        if lay is None or self._layout_gen != len(self.structs):
+            from . import layout as _lay
+            lay = _lay.from_checker(self)
+            self._layout_cache = lay
+            self._layout_gen = len(self.structs)
+        return lay
 
     def _sizeof_fixed(self, ty):
         """Cỡ byte của một kiểu VÔ HƯỚNG bề rộng cố định (hằng đa nền tảng), hoặc
@@ -699,6 +734,21 @@ class Checker:
                             getattr(f, "type", None) or it)
                     self.structs[it.name][f.name] = self.resolve(f.type)
                     self.struct_order[it.name].append(f.name)
+                # Ghi lại @packed/@align(N) cho việc tính BỐ CỤC (layout.py).
+                sa = {}
+                for a in (getattr(it, "attrs", None) or []):
+                    an = getattr(a, "name", "")
+                    if an == "packed":
+                        sa["packed"] = True
+                    elif an == "align":
+                        # Attr lưu đối số trong 'args' (danh sách node), không
+                        # phải 'arg'. Gấp hằng để lấy N.
+                        av = (getattr(a, "args", None) or [None])[0]
+                        n = self._fold_const_int(av) if av is not None else None
+                        if n:
+                            sa["align"] = int(n)
+                if sa:
+                    self.struct_attrs[it.name] = sa
             elif isinstance(it, A.EnumDef):
                 # Ghi DẦN vào chính dict đã tạo ở lượt 1 (không tạo dict mới), để
                 # một biến thể tham chiếu được biến thể TRƯỚC trong cùng enum khi
@@ -1064,8 +1114,8 @@ class Checker:
             g = T.slice_of(el, mutable=getattr(ty, "slice_mut", False))
         else:
             base = ty.name
-            if base in T.PRIMITIVES:
-                g = T.PRIMITIVES[base]
+            if base in self.primitives:
+                g = self.primitives[base]
             elif base in self.structs:
                 g = T.GType("struct", name=base)
             elif base in self.enums:
@@ -1354,6 +1404,15 @@ class Checker:
         return str(t) if t is not None else "?"
 
     # ---------- kiểm tra hàm ----------
+    def structs_ordered(self):
+        """{tên: [(trường, GType)]} theo ĐÚNG thứ tự khai báo — bố cục phụ thuộc
+        thứ tự nên không dùng được dict thường."""
+        out = {}
+        for sname, fields in self.structs.items():
+            order = self.struct_order.get(sname) or list(fields)
+            out[sname] = [(f, fields[f]) for f in order if f in fields]
+        return out
+
     def _check_target_cap(self, name, node):
         """Từ chối intrinsic mà TARGET hiện tại không có năng lực tương ứng."""
         cap = TARGET_CAPS.get(name)
@@ -2220,20 +2279,6 @@ class Checker:
         return t
 
     # Biên giá trị cho mỗi kiểu nguyên (để bắt literal tràn).
-    _INT_BOUNDS = {
-        "i8": (-(1 << 7), (1 << 7) - 1),
-        "i16": (-(1 << 15), (1 << 15) - 1),
-        "i32": (-(1 << 31), (1 << 31) - 1),
-        "int": (-(1 << 31), (1 << 31) - 1),
-        "i64": (-(1 << 63), (1 << 63) - 1),
-        "isize": (-(1 << 63), (1 << 63) - 1),
-        "u8": (0, (1 << 8) - 1),
-        "u16": (0, (1 << 16) - 1),
-        "u32": (0, (1 << 32) - 1),
-        "u64": (0, (1 << 64) - 1),
-        "usize": (0, (1 << 64) - 1),
-    }
-
     @staticmethod
     def _int_literal_value(e):
         """Giá trị nguyên của một literal (kể cả '-N' = Unary('-', IntLit)).
@@ -2254,7 +2299,7 @@ class Checker:
         """Kiểm tra literal nguyên có nằm trong biên của kiểu đích không."""
         if target is None or target.kind != "int":
             return
-        bounds = self._INT_BOUNDS.get(target.name)
+        bounds = self.int_bounds.get(target.name)
         if bounds is None:
             return
         lo, hi = bounds
@@ -3048,11 +3093,11 @@ class Checker:
             self.err(f"'str.{mname}()' cần {len(params)} tham số nhưng nhận "
                      f"{len(e.args)}", e)
         for i, at in enumerate(arg_types[:len(params)]):
-            want = T.PRIMITIVES.get(params[i]) or T.STR
+            want = self.primitives.get(params[i]) or T.STR
             if not self.assignable(want, at):
                 self.err(f"tham số {i + 1} của 'str.{mname}()' cần "
                          f"'{self.tyname(want)}' nhưng nhận '{self.tyname(at)}'", e)
-        return T.PRIMITIVES.get(ret) or T.STR
+        return self.primitives.get(ret) or T.STR
 
     def _check_null_deref(self, base, what: str):
         """Giải tham chiếu một con trỏ mà ta CHỨNG MINH được là null: 'null.f',
@@ -3375,8 +3420,8 @@ class Checker:
             return T.ptr_of(inner) if inner is not None else None
         if isinstance(arg, A.Ident):
             tn = arg.name
-            if tn in T.PRIMITIVES:
-                return T.PRIMITIVES[tn]
+            if tn in self.primitives:
+                return self.primitives[tn]
             if tn in self.structs:
                 return T.GType("struct", name=tn)
             if tn in self.enums:

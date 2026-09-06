@@ -202,6 +202,28 @@ user's `let mut log = 0` becomes `static int log;`, colliding with `log()` and
 surfacing a raw C error. Add to this set whenever the runtime pulls in a new
 library.
 
+### Layout is computed in G, not delegated to C
+
+`compiler/layout.py` computes `sizeof`/`alignof`/field offsets per target. The C
+backend still emits `sizeof(T)` in generated code — `layout.py` is a *second*
+source of truth, needed because (a) `static_assert` must fail at the G level
+with a G diagnostic, (b) future LLVM/WASM backends have no C to ask, and (c) you
+must be able to ask "what is this struct's layout on wasm32?" while running on
+x86.
+
+A second source of truth is only worth having if it agrees with the first, so
+`tests/test_layout.py` compiles a C probe that prints `sizeof`/`_Alignof`/
+`offsetof` and asserts G's numbers match exactly. If you change layout rules,
+that test is the arbiter — not your intuition. (When writing `abi_layout.g` I
+predicted `sizeof(Nest) == 12`; C said 16 and C was right.)
+
+`usize`/`isize` follow `Target.ptr_bits` via `types.sized_primitives()` and
+`types.int_bounds()`. Never hardcode 64 for them again.
+
+Note `Attr` stores arguments in `.args` (a list of AST nodes), not `.arg` —
+reading `.arg` silently yields `None`, which is how `@align(N)` was being
+ignored.
+
 ### Target capabilities, not architecture names
 
 `compiler/target.py` maps each OS-dev intrinsic to a *capability*
