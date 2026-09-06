@@ -1,0 +1,1 @@
+lỗi cú pháp: 'let P{...}' (destructuring) chỉ dùng được bên trong hàm — ở cấp cao nhất hãy khai báo từng global một

@@ -1167,7 +1167,28 @@ class Checker:
         fopen fclose fread fwrite fflush
         int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t
         size_t ptrdiff_t intptr_t uintptr_t
-    """.split())
+        strstr strchr strrchr strtol strtoul strtod strdup strndup strtok
+        qsort bsearch getenv system atexit setjmp longjmp va_list
+        remove rename tmpfile perror ferror feof fseek ftell rewind ungetc
+        signal raise assert offsetof
+        y0 y1 yn j0 j1 jn gamma index
+    """.split()) | frozenset("""
+        sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh
+        exp exp2 expm1 log log2 log10 log1p pow sqrt cbrt hypot
+        ceil floor round trunc rint nearbyint fmod remainder fabs fma fdim
+        fmax fmin frexp ldexp modf scalbn ilogb logb copysign nan nextafter
+        erf erfc lgamma tgamma
+    """.split()) | frozenset(
+        # cùng các biến thể hậu tố f/l của <math.h> (sinf, powl, ...)
+        n + suf
+        for n in """
+            sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh
+            exp exp2 expm1 log log2 log10 log1p pow sqrt cbrt hypot
+            ceil floor round trunc rint nearbyint fmod remainder fabs fma fdim
+            fmax fmin frexp ldexp modf scalbn ilogb logb copysign nan nextafter
+            erf erfc lgamma tgamma
+        """.split()
+        for suf in ("f", "l"))
 
     @classmethod
     def safe_c_name(cls, name: str) -> str:
@@ -2497,6 +2518,24 @@ class Checker:
             return T.BOOL
         if op in ("==", "!=", "<", ">", "<=", ">="):
             eq_op = op in ("==", "!=")
+            # 'self' trong 'impl' của enum/struct vô hướng là CON TRỎ. '.field' đã
+            # tự deref, nên 'self == Red' cũng phải tự deref cho nhất quán (nếu
+            # không thì 'match self' chạy còn '==' lại báo lỗi '*Color' vs 'Color').
+            for node, side, other, attr in ((e.left, lt, rt, "deref_left"),
+                                            (e.right, rt, lt, "deref_right")):
+                # CHỈ áp dụng cho chính 'self' — không nới lỏng so sánh con trỏ
+                # nói chung ('p == 5' vẫn phải là lỗi).
+                if not (isinstance(node, A.Ident) and node.name == "self"):
+                    continue
+                if (side.kind == "ptr" and side.elem is not None
+                        and side.elem.kind in ("enum", "int", "char", "bool", "float")
+                        and other.kind == side.elem.kind
+                        and other.name == side.elem.name):
+                    setattr(e, attr, True)
+                    if attr == "deref_left":
+                        lt = side.elem
+                    else:
+                        rt = side.elem
             ok = self._eq_comparable(lt, rt) if eq_op else self._comparable(lt, rt)
             # So sánh THỨ TỰ hai chuỗi bằng '<'/'>' là so ĐỊA CHỈ trong C — gần như
             # luôn là lỗi. (== / != trên chuỗi thì so nội dung, xem codegen.)

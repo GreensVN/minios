@@ -1,0 +1,10 @@
+1 999
+ab 7
+P { x: 0, y: 1 } 5
+blk
+inner
+outer
+42
+d2
+d1
+3

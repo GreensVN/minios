@@ -805,10 +805,21 @@ class Codegen:
         if isinstance(st, A.Let):
             self.gen_let(st)
         elif isinstance(st, A.Return):
-            self._emit_exit_defers("return")
+            # Giá trị trả về phải được TÍNH TRƯỚC khi chạy defer (như Zig/Go):
+            # 'defer n = 999; return n + 1' phải trả 1, không phải 1000. Vật hoá
+            # vào biến tạm khi hàm có defer đang chờ.
             if st.value is not None:
-                self.w(f"return {self.gen_expr(st.value)};")
+                val_c = self.gen_expr(st.value)
+                if any(f["defers"] for f in self.scope_stack):
+                    rv = self.tmp("_gret")
+                    self.w(f"__auto_type {rv} = ({val_c});")
+                    self._emit_exit_defers("return")
+                    self.w(f"return {rv};")
+                else:
+                    self._emit_exit_defers("return")
+                    self.w(f"return {val_c};")
             else:
+                self._emit_exit_defers("return")
                 self.w("return;")
         elif isinstance(st, A.If):
             self.gen_if(st)
@@ -1372,6 +1383,11 @@ class Codegen:
         if isinstance(e, A.Binary):
             lc = self.gen_expr(e.left)
             rc = self.gen_expr(e.right)
+            # Checker đã xác định cần tự deref (vd 'self == Red' với self: *Color).
+            if getattr(e, "deref_left", False):
+                lc = f"(*({lc}))"
+            if getattr(e, "deref_right", False):
+                rc = f"(*({rc}))"
             if getattr(e, "widen_i64", False):
                 # Checker xác định hằng này vượt 32-bit: ép toán hạng trái sang
                 # 64-bit để C tính trong 64-bit.

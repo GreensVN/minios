@@ -589,12 +589,25 @@ Một nền tảng vững để mở rộng tiếp. 🚀
 - 🛡️ **Runner nghiêm ngặt hơn**: mọi ca test giờ phải **không có cảnh báo** nào
   (G lẫn `gcc -Wall -Wextra`), và có hạng mục `tests/warn/` khoá lại nội dung
   cảnh báo *và* số lượng (bắt dương tính giả).
+- 🐛 **`defer` chạy TRƯỚC khi tính giá trị trả về** — `defer n = 999` rồi
+  `return n + 1` trả về **1000** thay vì 1. Sai âm thầm, đúng vào thứ `defer`
+  hay dùng nhất (dọn dẹp rồi trả kết quả). Nay giá trị được vật hoá trước, đúng
+  ngữ nghĩa Zig/Go.
+- 🐛 **Tên G trùng ký hiệu `<math.h>` sinh lỗi C thô** — `let mut log = 0` cho ra
+  `static int log;` va vào `log()` của libm (driver luôn link `-lm`), báo lỗi C
+  khó hiểu. Bộ tên C dành riêng nay phủ toàn bộ `<math.h>` (kể cả biến thể
+  `f`/`l`) và nhiều hàm libc còn thiếu (`strstr`, `qsort`, `getenv`…).
+- 🐛 **`self == Red` trong `impl` của enum báo lỗi** `'*Color'` vs `'Color'`,
+  dù `match self { Red => ... }` lại chạy — `self` là con trỏ và `.field` đã tự
+  deref. Nay `==`/`!=` trên chính `self` cũng tự deref; so sánh con trỏ nói
+  chung (`p == 5`) vẫn bị chặn.
 - 🧼 **Kiểm bằng sanitizer**: `bash tests/run_asan.sh` biên dịch lại mọi ví dụ
   và ca test bằng `-fsanitize=address,undefined` rồi chạy — **87/87 sạch**
   (không đọc/ghi ngoài biên, không use-after-free, không UB). `LEAKS=1` để bật
   kiểm rò rỉ.
-- 🧪 **Bộ test: 205 ca** (+8): `destructure`, `str_slice`, `array_value_copy`,
-  `unused_vars` và 4 ca "phải lỗi".
+- 🧪 **Bộ test: 210 ca** (+13): `destructure`, `str_slice`, `array_value_copy`,
+  `unused_vars`, `defer_return_order`, `c_name_clash`, `self_compare` và 6 ca
+  "phải lỗi".
 
 ## Mới trong 0.10.0 — ✨ `if`/`match` biểu thức, method của `str`, `[v; N]`
 

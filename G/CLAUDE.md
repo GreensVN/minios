@@ -186,6 +186,22 @@ mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
 `repeat` field that the *checker* expands into N copies of the element before
 any inference runs, so everything downstream sees a plain `ArrayLit`.
 
+### `defer` and the return value
+
+`gen_stmt`'s `A.Return` branch evaluates the return expression into an
+`__auto_type` temp *before* flushing defers, whenever any enclosing scope has a
+pending defer. Zig/Go semantics: the returned value is snapshotted, so a defer
+that mutates a global cannot change what the caller sees. The temp is skipped
+when there are no defers, keeping the generated C clean.
+
+### Reserved C names include all of libm
+
+The driver always links `-lm`, so every `<math.h>` symbol (plus its `f`/`l`
+suffixed variants) is in `Checker.C_RESERVED` and gets renamed. Miss one and a
+user's `let mut log = 0` becomes `static int log;`, colliding with `log()` and
+surfacing a raw C error. Add to this set whenever the runtime pulls in a new
+library.
+
 ### Sanitizer runs are a separate suite
 
 `tests/run_asan.sh` rebuilds every example/case with
