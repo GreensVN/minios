@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'p::x': '::' chỉ dùng sau tên một KIỂU (struct/enum) — với một giá trị hãy dùng 'p.x'

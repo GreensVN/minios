@@ -664,6 +664,19 @@ class Parser:
             elif self.accept("op", "."):
                 fld = self.expect("id").value
                 e = A.FieldAccess(e, fld, t.line, t.col)
+            elif self.is_op("::"):
+                # 'Type::item' — đường dẫn kiểu Rust, đồng nghĩa 'Type.item'
+                # (biến thể enum hoặc method tĩnh). Trước đây '::' được lexer
+                # nhận nhưng không parser nào dùng, nên 'Color::Red' báo "cần
+                # biểu thức" rất khó hiểu. Chỉ hợp lệ sau một TÊN trần.
+                if not isinstance(e, A.Ident):
+                    self.error("'::' chỉ dùng sau tên một kiểu "
+                               "(vd 'Color::Red', 'Counter::new()') — "
+                               "truy cập trường/method của một giá trị dùng '.'")
+                self.advance()
+                fld = self.expect("id").value
+                e = A.FieldAccess(e, fld, t.line, t.col)
+                e.via_path = True
             else:
                 break
         return e

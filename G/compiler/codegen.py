@@ -643,6 +643,8 @@ class Codegen:
         vô hướng -> specifier theo kiểu. 'cexpr' phải ổn định (đã vật hoá)."""
         if gt.kind == "struct" and gt.name in self.struct_defs:
             return self._struct_print_fragment(gt.name, cexpr)
+        if gt.kind == "array" and isinstance(gt.n, int):
+            return self._gtype_array_frag(gt, cexpr)
         if gt.kind == "enum" and gt.name in self.enum_names:
             return "%s", [f"{self._enum_name_fn(gt.name)}({cexpr})"]
         if self._is_stringy(gt):
@@ -1554,6 +1556,13 @@ class Codegen:
                 tv = self.tmp("_gdbg")
                 line = getattr(e, "line", 0)
                 gt = self.gtype_of(arg)
+                if gt.kind == "array" and isinstance(gt.n, int):
+                    # Mảng: không vật hoá (sẽ phân rã thành con trỏ) — dùng thẳng
+                    # biểu thức, vốn là một lvalue ổn định.
+                    frag, cargs = self._gtype_print_frag(gt, f"({ce})")
+                    fmt = self.c_string(f"[dbg dòng {line}] {frag}\n")
+                    tail = (", " + ", ".join(cargs)) if cargs else ""
+                    return f"({{ fprintf(stderr, {fmt}{tail}); {ce}; }})"
                 if gt.kind == "struct" and gt.name in self.struct_defs:
                     frag, cargs = self._struct_print_fragment(gt.name, tv)
                     fmt = self.c_string(f"[dbg dòng {line}] {frag}\n")
@@ -1738,6 +1747,12 @@ class Codegen:
             decls = []
             temps = []
             for a in value_args:
+                # Mảng KHÔNG vật hoá được: '__auto_type t = a' phân rã thành con
+                # trỏ và mất cỡ. Mảng luôn là lvalue ổn định (không hàm nào trả
+                # mảng theo giá trị) nên dùng thẳng biểu thức là an toàn.
+                if self.gtype_of(a).kind == "array":
+                    temps.append(self.gen_expr(a))
+                    continue
                 tv = self.tmp("_gpa")
                 decls.append(f"__auto_type {tv} = ({self.gen_expr(a)});")
                 temps.append(tv)
@@ -1933,6 +1948,25 @@ class Codegen:
             "%g": "double", "%c": "int", "%p": "void*",
         }.get(spec)   # %s -> None (không ép)
 
+    def _gtype_array_frag(self, gt: T.GType, cexpr):
+        """(đoạn_fmt, [c_args]) cho một MẢNG cỡ tĩnh: '[v0, v1, ...]'. Đệ quy cho
+        mảng nhiều chiều và cho phần tử struct/enum. Cắt bớt sau _PRINT_ARRAY_MAX
+        phần tử để chuỗi định dạng C không phình vô hạn."""
+        n = gt.n
+        parts = ["["]
+        cargs = []
+        shown = min(n, self._PRINT_ARRAY_MAX)
+        for i in range(shown):
+            if i:
+                parts.append(", ")
+            frag, fa = self._gtype_print_frag(gt.elem, f"({cexpr})[{i}]")
+            parts.append(frag)
+            cargs += fa
+        if shown < n:
+            parts.append(f", ... ({n} phần tử)")
+        parts.append("]")
+        return "".join(parts), cargs
+
     def _struct_print_fragment(self, sname, base):
         """(đoạn_fmt, [c_args]) để in một struct dạng 'Tên { f: v, ... }'. 'base'
         là biểu thức C của giá trị struct (ổn định, không tác dụng phụ — đã vật
@@ -2042,10 +2076,11 @@ class Codegen:
                 # ổn định: dùng biến tạm (ce) nếu có, nếu không thì biểu thức trực
                 # tiếp (gen_print đã vật hoá struct nên nhánh None chỉ gặp tên trần).
                 gt = self.gtype_of(arg) if arg is not None else T.UNKNOWN
-                if (gt.kind == "struct" and gt.name in self.struct_defs
+                if ((gt.kind == "struct" and gt.name in self.struct_defs
+                     or gt.kind == "array" and isinstance(gt.n, int))
                         and key.partition(":")[0] in ("", "v")):
                     base = ce if ce is not None else self.gen_expr(arg)
-                    frag, sargs = self._struct_print_fragment(gt.name, base)
+                    frag, sargs = self._gtype_print_frag(gt, base)
                     result.append(frag)
                     c_args.extend(sargs)
                     i = j + 1

@@ -2592,6 +2592,13 @@ class Checker:
         # 'Enum.Variant' — truy cập biến thể có tên đầy đủ (rõ ràng hơn tên trần,
         # tránh nhập nhằng khi hai enum trùng tên biến thể).
         tn = self._type_name_ident(e.base)
+        # 'a::b' chỉ dành cho đường dẫn KIỂU; trên một giá trị phải dùng '.'.
+        if getattr(e, "via_path", False) and tn is None:
+            base = e.base.name if isinstance(e.base, A.Ident) else "biểu thức"
+            self.err(f"'{base}::{e.field}': '::' chỉ dùng sau tên một KIỂU "
+                     f"(struct/enum) — với một giá trị hãy dùng "
+                     f"'{base}.{e.field}'", e)
+            return T.UNKNOWN
         if tn is not None and tn in self.enums:
             if e.field in self.enums[tn]:
                 e.enum_variant = (tn, e.field)
@@ -3138,7 +3145,7 @@ class Checker:
                 self.err("dbg(x) cần đúng 1 tham số", e)
                 return T.UNKNOWN
             at = self.infer(e.args[0])
-            if at.kind == "void" or self._is_static_array(at):
+            if at.kind == "void" or self._is_dyn_array(at):
                 self.err(
                     f"dbg() chưa in trực tiếp được giá trị kiểu '{self.tyname(at)}' "
                     f"(in từng phần tử, hoặc dùng '&x' để in địa chỉ)", e)
@@ -3178,7 +3185,10 @@ class Checker:
             # ... }'. Chỉ void và mảng-tĩnh-theo-giá-trị là không in được ('{}' với
             # mảng thiếu thông tin độ dài tin cậy; in từng phần tử).
             for at in value_ts:
-                if at.kind == "void" or self._is_static_array(at):
+                # Mảng cỡ TĨNH giờ in được: codegen bung '[v0, v1, ...]' (đệ quy
+                # như khi mảng là trường của struct). Chỉ void và mảng ĐỘNG là
+                # không in được (mảng động không mang theo độ dài).
+                if at.kind == "void" or self._is_dyn_array(at):
                     self.err(
                         f"không thể định dạng trực tiếp giá trị kiểu "
                         f"'{self.tyname(at)}' (dùng từng trường/phần tử)", e)

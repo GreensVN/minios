@@ -602,8 +602,17 @@ Một nền tảng vững để mở rộng tiếp. 🚀
   thành con trỏ → `let b = a` chia sẻ bộ nhớ thay vì sao chép (và literal thì trỏ
   vào giá trị tạm đã hết hạn). Nay bị từ chối, nhất quán với việc cấm hàm trả về
   mảng theo giá trị.
-- 🧪 **Bộ test: 182 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
-  `fmt_center`, `null_guard`, `foreach_mut` và 15 ca "phải lỗi".
+- ✨ **In thẳng cả mảng**: `println("{}", a)` với mảng cỡ tĩnh giờ bung
+  `[1, 2, 3]` (đệ quy cho mảng nhiều chiều, phần tử struct/enum/chuỗi; cắt bớt
+  sau 8 phần tử) — trước đây là lỗi biên dịch dù mảng *trong* struct vẫn in
+  được. `dbg(a)` cũng vậy.
+- ✨ **`Type::item` kiểu Rust**: `Color::Red`, `Counter::new()` — đồng nghĩa
+  `Type.item`. `::` đã được lexer nhận nhưng không parser nào dùng, nên
+  `Color::Red` báo "cần biểu thức" rất khó hiểu; dùng `::` sau một *giá trị* nay
+  báo lỗi kèm gợi ý dùng `.`.
+- 🧪 **Bộ test: 186 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
+  `fmt_center`, `null_guard`, `foreach_mut`, `print_array`, `path_sep` và
+  17 ca "phải lỗi".
 
 ## Mới trong 0.9.0 — 🔍 Bắt thêm lỗi tĩnh, sửa lỗi sinh mã
 

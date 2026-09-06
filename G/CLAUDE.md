@@ -186,6 +186,24 @@ mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
 `repeat` field that the *checker* expands into N copies of the element before
 any inference runs, so everything downstream sees a plain `ArrayLit`.
 
+### Printing a whole array
+
+`_gtype_print_frag` (codegen) is the single generic "print one value of GType
+`gt`" entry point: struct → expand fields, static array → `_gtype_array_frag`
+(recursive, capped at `_PRINT_ARRAY_MAX`), enum → variant name, else a printf
+spec. `build_format`, `gen_print` and `dbg` all route arrays through it. One
+subtlety: arrays must **not** be hoisted into an `__auto_type` temp (that decays
+to a pointer and loses the size), so `gen_print` passes the array expression
+through unmaterialized — safe because arrays are always stable lvalues here.
+The checker only rejects `void` and *dynamic* arrays from format position.
+
+### `::` is an alias for `.` on type paths
+
+`parse_postfix` accepts `Ident :: name` and builds the same `A.FieldAccess` the
+`.` form does, tagged `via_path`. The parser rejects a non-`Ident` base; the
+checker rejects `via_path` when the base isn't a struct/enum type name. So
+`Color::Red` and `Counter::new()` work, `p::x` gets a "use `p.x`" error.
+
 ### `for mut x in arr` binds by reference
 
 Unlike the read-only `for x in arr` (which copies each element), `for mut x`
