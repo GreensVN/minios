@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'P.get' là method THỂ HIỆN (có 'self') — gọi trên một giá trị: 'x.get(...)'

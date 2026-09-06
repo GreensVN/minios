@@ -75,21 +75,33 @@ run_fail() {
     if [ "$bless" = "1" ]; then
         mkdir -p "$ROOT/tests/fail"
         # Lưu phần thông điệp sau 'lỗi ...:' — bỏ đường dẫn/dòng/cột để di động.
+        local extra=""
+        [ -f "$exp" ] && extra="$(tail -n +2 "$exp")"
         echo "$got" | grep -oE 'lỗi [^:]+: .*' | head -1 > "$exp"
+        [ -n "$extra" ] && echo "$extra" >> "$exp"
         echo -e "${YEL}BLESS${RST}        $name (fail)"; return
     fi
     if [ ! -f "$exp" ]; then
         echo -e "${YEL}THIẾU KQ${RST}     $name (fail) (chạy --bless để tạo)"
         fail=$((fail+1)); return
     fi
-    local want; want="$(cat "$exp")"
-    if echo "$got" | grep -qF "$want"; then
+    # Mỗi dòng của file mong đợi phải xuất hiện trong đầu ra (dòng 1 do --bless
+    # sinh; các dòng thêm tay — vd 'gc: 4 lỗi' — kiểm phục hồi nhiều lỗi).
+    local ok=1 want
+    while IFS= read -r want; do
+        [ -z "$want" ] && continue
+        if ! echo "$got" | grep -qF "$want"; then
+            ok=0
+            echo -e "${RED}FAIL${RST}         $name (fail)"
+            echo "  mong đợi chứa: $want"
+            echo "  thực tế:       $(echo "$got" | head -1)"
+            break
+        fi
+    done < "$exp"
+    if [ "$ok" = "1" ]; then
         echo -e "${GREEN}PASS${RST}         $name (fail)"
         pass=$((pass+1))
     else
-        echo -e "${RED}FAIL${RST}         $name (fail)"
-        echo "  mong đợi chứa: $want"
-        echo "  thực tế:       $(echo "$got" | head -1)"
         fail=$((fail+1))
     fi
 }

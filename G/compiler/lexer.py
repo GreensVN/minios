@@ -10,8 +10,11 @@ KEYWORDS = {
     "fn", "let", "mut", "struct", "enum", "if", "else", "while", "for",
     "return", "match", "defer", "asm", "import", "true", "false",
     "comptime", "break", "continue", "as", "null", "sizeof", "alignof", "in",
-    "loop", "impl", "const", "extern", "step",
+    "loop", "impl", "const", "extern",
 }
+# 'step' là từ khoá NGỮ CẢNH: chỉ có nghĩa sau 'for i in a..b' (parser kiểm tra
+# id 'step' ở đúng vị trí đó) — ngoài ra vẫn là định danh bình thường
+# ('let step = 2' hợp lệ).
 
 # Toán tử 3 ký tự (kiểm tra trước 2 ký tự)
 THREE_OPS = ["..=", "<<=", ">>="]

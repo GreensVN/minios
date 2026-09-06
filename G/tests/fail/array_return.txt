@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: hàm 'ret_arr' không thể trả về mảng theo giá trị ('[3]int') — hãy bọc mảng trong struct, hoặc nhận con trỏ tới bộ đệm đầu ra làm tham số

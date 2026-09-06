@@ -3,7 +3,7 @@ G Language - Hệ thống kiểu (type system).
 GType là biểu diễn kiểu đã được phân giải, dùng cho type-checker và codegen.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

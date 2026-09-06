@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể ép 'int' sang 'bool' bằng 'as' — viết rõ 'x != 0' (số) hoặc 'p != null' (con trỏ)

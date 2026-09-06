@@ -117,6 +117,20 @@ println("{}", r.area())   // -> 12
 r.scale(2)
 ```
 
+**Method tĩnh, `impl` trên enum, tên biến thể đầy đủ, so sánh struct:**
+```g
+impl Rect {
+    fn square(n: int) -> Rect { return Rect { w: n, h: n } }   // không có self
+}
+impl Color {
+    fn is_warm(self) -> bool { return *self == Color.Red }     // self: *Color
+    fn name(self) -> str { match *self { Red => { return "red" } _ => { return "?" } } }
+}
+let sq = Rect.square(3)               // gọi qua tên kiểu
+println("{}", sq == Rect { w: 3, h: 3 })   // struct '=='/'!=' so theo từng trường (đệ quy)
+println("{}", Color.Red.is_warm())    // 'Enum.Variant' — rõ ràng hơn tên trần 'Red'
+```
+
 ### Con trỏ & bộ nhớ động
 ```g
 let mut v = 42
@@ -440,8 +454,11 @@ let size = (&_bss_end as u64) - (&_kernel_start as u64)
 
 ```g
 static_assert(sizeof(GdtPtr) == 10, "GDT pointer phải 10 byte")
+static_assert(CAP > 0)                 // thông điệp là tuỳ chọn
 ```
-Bắt ngay khi biên dịch nếu điều kiện (hằng) sai — khoá bố cục struct/ABI.
+Bắt ngay khi biên dịch nếu điều kiện (hằng) sai — khoá bố cục struct/ABI. Điều
+kiện phải là **hằng** (literal, `const`, `sizeof`/`alignof`, biến thể enum và phép
+toán giữa chúng); tham chiếu biến/lời gọi lúc chạy là lỗi.
 
 ---
 
@@ -540,6 +557,46 @@ let x = a +
   x86 chúng biên dịch thành no-op an toàn.
 
 Một nền tảng vững để mở rộng tiếp. 🚀
+
+## Mới trong 0.7.0 — 🔧 Đợt sửa lỗi & nâng cấp trình biên dịch
+
+- 🐛 **Sinh mã C an toàn với mọi tên định danh:** tên G trùng **từ khoá C**
+  (`switch`, `default`, `char`, `register`...), **hàm libc** (`exp`, `log`,
+  `puts`...) hay **global/hàm cùng tên** với biến cục bộ từng rò thành lỗi C khó
+  hiểu (`expected identifier`, `conflicting types`); nay được đổi tên nhất quán ở
+  mọi vị trí (struct/enum/trường/biến thể/tham số/global/method).
+- 🐛 **Khai báo con trỏ phức tạp đúng cú pháp C:** `*[3]int` (con trỏ tới mảng),
+  `[2]*int` (mảng con trỏ), `*[2][3]int`, `**T`... trong tham số/`let`/ép kiểu.
+  Trước đây `p: *[3]int` sinh `int* p[3]` (sai nghĩa).
+- 🐛 **Ghi qua con trỏ tới biến `let`:** `let p = &x; *p = 6` từng bị C từ chối
+  (`const __auto_type` suy ra `const int*`); nay `let` chỉ khoá **binding**, đúng
+  như tài liệu.
+- 🐛 **Đối số của `g_free`/`panic`/`printf`... không được kiểm kiểu/đổi tên** →
+  lỗi C `'i' undeclared` khi biến bị đổi tên; đã sửa.
+- 🐛 **Tràn số học hằng:** `100000 * 100000` từng cho `1410065408`; nay biểu thức
+  hằng vượt 32-bit **tự nâng lên i64** (như literal lớn), còn gán vào kiểu hẹp là
+  lỗi biên dịch rõ ràng.
+- 🐛 **Gợi ý "có phải ...?" giờ ổn định** giữa các lần chạy (trước phụ thuộc thứ
+  tự băm của set).
+- ✨ **Báo NHIỀU lỗi trong một lần biên dịch** (phục hồi theo câu lệnh/hàm, như
+  gcc/rustc): dòng cuối `gc: N lỗi`; biến khai báo lỗi vẫn được ghi nhận để
+  không sinh chuỗi lỗi "chưa khai báo" vô ích. Tối đa 20 lỗi.
+- ✨ **Method tĩnh** `Type.fn(args)` (không có `self`) — hàm tạo kiểu `Vec2.of(1, 2)`.
+- ✨ **`impl` trên enum** (`c.name()`, `match *self`), **tên biến thể đầy đủ**
+  `Color.Red` (dùng được cả trong pattern `match`), **so sánh struct `==`/`!=`**
+  theo từng trường (đệ quy).
+- ✨ **`static_assert(cond)`** không cần thông điệp; chấp nhận `sizeof(Struct)`.
+- ✨ **`step` là từ khoá ngữ cảnh:** `let step = 2` hợp lệ; `step 0` là lỗi.
+- 🛡️ **Chẩn đoán mới:** chỉ số **hằng** vượt biên mảng tĩnh (`a[5]` trên `[2]int`);
+  `f64 → int/bool` **ngầm** (gán/tham số/trả về — yêu cầu `as`); `x as bool`,
+  `str as int`, `f64 ↔ con trỏ`; `g_alloc`/`g_realloc`/`g_free` sai số tham số/kiểu (trước rò macro C); điều kiện `if`/`while`/`?:` là chuỗi/struct/void;
+  `str < str` (so địa chỉ); **struct/enum định nghĩa hai lần**, `impl` cho kiểu không
+  tồn tại, gọi method tĩnh trên giá trị và ngược lại; nhánh `match` **không bao giờ
+  chạy** (pattern hằng lặp lại / sau `_`); hàm trả về mảng theo giá trị.
+- 🧪 **Bộ test: 119 ca** (+25): 4 ca chạy mới (`c_names`, `ptr_decl`,
+  `static_methods`, `const_widen`) và 21 ca "phải lỗi"; `run_tests.sh` cho phép
+  file mong đợi nhiều dòng (kiểm `gc: 4 lỗi`). Ví dụ kernel `examples/kernel/`
+  nay **được commit thật** (trước bị `.gitignore` nuốt) và boot được (kiểm bằng v86).
 
 ## Mới trong 0.6.0 — 🖥️ Hướng phát triển hệ điều hành
 

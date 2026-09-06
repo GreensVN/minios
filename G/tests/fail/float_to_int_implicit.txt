@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể gán giá trị kiểu 'f64' cho 'g: int'

@@ -1,0 +1,26 @@
+# build artefacts
+TreeOS/build/
+TreeOS/output/
+TreeOS/iso/
+*.o
+*.bin
+*.img
+*.iso
+*.elf
+*.dis
+*.sym
+
+# python
+__pycache__/
+*.pyc
+
+# G compiler scratch output
+G/*.c.out
+G/out/
+G/a.out
+
+# editors
+.vscode/
+.idea/
+*.swp
+.DS_Store

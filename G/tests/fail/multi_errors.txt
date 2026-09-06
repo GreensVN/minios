@@ -1,0 +1,3 @@
+lỗi kiểu/ngữ nghĩa: không thể gán giá trị kiểu 'f64' cho 'g: int'
+gc: 4 lỗi
+định danh chưa khai báo: 'undefined_fn'

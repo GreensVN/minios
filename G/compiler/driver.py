@@ -11,11 +11,11 @@ import tempfile
 
 from .lexer import Lexer, LexError
 from .parser import Parser, ParseError
-from .checker import Checker, CheckError
+from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -118,11 +118,18 @@ def compile_to_c(main_path):
     main_ap = os.path.abspath(main_path)
     prog = build_program(main_path, sources)
     main_src = sources[main_ap][1]
+    def _to_gerror(e):
+        fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
+        return GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
     try:
         Checker(prog).check()
+    except CheckErrors as e:
+        errs = [_to_gerror(x) for x in e.errors]
+        first = errs[0]
+        first.more = errs[1:]
+        raise first
     except CheckError as e:
-        fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
-        raise GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
+        raise _to_gerror(e)
     try:
         c_code = Codegen(prog).generate()
     except CodegenError as e:
@@ -140,7 +147,6 @@ def dump_tokens(main_path):
 def dump_ast(main_path):
     sources = {}
     prog = build_program(main_path, sources)
-    import pprint
     for it in prog.items:
         print(pprint_node(it))
 
@@ -316,6 +322,14 @@ def main(argv):
     except GError as e:
         print(render_diag(e.filename, e.source, e.line, e.col, e.msg, e.phase),
               file=sys.stderr)
+        more = getattr(e, "more", [])
+        for x in more:
+            print(render_diag(x.filename, x.source, x.line, x.col, x.msg, x.phase),
+                  file=sys.stderr)
+        if more:
+            n = len(more) + 1
+            tail = (" (dừng sau %d lỗi)" % n) if n >= CheckErrors.MAX else ""
+            print(f"gc: \033[1;31m{n} lỗi\033[0m{tail}", file=sys.stderr)
         return 1
     except RecursionError:
         print("gc: \033[1;31mlỗi:\033[0m đệ quy quá sâu khi biên dịch "

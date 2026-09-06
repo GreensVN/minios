@@ -8,5 +8,12 @@ __pycache__/
 # File thực thi sinh ra từ examples / tests (không có đuôi .g)
 examples/*
 !examples/*.g
+!examples/kernel/
+examples/kernel/*
+!examples/kernel/*.g
+!examples/kernel/*.s
+!examples/kernel/*.ld
+!examples/kernel/Makefile
+!examples/kernel/README.md
 tests/cases/*
 !tests/cases/*.g

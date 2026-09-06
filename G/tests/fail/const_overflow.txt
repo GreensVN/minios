@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: biểu thức hằng có giá trị 10000000000 vượt giới hạn kiểu 'int' (hợp lệ: -2147483648..2147483647) — dùng kiểu rộng hơn (vd i64) hoặc ép kiểu tường minh

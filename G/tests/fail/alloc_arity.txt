@@ -1,0 +1,2 @@
+lỗi kiểu/ngữ nghĩa: g_alloc(T, n) cần đúng 2 tham số (kiểu và số lượng), nhận 1 — cấp phát một phần tử: g_alloc(T, 1)
+gc: 3 lỗi
