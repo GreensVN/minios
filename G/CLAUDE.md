@@ -269,6 +269,23 @@ element type. Those printers dereference struct fields, so they are spliced in
 **after** struct definitions (`slice_print_at`), while the typedefs go earlier
 (`fnptr_at`) because signatures need them.
 
+### Two C backends, on purpose
+
+`--backend=c` (default) lowers from the AST; `--backend=c-ir`
+(`backend_c_ir.py`) lowers from G-IR. They coexist during the migration because
+the AST one passes 225 tests and replacing it piecewise would create an
+unverifiable half-state. `tests/run_backend_diff.sh` runs both over every
+example and diffs stdout+exit code — that is the only evidence that switching
+does not change behaviour. Do not flip the default until "chưa hỗ trợ" is 0.
+
+Every divergence it found was a bug in the *IR lowering*, not in the new
+backend — i.e. bugs that would have hit LLVM/WASM too. When you add a language
+feature, run this script; a silent miscompile shows up here and nowhere else.
+
+Two C-specific traps the IR backend must respect: a pointer-to-array is
+`T (*p)[N]`, never `T**` (use `decl_of`, not `c_type`); and printf is
+variadic, so float args need an explicit `(double)` cast (`_va_promote`).
+
 ### The IR is the architectural seam
 
 `compiler/ir.py` + `irgen.py` + `irverify.py` + `backend.py` exist because the

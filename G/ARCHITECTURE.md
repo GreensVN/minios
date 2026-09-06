@@ -201,11 +201,20 @@ nghĩa**: mã dùng `outb` biên dịch sạch trên aarch64 rồi chạy no-op.
 Còn lại của Phase 5: chọn toolchain chéo tự động, layout/ABI theo target
 (hiện `ptr_bits` đã có trong `Target` nhưng `types.py` vẫn giả định 64-bit).
 
-## 7. CHƯA làm (nói rõ để không gây hiểu nhầm)
+## 7. Giai đoạn B đang chạy: backend C đọc từ IR
+
+`--backend=c-ir` đã tồn tại và **khớp 100% trên 20 ca** so với backend mặc định
+(`tests/run_backend_diff.sh`). Còn 73 ca chưa hỗ trợ, gần như toàn bộ vì các
+built-in in ấn/format phức tạp (`{:^7}`, `{b}`, bung struct/slice) vẫn ở dạng
+`intrinsic` cấp cao trong IR.
+
+Bước tiếp theo để hoàn tất Giai đoạn B: hạ nốt các intrinsic đó trong `irgen.py`
+(không phải trong backend — nếu hạ trong backend thì LLVM/WASM lại phải làm lại).
+
+## 8. CHƯA làm (nói rõ để không gây hiểu nhầm)
 
 Các mục sau **chưa được triển khai**, mới chỉ có chỗ đứng trong kiến trúc:
 
-- backend C đọc từ IR (Giai đoạn B) — backend hiện tại **vẫn đi thẳng từ AST**;
 - backend LLVM / WASM / native;
 - generics, traits, `Result<T,E>`;
 - allocator abstraction; memory model hình thức (owned/borrowed);

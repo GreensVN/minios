@@ -13,6 +13,9 @@ fn main() -> int {
     let x = 5
     let p = &x          // 'let' bất biến, nhưng ghi qua con trỏ vẫn hợp lệ
     *p = 6
+    // In ra 6: G cho phép ghi qua con trỏ tới một 'let'. Trước đây codegen phát
+    // 'int const x' rồi ép bỏ const để ghi — là UB trong C, nên chương trình in
+    // 6 với -O0 nhưng 5 với -O2. Nay biến bị lấy địa chỉ KHÔNG gắn 'const'.
     println("{}", x)
 
     let mut a: [3]int = [0, 0, 0]

@@ -124,8 +124,11 @@ class TestDeferSemantics(unittest.TestCase):
             fn main() -> int { f() return 0 }
         """)
         self.assertEqual(irverify.verify(mod), [])
-        names = [i.extra.get("arg0") or (i.args[0].const if i.args else None)
-                 for i in instrs_of(mod.func("f")) if i.op == "intrinsic"]
+        # println hạ thành 'call printf' (is_print) với đối số ĐẦU là chuỗi
+        # định dạng — thứ tự các lời gọi đó chính là thứ tự chạy.
+        names = [i.args[0].const.rstrip("\n")
+                 for i in instrs_of(mod.func("f"))
+                 if i.op == "call" and i.extra.get("is_print")]
         self.assertEqual(names, ["body", "2", "1"])
 
     def test_defer_runs_on_every_exit(self):
@@ -142,7 +145,7 @@ class TestDeferSemantics(unittest.TestCase):
         f = mod.func("f")
         n_ret = sum(1 for b in f.blocks if b.term and b.term.op == "ret")
         n_defer = sum(1 for i in instrs_of(f)
-                      if i.op == "intrinsic" and i.extra.get("name") == "println")
+                      if i.op == "call" and i.extra.get("is_print"))
         self.assertEqual(n_ret, 2)
         self.assertEqual(n_defer, 2, "defer không được nhân bản ở mọi lối ra")
 

@@ -101,6 +101,11 @@ class CBackend(AstBackend):
         return Codegen(unit).generate()
 
 
+def _load_ir_backends():
+    """Nạp các backend đọc-từ-IR (import muộn để tránh vòng phụ thuộc)."""
+    from . import backend_c_ir      # noqa: F401  (tự đăng ký khi import)
+
+
 @register
 class IRTextBackend(IRBackend):
     """Backend 'ir' — xuất G-IR dạng văn bản.
@@ -114,3 +119,6 @@ class IRTextBackend(IRBackend):
 
     def emit(self, unit) -> str:
         return str(unit)
+
+
+_load_ir_backends()

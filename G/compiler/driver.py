@@ -16,7 +16,7 @@ from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -172,8 +172,9 @@ def build_ir(main_path, freestanding=False, target=None):
         fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
         return GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
 
+    ck = Checker(prog, freestanding=freestanding, target=target)
     try:
-        Checker(prog, freestanding=freestanding, target=target).check()
+        ck.check()
     except CheckErrors as e:
         errs = [_to_gerror(x) for x in e.errors]
         first = errs[0]
@@ -183,7 +184,8 @@ def build_ir(main_path, freestanding=False, target=None):
         raise _to_gerror(e)
 
     try:
-        mod = IRGen(prog, module_name=os.path.basename(main_path)).generate()
+        mod = IRGen(prog, module_name=os.path.basename(main_path),
+                    enum_values=ck.enums, target=ck.target).generate()
     except IRGenError as e:
         raise GError(main_path, main_src, 0, 0, str(e), "hạ mã IR")
     return mod, prog
@@ -491,6 +493,32 @@ def main(argv):
             return 1
         if args.backend == "ir":
             return emit_ir(args.input, args.freestanding, tgt)
+        if _B.get(args.backend).consumes == "ir":
+            # Backend đọc-từ-IR: chạy checker -> hạ IR -> verify -> sinh mã.
+            from . import irverify
+            mod, prog = build_ir(args.input, args.freestanding, tgt)
+            errs = irverify.verify(mod)
+            if errs:
+                print(f"gc: \033[1;31mIR không hợp lệ:\033[0m {errs[0]}",
+                      file=sys.stderr)
+                return 1
+            try:
+                code = _B.get(args.backend).emit(mod)
+            except _B.BackendError as e:
+                print(f"gc: \033[1;31mlỗi backend {args.backend}:\033[0m {e}",
+                      file=sys.stderr)
+                return 1
+            result = {"c": code, "has_main": has_main(prog), "prog": prog}
+            args._target = tgt
+            if args.emit_c:
+                if args.output:
+                    with open(args.output, "w") as f:
+                        f.write(code)
+                    print(f"gc: đã ghi mã C vào {args.output}")
+                else:
+                    print(code)
+                return 0
+            return build_native(args, extra, result)
         if args.emit_ir:
             return emit_ir(args.input, args.freestanding, tgt)
         if args.verify_ir:

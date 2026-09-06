@@ -42,9 +42,22 @@ class IRGenError(Exception):
     pass
 
 
+class _BoolStr:
+    """Đánh dấu: in đối số bool này dưới dạng chuỗi "true"/"false"."""
+    __slots__ = ("node",)
+
+    def __init__(self, node):
+        self.node = node
+
+
 class IRGen:
-    def __init__(self, prog: A.Program, module_name="main"):
+    def __init__(self, prog: A.Program, module_name="main", enum_values=None,
+                 target=None):
         self.prog = prog
+        #: {tên enum: {biến thể: giá trị}} do checker gấp — nguồn chân lý.
+        self._enum_values = enum_values or {}
+        self._target = target
+        self._layout = None
         self.mod = I.Module(name=module_name)
         self._n = 0
         self.fn = None            # I.Func đang sinh
@@ -92,6 +105,10 @@ class IRGen:
         return dst
 
     def emit_val(self, op, args=None, ty=None, node=None, hint="t", **extra):
+        # Kết quả 'void' KHÔNG được cấp temp — C không cho khai báo biến void.
+        if ty is not None and ty.kind == "void":
+            self.emit(op, args, ty=None, dst=None, node=node, **extra)
+            return I.undef(T.VOID)
         d = self.tmp(ty, hint)
         self.emit(op, args, ty=ty, dst=d, node=node, **extra)
         return d
@@ -152,9 +169,15 @@ class IRGen:
                 self.mod.structs.append(
                     I.StructLayout(it.name, fields, packed=packed, align=align))
             elif isinstance(it, A.EnumDef):
+                # Giá trị biến thể do CHECKER gấp (nó xử lý được '-1', '1 << 2',
+                # tham chiếu biến thể trước đó...). Tính lại ở đây từng làm mất
+                # giá trị âm tường minh: 'Neg = -1' thành 0.
+                resolved = getattr(self, "_enum_values", {}).get(it.name)
                 vals, nxt = [], 0
                 for vname, vexpr in it.variants:
-                    if vexpr is not None:
+                    if resolved is not None and vname in resolved:
+                        nxt = int(resolved[vname])
+                    elif vexpr is not None:
                         cv = getattr(vexpr, "const_value", None)
                         if cv is None and isinstance(vexpr, A.IntLit):
                             cv = int(vexpr.value, 0)
@@ -177,6 +200,31 @@ class IRGen:
                 for m in it.methods:
                     self.gen_func(m, recv=it.struct)
         return self.mod
+
+    def _layout_of(self, gt, align=False):
+        """sizeof/alignof của một GType theo target, hoặc None nếu chưa tính được."""
+        lay = getattr(self, "_layout", None)
+        if lay is None:
+            if self._target is None:
+                return None
+            from . import layout as _lay
+            attrs = {}
+            for st in self.mod.structs:
+                a = {}
+                if st.packed:
+                    a["packed"] = True
+                if st.align:
+                    a["align"] = st.align
+                if a:
+                    attrs[st.name] = a
+            lay = _lay.Layout(self._target,
+                              {st.name: list(st.fields) for st in self.mod.structs},
+                              attrs)
+            self._layout = lay
+        try:
+            return lay.align_of(gt) if align else lay.size_of(gt)
+        except Exception:
+            return None
 
     def resolve(self, ty):
         """A.Type → GType. Checker đã phân giải; ở đây dùng lại chú thích nếu có."""
@@ -518,6 +566,11 @@ class IRGen:
         self.declare(st.var, iv, ity)
         endv = self.emit_val("alloca", [], ty=pty, node=st, hint="e", name="__end")
         self.emit("store", [endv, self.gen_expr(st.end)], node=st)
+        stepv = None
+        if st.step is not None:
+            stepv = self.emit_val("alloca", [], ty=pty, node=st, hint="st",
+                                  name="__step")
+            self.emit("store", [stepv, self.gen_expr(st.step)], node=st)
 
         Lc, Lb, Ls, Le = (self.label("fcond"), self.label("fbody"),
                           self.label("fstep"), self.label("fend"))
@@ -525,8 +578,26 @@ class IRGen:
         self.start(self.block(Lc))
         cur = self.emit_val("load", [iv], ty=ity, node=st, hint="ld")
         lim = self.emit_val("load", [endv], ty=ity, node=st, hint="ld")
-        cmp_op = "le" if st.inclusive else "lt"
-        cond = self.emit_val(cmp_op, [cur, lim], ty=T.BOOL, node=st, hint="c")
+        # CHIỀU so sánh phụ thuộc DẤU CỦA BƯỚC: 'for i in 5..0 step -1' phải
+        # dùng '>' chứ không phải '<' (nếu không vòng lặp không chạy lần nào).
+        # Bước hằng -> quyết định lúc biên dịch; bước động -> chọn lúc chạy.
+        sign = self._step_sign(st.step)
+        if sign < 0:
+            cmp_op = "ge" if st.inclusive else "gt"
+            cond = self.emit_val(cmp_op, [cur, lim], ty=T.BOOL, node=st, hint="c")
+        elif sign > 0:
+            cmp_op = "le" if st.inclusive else "lt"
+            cond = self.emit_val(cmp_op, [cur, lim], ty=T.BOOL, node=st, hint="c")
+        else:
+            up = self.emit_val("le" if st.inclusive else "lt", [cur, lim],
+                               ty=T.BOOL, node=st, hint="cu")
+            dn = self.emit_val("ge" if st.inclusive else "gt", [cur, lim],
+                               ty=T.BOOL, node=st, hint="cd")
+            sv = self.emit_val("load", [stepv], ty=ity, node=st, hint="ls")
+            pos = self.emit_val("ge", [sv, I.const_int(0, ity)], ty=T.BOOL,
+                                node=st, hint="sp")
+            cond = self.emit_val("select", [pos, up, dn], ty=T.BOOL, node=st,
+                                 hint="c")
         self.term(I.Term("branch", [cond], [Lb, Le], line=st.line, col=st.col))
 
         self.start(self.block(Lb))
@@ -541,12 +612,38 @@ class IRGen:
 
         self.start(self.block(Ls))
         c2 = self.emit_val("load", [iv], ty=ity, node=st, hint="ld")
-        step = self.gen_expr(st.step) if st.step is not None else I.const_int(1, ity)
+        step = (self.emit_val("load", [stepv], ty=ity, node=st, hint="ls")
+                if stepv is not None else I.const_int(1, ity))
         nxt = self.emit_val("add", [c2, step], ty=ity, node=st, hint="nx")
         self.emit("store", [iv, nxt], node=st)
         self.term(I.Term("jump", labels=[Lc]))
         self.start(self.block(Le))
         self.pop_scope()
+
+    @staticmethod
+    def _step_sign(step):
+        """Dấu của bước nếu biết LÚC BIÊN DỊCH: -1 / +1, hoặc 0 nếu không rõ."""
+        if step is None:
+            return 1
+        cv = getattr(step, "const_value", None)
+        if cv is None and isinstance(step, A.IntLit):
+            try:
+                cv = int(step.value, 0)
+            except ValueError:
+                cv = None
+        if cv is None and isinstance(step, A.Unary) and step.op == "-":
+            inner = step.operand
+            iv = getattr(inner, "const_value", None)
+            if iv is None and isinstance(inner, A.IntLit):
+                try:
+                    iv = int(inner.value, 0)
+                except ValueError:
+                    iv = None
+            if iv is not None:
+                cv = -iv
+        if cv is None:
+            return 0
+        return -1 if cv < 0 else 1
 
     def gen_foreach(self, st: A.ForEach):
         """for [mut] x in arr — duyệt theo CHỈ SỐ; 'mut' ghi thẳng qua elemaddr."""
@@ -603,8 +700,7 @@ class IRGen:
 
     def gen_match(self, st: A.Match):
         """match — 'switch' khi mọi pattern là hằng nguyên, ngược lại chuỗi branch."""
-        subj = self.gen_expr(st.subject)
-        sty = self.gtype(st.subject)
+        subj, sty = self._match_subject(st)
         Lend = self.label("mend")
 
         arm_labels, cases, default = [], [], None
@@ -681,6 +777,22 @@ class IRGen:
             self.blk = None
             self._dead = True
 
+    def _match_subject(self, node):
+        """(giá trị, kiểu) của biểu thức được match, TỰ DEREF khi cần.
+
+        'match self' trong 'impl' của enum có subject kiểu '*Enum'; checker đánh
+        dấu 'deref_subject'. Bỏ qua dấu đó thì so sánh diễn ra trên ĐỊA CHỈ chứ
+        không phải giá trị -> chọn nhầm nhánh (in 'lam' thay vì 'lục')."""
+        sty = self.gtype(node.subject)
+        v = self.gen_expr(node.subject)
+        if getattr(node, "deref_subject", False) or (
+                sty.kind == "ptr" and sty.elem is not None
+                and sty.elem.kind in ("enum", "int", "char", "bool")):
+            inner = sty.elem if sty.elem is not None else T.I32
+            v = self.emit_val("load", [v], ty=inner, node=node, hint="ds")
+            sty = inner
+        return v, sty
+
     def _const_pat(self, p):
         cv = getattr(p, "const_value", None)
         if cv is not None:
@@ -723,6 +835,16 @@ class IRGen:
     def gen_addr(self, e):
         """Trả về (Value địa chỉ, GType của ô nhớ)."""
         if isinstance(e, A.Ident):
+            # Biến thể enum ('Red') là HẰNG, không phải ô nhớ — phải vật hoá vào
+            # ô tạm trước khi lấy địa chỉ. Trước đây nó rơi vào nhánh 'global' và
+            # sinh 'Color__is_red(Red)', tức truyền giá trị 0 làm CON TRỎ.
+            if (getattr(e, "is_enum_variant", False)
+                    or e.name in self.enum_of_variant):
+                ty = self.gtype(e)
+                addr = self.emit_val("alloca", [], ty=T.GType("ptr", elem=ty),
+                                     node=e, hint="ev")
+                self.emit("store", [addr, self.gen_expr(e)], node=e)
+                return addr, ty
             found = self.lookup(e.name)
             if found is not None:
                 return found
@@ -745,12 +867,23 @@ class IRGen:
             return addr, fty
         if isinstance(e, A.Index):
             bt = self.gtype(e.base)
+            ety = self.gtype(e)
+            if bt.kind == "slice":
+                # Chỉ số trên SLICE: lấy GIÁ TRỊ slice (ptr+len) rồi kiểm biên
+                # bằng độ dài mang theo. KHÔNG được elemaddr trên ô alloca giữ
+                # slice — đó là địa chỉ của handle, không phải của dữ liệu.
+                sv = self.gen_expr(e.base)
+                idx = self.gen_expr(e.index)
+                self.emit("check", [idx, sv], node=e, kind="slice_bounds")
+                addr = self.emit_val("elemaddr", [sv, idx],
+                                     ty=T.GType("ptr", elem=ety), node=e,
+                                     hint="sa", on="slice")
+                return addr, ety
             if bt.kind == "ptr" or (bt.kind == "array" and bt.n == "dyn"):
                 base = self.gen_expr(e.base)
             else:
                 base, _ = self.gen_addr(e.base)
             idx = self.gen_expr(e.index)
-            ety = self.gtype(e)
             if bt.kind == "array" and isinstance(bt.n, int):
                 self.emit("check", [idx, I.const_int(bt.n)], node=e, kind="bounds")
             addr = self.emit_val("elemaddr", [base, idx],
@@ -867,11 +1000,20 @@ class IRGen:
             self._store_array_lit(addr, e, ty)
             return addr
         if isinstance(e, A.SizeOf):
-            return self.emit_val("intrinsic", [], ty=T.U64, node=e, hint="sz",
+            # Gấp thành HẰNG bằng engine bố cục theo target — backend không phải
+            # nhờ 'sizeof' của C, và con số giống nhau ở mọi backend.
+            n = self._layout_of(self.resolve(e.type),
+                                align=getattr(e, "align", False))
+            if n is not None:
+                return I.const_int(n, T.USIZE)
+            return self.emit_val("intrinsic", [], ty=T.USIZE, node=e, hint="sz",
                                  name="alignof" if getattr(e, "align", False)
                                  else "sizeof", arg=str(self.resolve(e.type)))
         if isinstance(e, A.SizeOfExpr):
-            return self.emit_val("intrinsic", [], ty=T.U64, node=e, hint="sz",
+            n = self._layout_of(self.gtype(e.expr))
+            if n is not None:
+                return I.const_int(n, T.USIZE)
+            return self.emit_val("intrinsic", [], ty=T.USIZE, node=e, hint="sz",
                                  name="sizeof", arg=str(self.gtype(e.expr)))
         if isinstance(e, A.Slice):
             if ty.kind == "slice":
@@ -885,17 +1027,24 @@ class IRGen:
                             and isinstance(bt.n, int)
                             else self.emit_val("intrinsic", [base], ty=T.USIZE,
                                                node=e, hint="sl", name="len")))
+                if e.inclusive and e.hi is not None:
+                    hi = self.emit_val("add", [hi, I.const_int(1, T.USIZE)],
+                                       ty=T.USIZE, node=e, hint="hi")
                 return self.emit_val("intrinsic", [base, lo, hi], ty=ty, node=e,
-                                     hint="sl", name="makeslice",
-                                     inclusive=e.inclusive)
+                                     hint="sl", name="makeslice")
             base = self.gen_expr(e.base)
             lo = self.gen_expr(e.lo) if e.lo is not None else I.const_int(0)
             hi = (self.gen_expr(e.hi) if e.hi is not None
                   else self.emit_val("call", [base], ty=T.I64, node=e,
                                      hint="sl", callee="g_str_len_i"))
+            if e.inclusive and e.hi is not None:
+                # 's[a..=b]' bao gồm cận trên: g_str_slice nhận nửa mở nên +1.
+                # Trước đây cờ 'inclusive' được ghi vào extra rồi KHÔNG ai dùng,
+                # nên 's[0..=4]' cắt thiếu một ký tự.
+                hi = self.emit_val("add", [hi, I.const_int(1, T.I64)],
+                                   ty=T.I64, node=e, hint="hi")
             return self.emit_val("call", [base, lo, hi], ty=T.STR, node=e,
-                                 hint="sc", callee="g_str_slice",
-                                 inclusive=e.inclusive)
+                                 hint="sc", callee="g_str_slice")
         if isinstance(e, A.MatchExpr):
             return self.gen_match_expr(e, ty)
         if isinstance(e, A.IfExpr):
@@ -928,6 +1077,13 @@ class IRGen:
         l = self.gen_expr(e.left)
         r = self.gen_expr(e.right)
         lt, rt = self.gtype(e.left), self.gtype(e.right)
+        # 'self == Red': checker đánh dấu tự deref (self là con trỏ).
+        if getattr(e, "deref_left", False) and lt.elem is not None:
+            lt = lt.elem
+            l = self.emit_val("load", [l], ty=lt, node=e, hint="dl")
+        if getattr(e, "deref_right", False) and rt.elem is not None:
+            rt = rt.elem
+            r = self.emit_val("load", [r], ty=rt, node=e, hint="dr")
         if e.op in ("==", "!=") and lt.kind == "str" and rt.kind == "str":
             c = self.emit_val("call", [l, r], ty=T.BOOL, node=e, hint="se",
                               callee="g_str_eq")
@@ -970,8 +1126,7 @@ class IRGen:
     def gen_match_expr(self, e, ty):
         res = self.emit_val("alloca", [], ty=T.GType("ptr", elem=ty),
                             node=e, hint="mv")
-        subj = self.gen_expr(e.subject)
-        sty = self.gtype(e.subject)
+        subj, sty = self._match_subject(e)
         Lend = self.label("mxend")
         for pats, guard, val in e.arms:
             if pats is None:
@@ -1024,6 +1179,115 @@ class IRGen:
         "panic", "unreachable", "todo", "typeof", "swap", "static_assert",
     }
 
+    def _gen_print(self, e, fname, ty):
+        """Hạ print/println/eprint/eprintln thành lời gọi 'printf' TƯỜNG MINH.
+
+        Chuỗi định dạng của G ('{}', '{:>8}', ...) được giải quyết thành chuỗi
+        printf của C NGAY TẠI ĐÂY, kèm danh sách đối số đã ép kiểu. Nhờ vậy
+        backend chỉ việc phát 'fprintf(stream, fmt, ...)' — không backend nào
+        phải cài lại bộ định dạng của G.
+
+        Việc dựng chuỗi định dạng dùng lại chính bộ của backend C (build_format)
+        để hai đường KHÔNG trôi lệch — đó là logic đã được 225 ca test phủ."""
+        stream = "stderr" if fname.startswith("e") else "stdout"
+        newline = fname.endswith("ln")
+        if not e.args:
+            fmt = "\n" if newline else ""
+            return self.emit_val("call", [I.const_str(fmt)], ty=T.VOID, node=e,
+                                 hint="pr", callee="g_print_raw", stream=stream)
+        first = e.args[0]
+        if isinstance(first, A.StrLit):
+            template, value_args = first.value, e.args[1:]
+        else:
+            template, value_args = "{}", e.args
+        fmt, argexprs = self._resolve_format(template, value_args, newline)
+        vals = [I.const_str(fmt)]
+        for a in argexprs:
+            if isinstance(a, _BoolStr):
+                c = self.gen_expr(a.node)
+                vals.append(self.emit_val(
+                    "select", [c, I.const_str("true"), I.const_str("false")],
+                    ty=T.STR, node=e, hint="bs"))
+            else:
+                vals.append(self.gen_expr(a))
+        return self.emit_val("call", vals, ty=T.VOID, node=e, hint="pr",
+                             callee="printf", stream=stream, is_print=True)
+
+    @staticmethod
+    def _spec_for(key, gt, default):
+        """Specifier printf cho placeholder có chữ kiểu, tôn trọng BỀ RỘNG thật
+        của đối số (in i64 bằng '%d' sẽ đọc sai trên nhiều ABI)."""
+        if key in ("d", "u", "x", "X", "o") and gt.kind in ("int", "char"):
+            if gt.bits >= 64:
+                return {"d": "%lld", "u": "%llu", "x": "%llx",
+                        "X": "%llX", "o": "%llo"}[key]
+            if key == "d" and not gt.signed:
+                return "%u"
+        return default
+
+    def _resolve_format(self, template, value_args, newline):
+        """(chuỗi_printf, [node_đối_số]) — phân tích placeholder của G.
+
+        Chỉ xử lý tập placeholder mà IR biểu diễn được trực tiếp. Những dạng cần
+        hàm hỗ trợ của backend C (căn giữa '^', '{b}' nhị phân, bung struct/mảng/
+        slice) chưa hạ được ở đây -> báo IRGenError để backend c-ir nói RÕ là
+        chưa hỗ trợ, thay vì sinh mã sai."""
+        out = []
+        args = []
+        i = 0
+        ai = 0
+        n = len(template)
+        while i < n:
+            ch = template[i]
+            if ch == "{" and i + 1 < n and template[i + 1] == "{":
+                out.append("{"); i += 2; continue
+            if ch == "}" and i + 1 < n and template[i + 1] == "}":
+                out.append("}"); i += 2; continue
+            if ch == "%":
+                out.append("%%"); i += 1; continue
+            if ch != "{":
+                out.append(ch); i += 1; continue
+            j = template.find("}", i)
+            if j == -1:
+                out.append("{"); i += 1; continue
+            key = template[i + 1:j]
+            if ai >= len(value_args):
+                raise IRGenError("thiếu đối số cho placeholder")
+            arg = value_args[ai]
+            ai += 1
+            i = j + 1
+            gt = self.gtype(arg)
+            # Placeholder có CHỮ KIỂU tường minh ('{d}', '{s}', '{f}', '{x}'...)
+            # ánh xạ thẳng sang specifier printf. Chỉ nhận các dạng KHÔNG cần
+            # hàm hỗ trợ của backend C.
+            simple = {"d": "%d", "s": "%s", "c": "%c", "u": "%u",
+                      "x": "%x", "X": "%X", "o": "%o", "f": "%f",
+                      "e": "%e", "g": "%g", "p": "%p"}
+            if key in simple:
+                out.append(self._spec_for(key, gt, simple[key]))
+                args.append(arg)
+                continue
+            if key not in ("", "v"):
+                raise IRGenError(
+                    f"placeholder '{{{key}}}' chưa hạ được sang IR")
+            if gt.kind in ("struct", "array", "slice", "enum"):
+                raise IRGenError(
+                    f"in giá trị kiểu '{gt}' chưa hạ được sang IR")
+            spec, is_bool = T.printf_spec(gt)
+            if is_bool:
+                # bool -> in "true"/"false" bằng một biểu thức chọn, giống
+                # backend C. Không cần hàm hỗ trợ nào.
+                out.append("%s")
+                args.append(_BoolStr(arg))
+                continue
+            out.append(spec)
+            args.append(arg)
+        if ai < len(value_args):
+            raise IRGenError("thừa đối số so với placeholder")
+        if newline:
+            out.append("\n")
+        return "".join(out), args
+
     def gen_call(self, e, want_value=True):
         ty = self.gtype(e)
 
@@ -1050,6 +1314,17 @@ class IRGen:
 
         fname = e.func.name if isinstance(getattr(e, "func", None), A.Ident) else None
 
+        if fname in ("print", "println", "eprint", "eprintln"):
+            # Hạ thành printf khi phân tích được chuỗi định dạng; nếu gặp dạng
+            # cần hàm hỗ trợ của backend C (căn giữa, '{b}', bung struct...) thì
+            # QUAY VỀ intrinsic — IR vẫn hợp lệ, chỉ là backend c-ir chưa sinh
+            # mã được cho ca đó. Ném lỗi ở đây sẽ làm hỏng CẢ '--verify-ir'.
+            mark = len(self.blk.instrs) if self.blk is not None else 0
+            try:
+                return self._gen_print(e, fname, ty)
+            except IRGenError:
+                if self.blk is not None:
+                    del self.blk.instrs[mark:]      # bỏ phần đã phát dở
         if fname in self._PRINT_BUILTINS:
             args = []
             for a in e.args:

@@ -801,6 +801,7 @@ class Codegen:
 
     def gen_fn(self, fn: A.Function):
         self.cur_src_file = getattr(fn, "src_file", None) or getattr(self, "cur_src_file", None)
+        self._addr_taken = self._collect_addr_taken(fn.body or [])
         self.w(self.fn_signature(fn) + " {")
         self.scope_stack = []
         # Tham số MẢNG khai báo 'mut': C truyền mảng dưới dạng con trỏ, nên ghi
@@ -827,6 +828,31 @@ class Codegen:
         self.w("}")
 
     # ---------- quản lý scope & defer (kiểu Zig, theo block, LIFO) ----------
+    def _collect_addr_taken(self, node, out=None):
+        """Tên các biến bị lấy địa chỉ ('&x') ở BẤT KỲ đâu trong thân hàm.
+
+        Dùng để quyết định có gắn 'const' cho khai báo C hay không — xem gen_let."""
+        if out is None:
+            out = set()
+        if isinstance(node, list):
+            for x in node:
+                self._collect_addr_taken(x, out)
+            return out
+        if isinstance(node, A.Unary) and node.op == "&":
+            tgt = node.operand
+            while isinstance(tgt, (A.FieldAccess, A.Index)):
+                tgt = tgt.base
+            if isinstance(tgt, A.Ident):
+                out.add(tgt.name)
+        for f in getattr(node, "__dataclass_fields__", {}):
+            v = getattr(node, f, None)
+            if isinstance(v, (list, tuple)):
+                for x in v:
+                    self._collect_addr_taken(x, out)
+            elif hasattr(v, "__dataclass_fields__"):
+                self._collect_addr_taken(v, out)
+        return out
+
     def gen_scoped_body(self, body, is_loop=False, prologue=None):
         """Sinh thân một block: mở scope defer, (tuỳ chọn) prologue, các lệnh,
         rồi xả defer của scope này (nếu block không kết thúc bằng return/break/continue)."""
@@ -958,6 +984,13 @@ class Codegen:
         # 'T*' -> cảnh báo 'discards const qualifier' (và với '-Werror' là lỗi) dù mã
         # G hoàn toàn hợp lệ. Vô hướng/struct/con trỏ vẫn giữ 'const'.
         if const and self._is_array_decl(st):
+            const = False
+        # Biến 'let' bị LẤY ĐỊA CHỈ ở đâu đó trong hàm: KHÔNG gắn 'const' ở C.
+        # G cho phép ghi qua con trỏ tới một 'let' (checker chấp nhận '*p = v'),
+        # nhưng ở C ghi qua con trỏ đã bỏ 'const' của một đối tượng THẬT SỰ
+        # const là hành vi KHÔNG XÁC ĐỊNH: chương trình in 6 với -O0 và 5 với
+        # -O2. Bỏ 'const' làm cho ngữ nghĩa G thành hiện thực ở mọi mức tối ưu.
+        if const and st.name in getattr(self, "_addr_taken", ()):
             const = False
         # ----- mảng literal (kể cả nhiều chiều): T name[..][..] = { ... } -----
         if isinstance(st.value, A.ArrayLit):

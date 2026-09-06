@@ -566,6 +566,34 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.16.0 — 🔁 Backend C đọc từ G-IR (Giai đoạn B)
+
+- 🔁 **`--backend=c-ir`**: backend C thứ hai sinh mã **từ G-IR** thay vì từ AST,
+  chạy song song với backend mặc định. CFG của IR ánh xạ gần một-một sang nhãn
+  + `goto` của C.
+- 🧪 **`tests/run_backend_diff.sh`** — cơ chế kiểm chứng của giai đoạn chuyển
+  đổi: chạy CẢ HAI backend trên mọi ví dụ/ca test rồi so từng byte đầu ra và mã
+  thoát. Hiện: **20 khớp, 0 khác**, 73 chưa hỗ trợ (các built-in in ấn/format
+  phức tạp vẫn ở dạng intrinsic cấp cao). Backend cũ **vẫn là mặc định** cho tới
+  khi con số "chưa hỗ trợ" về 0 — đúng chiến lược ở ARCHITECTURE.md §3.
+- 🐛 **Lỗi thật do so khớp hai backend phát hiện** (không phải lỗi của backend
+  mới — là lỗi của *bản hạ mã IR*, sẽ ảnh hưởng MỌI backend tương lai):
+  - `elemaddr` trên slice lấy địa chỉ của **handle** thay vì `.ptr`;
+  - biến thể enum có giá trị **âm tường minh** (`Neg = -1`) bị tính lại thành 0;
+  - `1 << 40` mất bit vì C tính trong `int` trước khi gán vào `i64`;
+  - `for i in 5..0 step -1` **không chạy lần nào** (chiều so sánh cố định `<`);
+  - `s[0..=4]` cắt thiếu một ký tự (cờ `inclusive` được ghi rồi không ai đọc);
+  - `match self` / `self == Red` so sánh trên **địa chỉ** thay vì giá trị;
+  - `Red.is_red()` truyền hằng enum làm **con trỏ** → segfault.
+- 🐛 **UB trong backend cũ**: `let x = 5; let p = &x; *p = 6` sinh `int const x`
+  rồi ép bỏ `const` để ghi — **hành vi không xác định**, in `6` với `-O0` nhưng
+  `5` với `-O2`. Nay biến bị lấy địa chỉ không gắn `const` nữa, kết quả ổn định
+  ở mọi mức tối ưu. (Ca test `ptr_decl` trước đây khoá lại chính giá trị sai.)
+- 📐 `sizeof`/`alignof` trong IR được **gấp thành hằng** bằng engine bố cục, nên
+  mọi backend cho cùng con số mà không cần hỏi C.
+- 🧪 **Bộ test: 225 ca** + backend-diff 20 + target 21 + panic 4 + IR 97
+  + IR-unit 25 + layout 11 + ASan 93; fuzz 24 000 vòng, 0 crash.
+
 ## Mới trong 0.15.0 — 📐 ABI / bố cục theo target
 
 - 🐛 **`usize`/`isize` hardcode 64-bit.** `Target.ptr_bits` đã tồn tại nhưng
