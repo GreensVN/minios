@@ -87,9 +87,11 @@ def load_program(path, sources, visited):
     prog, _ = parse_file(path, sources)
     items = []
     for imp in prog.imports:
+        # (tên, dòng, cột) — dạng chuỗi trần vẫn được chấp nhận để tương thích.
+        imp, iline, icol = imp if isinstance(imp, tuple) else (imp, 1, 1)
         ipath = resolve_import(imp, path, sources)
         if ipath is None:
-            raise GError(path, sources[ap][1], 1, 1,
+            raise GError(path, sources[ap][1], iline, icol,
                          f"không tìm thấy module để import: '{imp}'", "module")
         items.extend(load_program(ipath, sources, visited))
     # Gắn file nguồn vào từng khai báo để chẩn đoán đa module đúng file/dòng.

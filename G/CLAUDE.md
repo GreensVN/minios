@@ -186,6 +186,21 @@ mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
 `repeat` field that the *checker* expands into N copies of the element before
 any inference runs, so everything downstream sees a plain `ArrayLit`.
 
+### Struct literals must be complete
+
+`infer_struct_lit` requires every field of a non-empty struct to be present.
+C's designated-initializer syntax zero-fills anything omitted, so without this
+check adding a field to a struct silently gives every existing literal a 0 for
+it. `struct_order` supplies declaration order for the error message.
+
+### `Program.imports` carries positions
+
+Imports are `(name, line, col)` tuples, not bare strings; `load_program` uses
+them so a bad import points at its own line. `driver` still accepts a bare
+string for compatibility. Relatedly, `Parser.error(msg, show_token=False)`
+suppresses the `(gặp <token>)` suffix — use it whenever the message already
+names the fix, since the suffix reports the token *after* the mistake.
+
 ### The checker knows about `--freestanding`
 
 `Checker(prog, freestanding=...)` is threaded from `driver.compile_to_c`. When

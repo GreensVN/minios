@@ -2787,6 +2787,17 @@ class Checker:
                     f"trường '{e.name}.{fname}' kiểu '{self.tyname(fields[fname])}' "
                     f"không nhận giá trị kiểu '{self.tyname(vt)}'", e)
             seen.add(fname)
+        # Trường THIẾU trong literal bị C zero-init âm thầm — nguồn lỗi kinh điển
+        # khi thêm trường mới vào struct: mọi literal cũ vẫn biên dịch và lặng lẽ
+        # nhận 0. Yêu cầu liệt kê đủ (như Rust). 'S {}' trên struct RỖNG vẫn hợp lệ.
+        if fields:
+            missing = [f for f in self.struct_order.get(e.name, list(fields))
+                       if f not in seen]
+            if missing:
+                self.err(
+                    f"struct '{e.name}' còn thiếu trường: "
+                    f"{', '.join(missing)} — phải khởi tạo đủ mọi trường "
+                    f"(C sẽ âm thầm gán 0)", e)
         return T.GType("struct", name=e.name)
 
     def _require_mutable_receiver(self, recv, sname, mname, node):

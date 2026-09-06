@@ -619,9 +619,18 @@ Một nền tảng vững để mở rộng tiếp. 🚀
   stdio/heap (`print*`, `format`, `dbg`, `assert_eq`, `g_alloc`…) cùng các method
   `str` cấp phát (`upper`, `sub`, `trim`…), kèm gợi ý dùng `outb`/`vol_write`;
   các method `str` chỉ đọc vẫn dùng được.
-- 🧪 **Bộ test: 190 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
+- 🐛 **Struct literal thiếu trường bị C zero-init âm thầm** — `S{a:1}` khi `S`
+  có `b` vẫn biên dịch và `b` lặng lẽ thành 0. Đây là lỗi kinh điển khi *thêm
+  trường mới*: mọi literal cũ vẫn qua được. Nay phải liệt kê đủ mọi trường (như
+  Rust); `S{}` trên struct **rỗng** vẫn hợp lệ.
+- 🐛 **Lỗi `import` trỏ sai dòng**: "không tìm thấy module" luôn báo dòng 1, tức
+  chỉ vào một `import` *khác* khi file có nhiều import. Nay trỏ đúng dòng.
+- 🧰 **`import mod/a`** (thiếu ngoặc kép) từng báo "cần khai báo cấp cao (gặp op
+  '/')" — nay gợi ý thẳng `import "mod/a.g"`. Phụ chú `(gặp ...)` cũng được bỏ
+  khỏi các lỗi cú pháp đã tự đủ nghĩa, vì nó trỏ vào token *sau* chỗ sai.
+- 🧪 **Bộ test: 193 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
   `fmt_center`, `null_guard`, `foreach_mut`, `print_array`, `path_sep`,
-  `str_at_bounds`, 17 ca "phải lỗi" và một hạng mục test mới `tests/fail_fs/`
+  `str_at_bounds`, `import_line`, 19 ca "phải lỗi" và một hạng mục test mới `tests/fail_fs/`
   (hợp lệ khi hosted, phải bị từ chối ở `--freestanding`).
 
 ## Mới trong 0.9.0 — 🔍 Bắt thêm lỗi tĩnh, sửa lỗi sinh mã

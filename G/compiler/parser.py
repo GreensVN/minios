@@ -45,9 +45,13 @@ class Parser:
         j = self.pos + off
         return self.toks[j] if j < len(self.toks) else self.toks[-1]
 
-    def error(self, msg):
+    def error(self, msg, show_token=True):
+        """Báo lỗi cú pháp tại token hiện tại. 'show_token=False' cho các thông
+        báo đã tự đủ nghĩa (kèm gợi ý sửa) — phụ chú '(gặp ...)' khi đó chỉ trỏ
+        vào token đứng SAU chỗ sai và gây nhiễu."""
         t = self.cur()
-        raise ParseError(f"{msg} (gặp {t.kind} {t.value!r})", t.line, t.col)
+        suffix = f" (gặp {t.kind} {t.value!r})" if show_token else ""
+        raise ParseError(f"{msg}{suffix}", t.line, t.col)
 
     def advance(self) -> Token:
         t = self.toks[self.pos]
@@ -109,11 +113,26 @@ class Parser:
             if self.is_kw("import"):
                 if attrs:
                     self.error("'import' không nhận thuộc tính @")
-                self.advance()
+                itok = self.advance()
+                # Lưu kèm DÒNG/CỘT: lỗi "không tìm thấy module" trước đây luôn
+                # trỏ về dòng 1, tức chỉ vào một import khác khi file có nhiều
+                # import.
                 if self.check("str"):
-                    prog.imports.append(self.advance().value)
+                    iname = self.advance().value
                 else:
-                    prog.imports.append(self.expect("id").value)
+                    iname = self.expect("id").value
+                    # 'import mod/a' — đường dẫn có '/' phải đặt trong ngoặc kép;
+                    # nếu không, lexer thấy '/' là phép chia và báo "cần khai báo
+                    # cấp cao", chẳng gợi ý gì cho người dùng.
+                    if self.is_op("/"):
+                        parts = [iname]
+                        while self.accept("op", "/"):
+                            parts.append(self.expect("id").value)
+                        guess = "/".join(parts)
+                        self.error(
+                            f"đường dẫn module có '/' phải đặt trong ngoặc kép: "
+                            f'import "{guess}.g"', show_token=False)
+                prog.imports.append((iname, itok.line, itok.col))
                 self.skip_semis()
             elif self.is_kw("fn") or self.is_kw("comptime"):
                 prog.items.append(self._with_attrs(self.parse_fn(), attrs))
