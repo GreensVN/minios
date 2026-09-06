@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'impl Sh for N' thiếu method 'size' — trait yêu cầu 'fn size(self) -> int'

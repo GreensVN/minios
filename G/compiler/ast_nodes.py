@@ -57,6 +57,8 @@ class Function:
     body: list
     #: Tham số KIỂU của hàm generic: ['T', 'U']. Rỗng = hàm thường.
     type_params: list = field(default_factory=list)
+    #: Ràng buộc trait cho từng tham số kiểu: {'T': ['Ord', 'Show']}.
+    type_bounds: dict = field(default_factory=dict)
     is_comptime: bool = False
     is_extern: bool = False
     recv: Optional[str] = None     # tên struct nếu là method (impl)
@@ -86,6 +88,20 @@ class EnumDef:
 class Impl:
     struct: str
     methods: list       # list[Function]
+    line: int = 0
+    col: int = 0
+    #: 'impl Trait for Struct' -> tên trait; None = impl thường.
+    trait: Optional[str] = None
+
+
+@dataclass
+class TraitDef:
+    """'trait Eq { fn eq(self, o: Self) -> bool }'
+
+    Trait của G là RÀNG BUỘC LÚC BIÊN DỊCH cho generic, không phải đối tượng
+    động: không có vtable, không boxing. Xem docs/TRAITS.md."""
+    name: str
+    methods: list = field(default_factory=list)   # list[Function] (không thân)
     line: int = 0
     col: int = 0
 

@@ -149,6 +149,10 @@ class Parser:
                 if attrs:
                     self.error("'enum' không nhận thuộc tính @")
                 prog.items.append(self.parse_enum())
+            elif self.is_kw("trait"):
+                if attrs:
+                    self.error("'trait' không nhận thuộc tính @")
+                prog.items.append(self.parse_trait())
             elif self.is_kw("impl"):
                 if attrs:
                     self.error("'impl' không nhận thuộc tính @ (đặt @ trên method)")
@@ -186,7 +190,7 @@ class Parser:
                 pass
         return item
 
-    def parse_fn(self, recv=None) -> A.Function:
+    def parse_fn(self, recv=None, no_body=False) -> A.Function:
         t = self.cur()
         is_comptime = bool(self.accept("kw", "comptime"))
         is_extern = bool(self.accept("kw", "extern"))
@@ -196,10 +200,18 @@ class Parser:
         # theo từng bộ kiểu cụ thể (monomorphization) trong checker, nên IR và
         # backend không cần biết generic là gì.
         type_params = []
+        type_bounds = {}
         if self.is_op("<"):
             self.advance()
             while not self.is_op(">"):
-                type_params.append(self.expect("id").value)
+                tp = self.expect("id").value
+                type_params.append(tp)
+                # Ràng buộc trait: 'fn f<T: Ord>' hoặc 'T: Ord + Show'.
+                if self.accept("op", ":"):
+                    bs = [self.expect("id").value]
+                    while self.accept("op", "+"):
+                        bs.append(self.expect("id").value)
+                    type_bounds[tp] = bs
                 if not self.accept("op", ","):
                     break
             if not self.is_op(">"):
@@ -229,13 +241,20 @@ class Parser:
         ret = A.Type("void")
         if self.accept("op", "->"):
             ret = self.parse_type()
-        if is_extern or self.is_op(";"):
+        # Trong 'trait', method chỉ có CHỮ KÝ: thân là tuỳ chọn (kết thúc bằng
+        # ';', xuống dòng, hoặc '}' đóng trait).
+        if is_extern or self.is_op(";") or (no_body and not self.is_op("{")):
             self.skip_semis()
             body = None
         else:
             body = self.parse_block()
-        return A.Function(name, params, ret, body, type_params, is_comptime,
-                          is_extern, recv=recv, **self.pos_of(t))
+        # Truyền bằng TỪ KHOÁ: thêm một trường vào A.Function sẽ làm lệch mọi
+        # đối số vị trí phía sau (đã từng khiến 'is_extern' nhận nhầm giá trị
+        # của 'is_comptime' -> extern fn bị đổi tên và lỗi liên kết).
+        return A.Function(name, params, ret, body,
+                          type_params=type_params, type_bounds=type_bounds,
+                          is_comptime=is_comptime, is_extern=is_extern,
+                          recv=recv, **self.pos_of(t))
 
     def parse_struct(self) -> A.StructDef:
         t = self.cur()
@@ -271,9 +290,36 @@ class Parser:
         self.expect("op", "}")
         return A.EnumDef(name, variants, **self.pos_of(t))
 
+    def parse_trait(self) -> A.TraitDef:
+        """'trait Eq { fn eq(self, o: Self) -> bool }' — chỉ CHỮ KÝ, không thân."""
+        t = self.expect("kw", "trait")
+        name = self.expect("id").value
+        self.expect("op", "{")
+        methods = []
+        self.skip_semis()
+        while not self.is_op("}"):
+            m = self.parse_fn(recv=name, no_body=True)
+            if m.body is not None:
+                self.error(f"method '{name}.{m.name}' trong trait chỉ khai báo "
+                           f"CHỮ KÝ (không có thân) — thân nằm ở 'impl {name} "
+                           f"for <Kiểu>'", show_token=False)
+            methods.append(m)
+            self.skip_semis()
+        self.expect("op", "}")
+        if not methods:
+            self.error(f"trait '{name}' rỗng — cần ít nhất một method",
+                       show_token=False)
+        return A.TraitDef(name, methods, **self.pos_of(t))
+
     def parse_impl(self) -> A.Impl:
         t = self.expect("kw", "impl")
         struct = self.expect("id").value
+        # 'impl Trait for Kiểu { ... }'
+        trait = None
+        if self.check("id", "for") or (self.is_kw("for")):
+            self.advance()
+            trait = struct
+            struct = self.expect("id").value
         self.expect("op", "{")
         methods = []
         self.skip_semis()
@@ -281,8 +327,9 @@ class Parser:
             mattrs = self.parse_attrs()
             methods.append(self._with_attrs(self.parse_fn(recv=struct), mattrs))
             self.skip_semis()
+        # (recv luôn là KIỂU nhận, kể cả trong 'impl Trait for Kiểu')
         self.expect("op", "}")
-        return A.Impl(struct, methods, **self.pos_of(t))
+        return A.Impl(struct, methods, trait=trait, **self.pos_of(t))
 
     def parse_global(self) -> A.GlobalVar:
         t = self.cur()

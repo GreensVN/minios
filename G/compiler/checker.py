@@ -239,6 +239,8 @@ class Checker:
         self.structs = {}          # name -> {field: GType}
         self.struct_order = {}     # name -> [field names]
         self.struct_attrs = {}     # name -> {"packed": bool, "align": int}
+        self.traits = {}           # tên trait -> A.TraitDef
+        self.trait_impls = {}      # tên kiểu -> {tên trait đã impl}
         self.generic_funcs = {}    # tên -> A.Function (KHUÔN generic)
         self.generic_insts = {}    # (tên, bộ kiểu) -> tên hàm đã nhân bản
         self._mono_depth = 0
@@ -282,6 +284,7 @@ class Checker:
         self.prog.enum_tables = self.enums
         self.collect_funcs()
         self.collect_globals()
+        self._recover(self.check_trait_impls)
         self._errors = []
         # Kiểm tra thuộc tính @ (đích hợp lệ, số/kiểu đối số) trước khi sinh mã
         # (phục hồi theo từng mục để báo hết một lượt).
@@ -889,8 +892,25 @@ class Checker:
                             f"trước là 'fn {it.name}{sig_prev}', nay là "
                             f"'fn {it.name}{sig_new}'", it)
                 self.register_func(it)
+            elif isinstance(it, A.TraitDef):
+                self.cur_file = getattr(it, "src_file", None)
+                if it.name in self.traits:
+                    self.err(f"trait '{it.name}' được định nghĩa nhiều lần", it)
+                if it.name in self.structs or it.name in self.enums:
+                    self.err(f"'{it.name}' đã là tên struct/enum — không dùng "
+                             f"lại làm tên trait", it)
+                self.traits[it.name] = it
             elif isinstance(it, A.Impl):
                 self.cur_file = getattr(it, "src_file", None)
+                if it.trait is not None and it.trait not in self.traits:
+                    sug = suggest(it.trait, set(self.traits))
+                    msg = f"'impl {it.trait} for {it.struct}': không có trait " \
+                          f"tên '{it.trait}'"
+                    if sug:
+                        msg += f" — có phải '{sug}'?"
+                    self.err(msg, it)
+                if it.trait is not None:
+                    self.trait_impls.setdefault(it.struct, set()).add(it.trait)
                 if it.struct not in self.structs and it.struct not in self.enums:
                     sug = suggest(it.struct, set(self.structs) | set(self.enums))
                     msg = f"'impl {it.struct}': không có struct/enum tên '{it.struct}'"
@@ -1109,6 +1129,135 @@ class Checker:
                 out += self._global_refs(v)
         return out
 
+    # ================= TRAIT =================
+    def check_trait_impls(self):
+        """'impl Trait for X' phải cài ĐỦ method của trait, đúng chữ ký."""
+        for it in self.prog.items:
+            if not isinstance(it, A.Impl) or it.trait is None:
+                continue
+            tr = self.traits.get(it.trait)
+            if tr is None:
+                continue
+            self.cur_file = getattr(it, "src_file", None)
+            have = {m.name: m for m in it.methods}
+            for want in tr.methods:
+                got = have.get(want.name)
+                if got is None:
+                    self.err(
+                        f"'impl {it.trait} for {it.struct}' thiếu method "
+                        f"'{want.name}' — trait yêu cầu "
+                        f"'fn {want.name}{self._trait_sig(want, it.struct)}'",
+                        it)
+                    continue
+                self._check_trait_sig(it, tr, want, got)
+
+    def _trait_sig(self, m: A.Function, self_ty: str) -> str:
+        """Chữ ký method trait dưới dạng văn bản, đã thay 'Self' -> kiểu cụ thể."""
+        def tn(t):
+            n = getattr(t, "name", "?")
+            if n in ("Self",):
+                n = self_ty
+            return ("*" * getattr(t, "ptr", 0)) + n
+        ps = ", ".join("self" if p.name == "self" else f"{p.name}: {tn(p.type)}"
+                       for p in m.params)
+        r = tn(m.ret) if m.ret is not None else "void"
+        return f"({ps})" + ("" if r == "void" else f" -> {r}")
+
+    def _check_trait_sig(self, impl, tr, want, got):
+        """Chữ ký method cài đặt phải KHỚP trait (số tham số + kiểu)."""
+        if len(want.params) != len(got.params):
+            self.err(
+                f"'{impl.struct}.{got.name}' có {len(got.params)} tham số "
+                f"nhưng trait '{tr.name}' yêu cầu {len(want.params)}: "
+                f"'fn {want.name}{self._trait_sig(want, impl.struct)}'", got)
+            return
+        for i, (wp, gp) in enumerate(zip(want.params, got.params)):
+            if wp.name == "self" or gp.name == "self":
+                continue
+            wt = self._resolve_self(wp.type, impl.struct)
+            gt = self.resolve(gp.type)
+            if wt is None or gt is None:
+                continue
+            if not self._same_elem(wt, gt):
+                self.err(
+                    f"tham số {i + 1} của '{impl.struct}.{got.name}' là "
+                    f"'{self.tyname(gt)}' nhưng trait '{tr.name}' yêu cầu "
+                    f"'{self.tyname(wt)}'", gp.type or got)
+        wr = self._resolve_self(want.ret, impl.struct)
+        gr = self.resolve(got.ret)
+        if wr is not None and gr is not None and not self._same_elem(wr, gr):
+            self.err(
+                f"'{impl.struct}.{got.name}' trả về '{self.tyname(gr)}' nhưng "
+                f"trait '{tr.name}' yêu cầu '{self.tyname(wr)}'", got)
+
+    def _resolve_self(self, ty, self_ty):
+        """Phân giải kiểu trong chữ ký trait, thay 'Self' bằng kiểu cài đặt."""
+        if ty is None:
+            return None
+        if getattr(ty, "name", None) == "Self":
+            import copy as _c
+            t2 = _c.deepcopy(ty)
+            t2.name = self_ty
+            t2.resolved = None
+            try:
+                return self.resolve(t2)
+            except CheckError:
+                return None
+        try:
+            return self.resolve(ty)
+        except CheckError:
+            return None
+
+    def _type_impls_trait(self, gt, trait) -> bool:
+        """Kiểu 'gt' có thoả trait không?
+
+        Hai đường: (1) có 'impl Trait for X' tường minh; (2) trait DỰNG SẴN
+        thoả mãn bởi kiểu nguyên thuỷ (vd 'Ord' cho số/chuỗi) — nhờ vậy
+        'max2<T: Ord>(3, 7)' dùng được ngay mà không cần impl cho int."""
+        if gt is None or gt.kind == "unknown":
+            return True
+        name = gt.name or gt.kind
+        if trait in self.trait_impls.get(name, ()):  # noqa: SIM118
+            return True
+        return self._builtin_satisfies(gt, trait)
+
+    #: Trait dựng sẵn -> vị từ trên GType. Chúng mô tả năng lực mà NGÔN NGỮ
+    #: đã cung cấp cho kiểu nguyên thuỷ, nên không cần 'impl' tay.
+    _BUILTIN_TRAITS = {
+        "Ord": lambda t: t.kind in ("int", "float", "char", "enum", "bool"),
+        "Eq": lambda t: t.kind in ("int", "float", "char", "enum", "bool",
+                                   "str", "struct"),
+        "Show": lambda t: t.kind in ("int", "float", "char", "bool", "str",
+                                     "enum", "struct", "array", "slice"),
+        "Num": lambda t: t.kind in ("int", "float"),
+    }
+
+    def _builtin_satisfies(self, gt, trait) -> bool:
+        pred = self._BUILTIN_TRAITS.get(trait)
+        return bool(pred and pred(gt))
+
+    def _check_bounds(self, tmpl, targs, node):
+        """Kiểm ràng buộc trait khi NHÂN BẢN generic. Đây là nơi trait có giá
+        trị: lỗi báo tại chỗ GỌI với thông điệp nói rõ thiếu gì."""
+        bounds = getattr(tmpl, "type_bounds", None) or {}
+        ok = True
+        for tp, gt in zip(tmpl.type_params, targs):
+            for tr in bounds.get(tp, ()):
+                if tr not in self.traits and tr not in self._BUILTIN_TRAITS:
+                    self.err(f"ràng buộc '{tp}: {tr}' của '{tmpl.name}' tham "
+                             f"chiếu trait không tồn tại: '{tr}'", node)
+                    ok = False
+                elif not self._type_impls_trait(gt, tr):
+                    hint = ""
+                    if tr in self.traits:
+                        hint = (f" — thêm 'impl {tr} for {self.tyname(gt)} "
+                                f"{{ ... }}'")
+                    self.err(
+                        f"'{self.tyname(gt)}' không thoả ràng buộc '{tp}: {tr}' "
+                        f"của '{tmpl.name}'{hint}", node)
+                    ok = False
+        return ok
+
     # ================= GENERIC (monomorphization) =================
     #: Số bản nhân tối đa cho MỘT khuôn — chặn đệ quy generic vô hạn
     #: ('fn f<T>() { f<*T>() }' sinh kiểu mới mãi mãi).
@@ -1207,6 +1356,8 @@ class Checker:
                      node)
             return None
 
+        if not self._check_bounds(tmpl, targs, node):
+            return None
         new_name = self._mangle_generic(name, targs)
         self.generic_insts[key] = new_name        # ghi TRƯỚC: cho phép đệ quy
         mapping = {tp: self._gtype_to_syntax(t)

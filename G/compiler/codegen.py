@@ -810,6 +810,12 @@ class Codegen:
         # vào nó sẽ sửa mảng của NGƯỜI GỌI — trái ngữ nghĩa "tham số là bản sao"
         # mà 'mut' trên tham số vô hướng vẫn giữ. Sao chép ra bộ đệm cục bộ.
         prologue = []
+        # 'self' KHÔNG dùng trong thân (vd method trait trả hằng) -> C cảnh báo
+        # 'unused parameter'. Nó là tham số BẮT BUỘC của method nên không bỏ
+        # được; đánh dấu đã-dùng thay vì để cảnh báo rò ra người dùng.
+        if fn.recv and fn.params and fn.params[0].name == "self":
+            sname = getattr(fn.params[0], "c_name", "") or self.cn("self")
+            prologue.append(f"(void){sname};")
         for prm in fn.params:
             src = getattr(prm, "arr_copy_from", None)
             if src is None:

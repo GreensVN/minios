@@ -269,6 +269,26 @@ element type. Those printers dereference struct fields, so they are spliced in
 **after** struct definitions (`slice_print_at`), while the typedefs go earlier
 (`fnptr_at`) because signatures need them.
 
+### Traits are compile-time bounds, not vtables
+
+`trait X { ... }` declares signatures only; `impl X for T { ... }` records
+`trait_impls[T] |= {X}`. A bound `fn f<T: X>` is verified in `_check_bounds`
+at the moment the generic is *instantiated*, so the error appears at the call
+site with a concrete type name and a suggested `impl`.
+
+Like generics, this required **zero changes to G-IR or either backend** —
+traits never exist at runtime. If you ever add dynamic dispatch, that is a
+genuinely different feature (a fat pointer + vtable); do not smuggle it in here.
+
+`_BUILTIN_TRAITS` (Ord/Eq/Show/Num) are predicates over `GType` describing
+capabilities the *language* already gives primitives, so `max2<T: Ord>(3, 7)`
+works without a hand-written `impl` for `int`.
+
+Watch out: `A.Function` gained `type_params`/`type_bounds` fields. Construct it
+with **keyword arguments** — positional construction silently shifted
+`is_extern` into `is_comptime`'s slot once, which mangled every `extern fn`
+name and produced link errors far from the cause.
+
 ### Generics are monomorphized in the checker
 
 `fn f<T>(...)` templates are pulled out of `prog.items` by `collect_funcs` into

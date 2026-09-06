@@ -566,6 +566,35 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.22.0 — 🎭 Traits / Interfaces
+
+- 🎭 **`trait` + `impl Trait for Kiểu` + ràng buộc generic `<T: Trait>`**:
+  ```g
+  trait Show { fn show(self) -> str }
+  struct Pt { x: int, y: int }
+  impl Show for Pt { fn show(self) -> str { return "Pt" } }
+
+  fn nhan<T: Show>(v: T) -> str { return v.show() }
+  fn ca_hai<T: Show + Area>(v: T) -> int { ... }   // nhiều ràng buộc
+  ```
+- ⚙️ **Trait là RÀNG BUỘC LÚC BIÊN DỊCH, không phải đối tượng động**: không
+  vtable, không boxing, **không chi phí lúc chạy**. Kiểm tại nơi *nhân bản*
+  generic — nên **G-IR và cả hai backend không đổi một dòng nào** (giống
+  generics ở 0.21.0).
+- 🛡️ Bốn kiểm tra, mỗi cái kèm cách sửa:
+  - kiểu không thoả ràng buộc → *"'N' không thoả 'T: Ord2' — thêm
+    'impl Ord2 for N { ... }'"*;
+  - `impl` **thiếu method** → in ra chữ ký còn thiếu;
+  - `impl` **sai chữ ký** (số tham số / kiểu / kiểu trả về);
+  - ràng buộc tham chiếu trait không tồn tại.
+- 🧩 **Trait dựng sẵn** cho kiểu nguyên thuỷ: `Ord`, `Eq`, `Show`, `Num` —
+  `max2<T: Ord>(3, 7)` dùng được ngay, không cần `impl` tay cho `int`.
+- 🔧 `Self` trong chữ ký trait được thay bằng kiểu cài đặt khi so khớp.
+- 🐛 Sửa cảnh báo C `unused parameter 'self'` cho method không dùng `self`
+  (tham số bắt buộc của method, không bỏ được).
+- 🧪 **Bộ test: 243 ca** + backend-diff 105 + target 21 + panic 4 + IR 101
+  + IR-unit 25 + layout 11 + ASan 96.
+
 ## Mới trong 0.21.0 — 🧬 Generics (`fn f<T>(...)`)
 
 - 🧬 **Hàm generic** với suy kiểu từ đối số, hoặc chỉ định tường minh:
