@@ -227,7 +227,7 @@ mạng an toàn rẻ nhất đang có.
 Các mục sau **chưa được triển khai**, mới chỉ có chỗ đứng trong kiến trúc:
 
 - backend LLVM / WASM / native;
-- `Result<T,E>` (generics + traits ĐÃ có — đều là cấu trúc lúc biên dịch);
+
 - ownership/borrow CHECKING tự động (mô hình đã hình thức hoá trong
   docs/MEMORY.md và allocator đã thay thế được, nhưng compiler CHƯA theo dõi
   vòng đời heap: use-after-free/double-free vẫn là UB);

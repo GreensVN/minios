@@ -933,6 +933,9 @@ class Parser:
                 self.expect("op", ")")
                 e = A.Call(e, args, t.line, t.col)
                 e.type_args = targs
+            elif self.is_kw("try"):
+                self.advance()
+                e = A.TryExpr(e, t.line, t.col)
             elif self.is_op("::"):
                 # 'Type::item' — đường dẫn kiểu Rust, đồng nghĩa 'Type.item'
                 # (biến thể enum hoặc method tĩnh). Trước đây '::' được lexer

@@ -269,6 +269,28 @@ element type. Those printers dereference struct fields, so they are spliced in
 **after** struct definitions (`slice_print_at`), while the typedefs go earlier
 (`fnptr_at`) because signatures need them.
 
+### Result is not built in
+
+`Result<T,E>` is an ordinary generic struct declared in user code, plus the
+`try` postfix operator. Nothing in the compiler knows the name `Result` — `try`
+only requires a struct with `ok`/`val`/`err` fields (`_is_result_like`). Keep it
+that way: a hardcoded Result would force every backend and the IR to learn it.
+
+`try` is a postfix keyword rather than `?` because `?` is already G's ternary;
+overloading it would be genuinely ambiguous inside `a ? b : c`.
+
+### Generic structs instantiate inside resolve()
+
+`struct P<A,B>` templates live in `Checker.generic_structs` and are stamped by
+`_instantiate_struct` from **within `resolve()`**. That placement is deliberate:
+every type position goes through `resolve`, so parameters, fields, locals and
+return types all work without per-site handling. `impl` blocks for the template
+are cloned at the same time, with the impl's own type params *and*
+template-name -> instance-name in the substitution map.
+
+Codegen must read `ty.resolved` for the concrete struct name; `t.name` is still
+the template name and does not exist in C.
+
 ### Traits are compile-time bounds, not vtables
 
 `trait X { ... }` declares signatures only; `impl X for T { ... }` records

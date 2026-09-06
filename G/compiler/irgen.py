@@ -770,6 +770,14 @@ class IRGen:
         self.loops.pop()
         self.term(I.Term("jump", labels=[Ls]))
 
+        # Thân LUÔN thoát (vd kết thúc bằng 'break'/'return'): khối tăng biến
+        # đếm không ai nhảy tới. Vẫn phải sinh nó vì 'continue' trỏ tới đó —
+        # nhưng chỉ khi thật sự có ai nhảy tới, nếu không verifier báo block
+        # không thể tới được.
+        if not self._targets_label(Ls):
+            self.start(self.block(Le))
+            self.pop_scope()
+            return
         self.start(self.block(Ls))
         c2 = self.emit_val("load", [iv], ty=ity, node=st, hint="ld")
         step = (self.emit_val("load", [stepv], ty=ity, node=st, hint="ls")
@@ -866,6 +874,10 @@ class IRGen:
         self.loops.pop()
         self.term(I.Term("jump", labels=[Ls]))
 
+        if not self._targets_label(Ls):
+            self.start(self.block(Le))
+            self.pop_scope()
+            return
         self.start(self.block(Ls))
         c2 = self.emit_val("load", [idx], ty=ity, node=st, hint="ld")
         nxt = self.emit_val("add", [c2, I.const_int(1)], ty=ity, node=st, hint="nx")
@@ -1289,6 +1301,56 @@ class IRGen:
                 return I.const_int(n, T.USIZE)
             return self.emit_val("intrinsic", [], ty=T.USIZE, node=e, hint="sz",
                                  name="sizeof", arg=str(self.gtype(e.expr)))
+        if isinstance(e, A.TryExpr):
+            # 'v try': nếu !ok thì RETURN sớm một Result lỗi; ngược lại lấy .val.
+            rs = getattr(e, "ret_struct", None)
+            val = self.gen_expr(e.expr)
+            vt = self.gtype(e.expr)
+            slot = self.emit_val("alloca", [], ty=T.GType("ptr", elem=vt),
+                                 node=e, hint="tr")
+            self.emit("store", [slot, val], node=e)
+            okp = self.emit_val("fieldaddr",
+                                [slot, I.Value("const", const="ok", type=T.STR)],
+                                ty=T.GType("ptr", elem=T.BOOL), node=e,
+                                hint="tk", struct=vt.name, field="ok")
+            ok = self.emit_val("load", [okp], ty=T.BOOL, node=e, hint="to")
+            Lok, Lbad = self.label("try_ok"), self.label("try_bad")
+            self.term(I.Term("branch", [ok], [Lok, Lbad],
+                             line=e.line, col=e.col))
+            self.start(self.block(Lbad))
+            if rs is not None:
+                rty = T.GType("struct", name=rs)
+                rslot = self.emit_val("alloca", [], ty=T.GType("ptr", elem=rty),
+                                      node=e, hint="tf")
+                # Kiểu của 'err' phải là kiểu THẬT: dùng T.UNKNOWN thì backend
+                # sinh 'int' và sao chép sai kích thước (segfault với 'str').
+                ety = self._struct_field_type(vt.name, "err") or T.STR
+                ep = self.emit_val(
+                    "fieldaddr", [slot, I.Value("const", const="err", type=T.STR)],
+                    ty=T.GType("ptr", elem=ety), node=e, hint="te",
+                    struct=vt.name, field="err")
+                ev = self.emit_val("load", [ep], ty=ety, node=e, hint="tv")
+                fp = self.emit_val(
+                    "fieldaddr", [rslot, I.Value("const", const="err", type=T.STR)],
+                    ty=T.GType("ptr", elem=ety), node=e, hint="tw",
+                    struct=rs, field="err")
+                self.emit("store", [fp, ev], node=e)
+                op = self.emit_val(
+                    "fieldaddr", [rslot, I.Value("const", const="ok", type=T.STR)],
+                    ty=T.GType("ptr", elem=T.BOOL), node=e, hint="tb",
+                    struct=rs, field="ok")
+                self.emit("store", [op, I.const_bool(False)], node=e)
+                rv = self.emit_val("load", [rslot], ty=rty, node=e, hint="tr")
+                self._flush_defers_upto(0)
+                self.term(I.Term("ret", [rv], line=e.line, col=e.col))
+            else:
+                self.term(I.Term("unreach"))
+            self.start(self.block(Lok))
+            vp = self.emit_val(
+                "fieldaddr", [slot, I.Value("const", const="val", type=T.STR)],
+                ty=T.GType("ptr", elem=ty), node=e, hint="tp",
+                struct=vt.name, field="val")
+            return self.emit_val("load", [vp], ty=ty, node=e, hint="tl")
         if isinstance(e, A.Slice):
             if ty.kind == "slice":
                 # slice hoá: mang theo (ptr, len) — độ dài không tách rời con trỏ
@@ -1711,6 +1773,14 @@ class IRGen:
             return
         out.append(spec)
         args.append(node)
+
+    def _struct_field_type(self, sname, fname):
+        for st in self.mod.structs:
+            if st.name == sname:
+                for fn, ft in st.fields:
+                    if fn == fname:
+                        return ft
+        return None
 
     def _struct_fields(self, name):
         for st in self.mod.structs:

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'try': kiểu lỗi 'str' không khớp kiểu lỗi 'int' của hàm 'f'

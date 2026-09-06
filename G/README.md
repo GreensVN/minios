@@ -566,6 +566,39 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.23.0 — 📦 Struct generic & `Result<T,E>` + `try`
+
+- 📦 **Struct generic**: `struct Pair<A, B> { a: A, b: B }`, dùng
+  `Pair<int, str>{a: 1, b: "x"}`, và `impl<T, E> Result<T, E> { ... }`.
+  Nhân bản theo bộ kiểu cụ thể ngay trong `resolve()`, nên **mọi vị trí kiểu**
+  (tham số/trường/biến/kiểu trả về) hoạt động mà không phải sửa từng nơi.
+- 📦 **`Result<T,E>` KHÔNG phải kiểu dựng sẵn** — nó chỉ là một struct generic
+  thường. Đó là phép thử: generics + traits đã đủ mạnh để tự dựng nó.
+  ```g
+  struct Result<T, E> { ok: bool, val: T, err: E }
+  impl<T, E> Result<T, E> {
+      fn is_ok(self) -> bool { return self.ok }
+      fn unwrap_or(self, d: T) -> T { if self.ok { return self.val } return d }
+  }
+  ```
+- ✨ **`try` — lan truyền lỗi** (hậu tố): `let x = chia(a, b) try` trả về ngay
+  lỗi nếu thất bại, ngược lại cho `.val`. Dùng `try` thay `?` vì `?` đã là
+  toán tử ba ngôi của G — thêm nghĩa thứ hai sẽ nhập nhằng thật trong `a ? b : c`.
+  ```g
+  fn tinh(a: int, b: int, c: int) -> Result<int, str> {
+      let x = chia(a, b) try      // lỗi -> return ngay
+      let y = chia(x, c) try
+      return ok_i(y + 1)
+  }
+  ```
+- 🛡️ Ba kiểm tra cho `try`: giá trị phải là Result; hàm bao ngoài **phải trả
+  Result**; **kiểu lỗi phải khớp** giữa hai bên.
+- 🐛 **Lỗi do fuzzing tìm ra**: vòng `for` mà thân LUÔN thoát (`break`/`return`)
+  sinh khối tăng-biến-đếm không ai nhảy tới → IR không hợp lệ. Ảnh hưởng mọi
+  backend, không riêng `try`.
+- 🧪 **Bộ test: 248 ca** + backend-diff 106 + target 21 + panic 4 + IR 102
+  + IR-unit 25 + layout 11 + ASan 97; fuzz 40 000 vòng, 0 crash.
+
 ## Mới trong 0.22.0 — 🎭 Traits / Interfaces
 
 - 🎭 **`trait` + `impl Trait for Kiểu` + ràng buộc generic `<T: Trait>`**:

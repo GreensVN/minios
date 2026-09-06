@@ -56,7 +56,7 @@ TOKENS = [
     "str", "char", "void", "slice", "len", "<", ">",
     "alloc", "free", "realloc", "alloc_in", "free_in",
     "arena_allocator", "heap_allocator", "Allocator",
-    "T", "U", "A", "B",
+    "T", "U", "A", "B", "trait", "try", "impl", "for", "Ord", "Show",
     "0", "1", "42", "0xFF", "0b101", "1.5", '"s"', "'c'", "{}", '"{}"',
 ]
 
@@ -122,6 +122,10 @@ def mutate(src, rng):
             "fn _o<A, B>(a: A, b: B) -> B { return b }",
             "fn _p<T>(xs: slice<T>) -> T { return xs[0] }",
             "fn _q() -> int { return _n<int>(1) }",
+            "struct _R<T, E> { ok: bool, val: T, err: E }",
+            "trait _S { fn show(self) -> str }",
+            "fn _t<T: Ord>(a: T, b: T) -> T { if a > b { return a } return b }",
+            "fn _u() -> int { let x = 1 try  return x }",
         ])
         return src + "\n" + frag + "\n"
     lines = src.splitlines()                        # trộn thứ tự dòng

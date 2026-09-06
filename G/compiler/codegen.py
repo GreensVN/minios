@@ -275,6 +275,13 @@ class Codegen:
             return True
         return False
 
+    def checker_struct_order(self, sname):
+        """Thứ tự trường của một struct (để dựng compound literal đúng)."""
+        sdef = self.struct_defs.get(sname)
+        if sdef is not None:
+            return [f.name for f in sdef.fields]
+        return ["ok", "val", "err"]
+
     def gtype_of(self, e) -> T.GType:
         return getattr(e, "gtype", T.UNKNOWN)
 
@@ -1574,6 +1581,28 @@ class Codegen:
             return self.gen_match_expr(e)
         if isinstance(e, A.Call):
             return self.gen_call(e)
+        if isinstance(e, A.TryExpr):
+            # 'v try' -> ({ __auto_type t = v; if (!t.ok) return (R){0,0,t.err};
+            #              t.val; })  — lan truyền lỗi bằng return sớm.
+            rs = getattr(e, "ret_struct", None)
+            tv = self.tmp("_gtry")
+            inner = self.gen_expr(e.expr)
+            if rs is None:
+                return f"({inner}).val"
+            rc = self.cn(rs)
+            order = self.checker_struct_order(rs)
+            parts = []
+            for f in order:
+                if f == "ok":
+                    parts.append(".ok = false")
+                elif f == "err":
+                    parts.append(f".err = {tv}.err")
+                # Các trường còn lại (vd 'val') BỎ QUA: designated initializer
+                # của C tự zero chúng. Ghi '= {0}' tường minh sẽ cảnh báo
+                # "braces around scalar initializer" khi trường là vô hướng.
+            fail = f"(({rc}){{ {', '.join(parts)} }})"
+            return (f"({{ __auto_type {tv} = ({inner}); "
+                    f"if (!{tv}.ok) return {fail}; {tv}.val; }})")
         if isinstance(e, A.Slice):
             bt = self.gtype_of(e.base)
             rt = self.gtype_of(e)

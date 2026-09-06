@@ -447,3 +447,15 @@ class Slice:
     inclusive: bool = False
     line: int = 0
     col: int = 0
+
+
+@dataclass
+class TryExpr:
+    """'expr try' — lan truyền lỗi: nếu expr là Result LỖI thì RETURN ngay lỗi
+    đó; ngược lại cho giá trị .val.
+
+    Dùng hậu tố 'try' thay vì '?' của Rust vì '?' đã là toán tử ba ngôi của G;
+    thêm nghĩa thứ hai cho '?' sẽ gây nhập nhằng thật sự trong 'a ? b : c'."""
+    expr: object
+    line: int = 0
+    col: int = 0

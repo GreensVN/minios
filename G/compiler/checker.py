@@ -2983,6 +2983,8 @@ class Checker:
             return self.infer_call(e)
         if isinstance(e, A.Index):
             return self.infer_index(e)
+        if isinstance(e, A.TryExpr):
+            return self.infer_try(e)
         if isinstance(e, A.Slice):
             return self.infer_slice(e)
         if isinstance(e, A.FieldAccess):
@@ -3107,6 +3109,43 @@ class Checker:
             if isinstance(node, A.Unary) and node.op == "*":
                 return True
             return False
+
+    #: Tên trường mà 'try' mong đợi trên một kiểu Result.
+    _RESULT_FIELDS = ("ok", "val", "err")
+
+    def infer_try(self, e):
+        """'expr try' — kiểu là kiểu của trường 'val'.
+
+        Yêu cầu: expr là struct có đủ (ok, val, err), và HÀM BAO NGOÀI cũng trả
+        về một Result có cùng kiểu 'err' — nếu không thì không thể lan truyền."""
+        vt = self.infer(e.expr)
+        if vt.kind == "unknown":
+            return T.UNKNOWN
+        if vt.kind != "struct" or not self._is_result_like(vt.name):
+            self.err(
+                f"'try' cần một giá trị kiểu Result (struct có 'ok', 'val', "
+                f"'err'), nhận '{self.tyname(vt)}'", e)
+            return T.UNKNOWN
+        rt = self.cur_ret
+        if rt is None or rt.kind != "struct" or not self._is_result_like(rt.name):
+            self.err(
+                f"'try' chỉ dùng được trong hàm TRẢ VỀ Result — hàm "
+                f"'{self.cur_fn}' trả về "
+                f"'{self.tyname(rt) if rt else 'void'}'", e)
+            return self.structs[vt.name]["val"]
+        ferr = self.structs[vt.name]["err"]
+        rerr = self.structs[rt.name]["err"]
+        if not self._same_elem(ferr, rerr):
+            self.err(
+                f"'try': kiểu lỗi '{self.tyname(ferr)}' không khớp kiểu lỗi "
+                f"'{self.tyname(rerr)}' của hàm '{self.cur_fn}'", e)
+        e.result_struct = vt.name
+        e.ret_struct = rt.name
+        return self.structs[vt.name]["val"]
+
+    def _is_result_like(self, sname) -> bool:
+        f = self.structs.get(sname)
+        return bool(f) and all(k in f for k in self._RESULT_FIELDS)
 
     def infer_slice(self, e: A.Slice):
         """'s[lo..hi]' — lát cắt CHUỖI, trả về chuỗi mới (heap, kẹp biên lúc
