@@ -1431,14 +1431,29 @@ class IRGen:
                                  hint="sp", name="print_slice")
         if isinstance(x, _BinStr):
             v = self.gen_expr(x.node)
-            # bits <= 0 nghĩa là "bề rộng tối thiểu, bỏ số 0 dẫn đầu" — đó là
-            # mặc định của '{:b}'. Chỉ '{:0Nb}' mới cố định N bit.
+            # bits <= 0 = "bề rộng tối thiểu, bỏ số 0 dẫn đầu" ('{:b}');
+            # '{:0Nb}' cố định N bit. SỐ ÂM in bù hai theo ĐÚNG bề rộng kiểu —
+            # nếu không '-1 as i8' sẽ ra 64 bit thay vì 8.
             import re as _re
             m = _re.match(r"^[<>^]?0(\d+)$", x.flags or "")
-            bits = int(m.group(1)) if m else 0
-            return self.emit_val("call", [v, I.const_int(bits, T.I32)],
-                                 ty=T.STR, node=e, hint="bn",
-                                 callee="g_bin_str")
+            if m:
+                bits = I.const_int(int(m.group(1)), T.I32)
+            else:
+                gt = x.gt
+                signed = gt.signed if gt.kind == "int" else True
+                if signed and gt.kind in ("int", "char", "enum"):
+                    w = gt.bits if gt.kind == "int" else (
+                        8 if gt.kind == "char" else 32)
+                    neg = self.emit_val("lt", [v, I.const_int(0, gt)],
+                                        ty=T.BOOL, node=e, hint="bg")
+                    bits = self.emit_val(
+                        "select", [neg, I.const_int(w, T.I32),
+                                   I.const_int(0, T.I32)],
+                        ty=T.I32, node=e, hint="bw")
+                else:
+                    bits = I.const_int(0, T.I32)
+            return self.emit_val("call", [v, bits], ty=T.STR, node=e,
+                                 hint="bn", callee="g_bin_str")
         if isinstance(x, _Center):
             import re as _re
             v = self.gen_expr(x.node)
@@ -1704,6 +1719,41 @@ class IRGen:
 
         fname = e.func.name if isinstance(getattr(e, "func", None), A.Ident) else None
 
+        if fname == "dbg" and e.args:
+            # dbg(x): in '[dbg dòng N] <giá trị>' ra stderr rồi TRẢ LẠI x
+            # (đánh giá x đúng một lần).
+            mark = len(self.blk.instrs) if self.blk is not None else 0
+            try:
+                arg = e.args[0]
+                gt = self.gtype(arg)
+                out, fargs = [], []
+                self._expand_value(gt, arg, out, fargs, 0)
+                line = getattr(e, "line", 0)
+                vals = [I.const_str(f"[dbg dòng {line}] " + "".join(out) + "\n")]
+                for x in fargs:
+                    vals.append(self._fmt_arg_value(x, e))
+                self.emit("call", vals, node=e, callee="printf",
+                          stream="stderr", is_print=True)
+                return self.gen_expr(arg)
+            except IRGenError:
+                if self.blk is not None:
+                    del self.blk.instrs[mark:]
+        if fname == "format" and e.args:
+            # format(...) -> chuỗi MỚI trên heap. Dùng chính bộ phân giải chuỗi
+            # định dạng của print; backend chỉ cần snprintf hai lượt (đo rồi cấp).
+            mark = len(self.blk.instrs) if self.blk is not None else 0
+            try:
+                tpl = e.args[0].value if isinstance(e.args[0], A.StrLit) else "{}"
+                va = e.args[1:] if isinstance(e.args[0], A.StrLit) else e.args
+                fmt, argexprs = self._resolve_format(tpl, va, False)
+                vals = [I.const_str(fmt)]
+                for x in argexprs:
+                    vals.append(self._fmt_arg_value(x, e))
+                return self.emit_val("intrinsic", vals, ty=T.STR, node=e,
+                                     hint="fm", name="format")
+            except IRGenError:
+                if self.blk is not None:
+                    del self.blk.instrs[mark:]
         if fname in ("print", "println", "eprint", "eprintln"):
             # Hạ thành printf khi phân tích được chuỗi định dạng; nếu gặp dạng
             # cần hàm hỗ trợ của backend C (căn giữa, '{b}', bung struct...) thì

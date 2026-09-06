@@ -348,6 +348,12 @@ class CIRBackend(IRBackend):
     # ------------------------------------------------------------------
     # giá trị
     # ------------------------------------------------------------------
+    _tmp_n = 0
+
+    def tmp(self, base="_gt"):
+        CIRBackend._tmp_n += 1
+        return f"{base}{CIRBackend._tmp_n}"
+
     _runtime_syms = None
 
     @classmethod
@@ -565,6 +571,10 @@ class CIRBackend(IRBackend):
         a = [self.val(x) for x in ins.args]
         d = ins.dst.name if ins.dst is not None else None
 
+        if op == "mod" and ins.type is not None and ins.type.kind == "float":
+            # C cấm '%' trên double -> fmod (giống backend cũ).
+            self.w(f"{d} = fmod({a[0]}, {a[1]});")
+            return
         if op in self._BIN:
             # Phép toán số học/bit: ép toán hạng TRÁI sang kiểu KẾT QUẢ trước.
             # C tính '1 << 40' trong 'int' (32-bit) rồi mới gán -> UB/mất bit,
@@ -588,7 +598,16 @@ class CIRBackend(IRBackend):
         elif op == "load":
             self.w(f"{d} = *({a[0]});")
         elif op == "store":
-            self.w(f"*({a[0]}) = {a[1]};")
+            pt = ins.args[0].type
+            if (pt is not None and pt.kind == "ptr" and pt.elem is not None
+                    and pt.elem.kind == "array"
+                    and isinstance(pt.elem.n, int)):
+                # C không cho gán CẢ MẢNG bằng '=' -> sao chép byte. Chỉ áp dụng
+                # cho mảng CỠ TĨNH; '[]T' là con trỏ trần (sizeof sai, memcpy
+                # vào nó = ghi qua con trỏ chưa khởi tạo).
+                self.w(f"memcpy(*({a[0]}), {a[1]}, sizeof(*({a[0]})));")
+            else:
+                self.w(f"*({a[0]}) = {a[1]};")
         elif op == "memcpy":
             self.w(f"memcpy({a[0]}, {a[1]}, sizeof(*({a[0]})));")
         elif op == "elemaddr":
@@ -759,6 +778,15 @@ class CIRBackend(IRBackend):
             return
         if name == "len":
             self.w(f"{d} = ({a[0]}).len;")
+            return
+        if name == "format":
+            # Đo độ dài bằng snprintf(NULL,0,...) rồi cấp phát vừa khít — giống
+            # backend cũ. Đối số đã được vật hoá trong IR nên chỉ đánh giá 1 lần.
+            args = ", ".join(a)
+            n = self.tmp("_gfn")
+            self.w(f"int {n} = snprintf(NULL, 0, {args});")
+            self.w(f"{d} = (const char*)malloc((size_t){n} + 1);")
+            self.w(f"snprintf((char*){d}, (size_t){n} + 1, {args});")
             return
         if name == "print_slice":
             self.w(f"{d} = {self._slice_print_fn(ins.args[0].type)}({a[0]});")

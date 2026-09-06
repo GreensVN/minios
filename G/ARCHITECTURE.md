@@ -203,16 +203,19 @@ Còn lại của Phase 5: chọn toolchain chéo tự động, layout/ABI theo t
 
 ## 7. Giai đoạn B đang chạy: backend C đọc từ IR
 
-`--backend=c-ir` khớp **39 ca, 0 khác** so với backend mặc định
-(`tests/run_backend_diff.sh`); 87/93 ca đã SINH ĐƯỢC mã C.
+`--backend=c-ir` khớp **81/93 ca, 0 khác** so với backend mặc định
+(`tests/run_backend_diff.sh`).
 
-Nguyên tắc đã theo suốt quá trình: mọi thứ còn thiếu đều được hạ trong
-`irgen.py`, **không phải** trong backend. Hạ trong backend thì LLVM/WASM phải
-làm lại từ đầu — và mỗi lần làm lại là một cơ hội sai khác.
+Nguyên tắc đã theo suốt: mọi thứ còn thiếu đều hạ trong `irgen.py`, **không
+phải** trong backend. Hạ trong backend thì LLVM/WASM phải làm lại từ đầu — và
+mỗi lần làm lại là một cơ hội sai khác. Bằng chứng cho nguyên tắc này: **mọi**
+khác biệt mà bộ so khớp tìm ra đều là lỗi của tầng hạ mã IR, không phải của
+backend mới.
 
-Còn lại (~54 ca) tập trung ở vài nhóm nhỏ: `format()` (cấp phát chuỗi), `dbg`,
-và một số ca dùng con trỏ hàm/mảng nhiều chiều phức tạp. Không có ca nào KHÁC
-đầu ra — chỉ là chưa sinh mã được, và luôn báo lỗi rõ ràng thay vì sinh mã sai.
+Còn 12 ca chưa sinh được mã (mảng nhiều chiều phức tạp, vài dạng con trỏ hàm).
+Không ca nào cho kết quả SAI — chúng báo lỗi rõ ràng. Đó là tiêu chí để đổi mặc
+định: "chưa hỗ trợ" phải về 0, và trong lúc chờ thì thà từ chối còn hơn sinh mã
+sai.
 
 ## 8. CHƯA làm (nói rõ để không gây hiểu nhầm)
 

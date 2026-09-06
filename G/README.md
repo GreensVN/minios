@@ -566,6 +566,33 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.18.0 — 🔁 Giai đoạn B gần xong: 81/93 ca khớp hai backend
+
+- 🔁 **`--backend=c-ir` khớp 81 ca** (từ 39), **0 khác**. Còn 12 ca chưa sinh mã
+  được, và **không ca nào cho kết quả sai** — luôn báo lỗi rõ ràng.
+- ✨ Hạ thêm trong `irgen.py`: `format(...)` (đo bằng `snprintf(NULL,0,…)` rồi
+  cấp phát vừa khít), `dbg(x)`, `len()` (gấp hằng cho mảng tĩnh), khởi tạo
+  global động (hàm `_g_init_globals` chạy trước `main`).
+- 🐛 **Bảy lỗi hạ mã IR do so khớp hai backend phát hiện** — mọi backend tương
+  lai (LLVM/WASM) đều sẽ dính:
+  - **global có initializer không-hằng bị bỏ im lặng** → đọc ra 0;
+  - `s[i]` trên `str` lấy **địa chỉ biến** thay vì nạp giá trị → `char_at()`
+    đọc rác;
+  - `makeslice` trên cơ sở `*[N]T` cộng con trỏ theo **đơn vị cả mảng** →
+    `a[1..3]` trỏ ra ngoài mảng;
+  - `{b}` là bool-hay-nhị-phân **tuỳ kiểu đối số**; IR luôn chọn nhị phân, và
+    số âm in 64 bit thay vì đúng bề rộng kiểu (`-1 as i8`);
+  - tham số khai báo tên đã đổi nhưng **chỗ dùng thì chưa** → tham số tên
+    `round` trỏ vào `round()` của `<math.h>`;
+  - **irgen có bản phân giải kiểu rút gọn riêng và nó trôi lệch**:
+    `fn(int)->int` bị suy thành `int`. Nay checker ghi `ty.resolved`, irgen
+    dùng lại — một nguồn chân lý.
+- 🔧 Backend: global là **lvalue** trong C nhưng là con trỏ trong IR (phát
+  `&x`); con trỏ hàm có typedef thật thay vì `void*`; `%` trên số thực →
+  `fmod`; gán mảng cỡ tĩnh → `memcpy` (nhưng `[]T` là con trỏ trần thì không).
+- 🧪 **Bộ test: 225 ca** + backend-diff 81 + target 21 + panic 4 + IR 97
+  + IR-unit 25 + layout 11 + ASan 93; fuzz 32 000 vòng, 0 crash.
+
 ## Mới trong 0.17.0 — 🔁 Giai đoạn B tiến triển: 39 ca khớp hai backend
 
 - 🔁 **`--backend=c-ir` khớp 39 ca** (từ 20) so với backend mặc định, **0 khác**.
