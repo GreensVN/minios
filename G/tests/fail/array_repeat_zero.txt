@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: số phần tử của '[v; N]' phải > 0, nhận 0

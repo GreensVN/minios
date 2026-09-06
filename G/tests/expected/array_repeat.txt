@@ -1,0 +1,6 @@
+false true 8
+[5]int 5
+7 [2][3]int
+x 3
+6 9
+S { flags: [true, true, true, true] }

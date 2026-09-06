@@ -242,6 +242,7 @@ comptime fn square(n: int) -> int { return n * n }
 | `{f:.2}` | `"3.14"` (2 chữ số sau dấu phẩy) |
 | `{f:8.3}` | `"   3.142"` (width 8, precision 3) |
 | `{s:>10}` | `"        hi"` (chuỗi căn phải) |
+| `{:^7}` | `"  ab   "` (căn giữa) |
 
 > Compiler **kiểm tra số placeholder khớp số đối số** *và* **khớp kiểu với
 > specifier** (vd `{s}` cho số, `{d}` cho float đều báo lỗi).
@@ -558,6 +559,36 @@ let x = a +
   x86 chúng biên dịch thành no-op an toàn.
 
 Một nền tảng vững để mở rộng tiếp. 🚀
+
+## Mới trong 0.10.0 — ✨ `if`/`match` biểu thức, method của `str`, `[v; N]`
+
+- ✨ **`if` và `match` ở vị trí BIỂU THỨC** (như Rust): `let v = if c { a } else { b }`,
+  `let s = match e { A => "a", B => "b" }`. Nhánh `else` là **bắt buộc** và
+  `match`-biểu thức phải **vét cạn** (mọi nhánh đều phải cho một giá trị); các
+  nhánh phải **cùng kiểu** (số thì lấy kiểu chung). Guard/binding/khoảng dùng
+  được như `match` câu lệnh.
+- ✨ **Method dựng sẵn trên `str`** (không cần `import std`): `s.len()`,
+  `s.is_empty()`, `s.upper()`, `s.lower()`, `s.trim()`, `s.rev()`, `s.at(i)`,
+  `s.sub(start, len)`, `s.contains(x)`, `s.starts_with(x)`, `s.ends_with(x)`,
+  `s.index_of(x)`, `s.count(c)`, `s.eq(x)`, `s.concat(x)`, `s.repeat(n)`,
+  `s.to_int()`, `s.to_float()`. Tên sai được gợi ý ("có phải `len`?").
+- ✨ **Mảng literal lặp `[v; N]`** (kiểu Rust): `[false; 8]`, `[[7; 3]; 2]`.
+  `N` phải là hằng biên dịch; `const` **cục bộ** giờ cũng dùng được làm cỡ mảng
+  (`const CAP = 4; let a: [CAP]int`).
+- 🐛 **Cờ căn giữa `{:^N}`** từng bị **bỏ qua âm thầm** (in ra căn phải) → nay
+  đệm đúng hai bên (`[{:^7}]` với `"ab"` cho `[  ab   ]`).
+- 🐛 **Trường mảng của struct** khi in ra là nhãn vô nghĩa `[…]` → nay **bung nội
+  dung**: `S { flags: [true, true, true, true] }` (mảng nhiều chiều in đệ quy;
+  dài hơn 8 phần tử thì rút gọn).
+- 🐛 **Chuỗi định dạng hỏng** (`"{"` thiếu `}`, `}` đơn lẻ) từng lọt qua và in ra
+  như ký tự thường → nay là lỗi kèm hướng dẫn `{{` / `}}`.
+- 🐛 **Mã C sinh ra sạch cảnh báo**: mảng bất biến không còn gắn `const` (gây
+  *discards const qualifier* khi truyền cho `*T`), `&x` trên biến `let` ép bỏ
+  `const`, cận trên của `for i in a..b` mang đúng kiểu biến đếm (hết
+  *sign-compare*). Toàn bộ bộ test biên dịch **không một cảnh báo** với
+  `-Wall -Wextra`.
+- 🧪 **Bộ test: 174 ca** (+13): `if_match_expr`, `str_methods`, `array_repeat`,
+  `fmt_center` và 9 ca "phải lỗi".
 
 ## Mới trong 0.9.0 — 🔍 Bắt thêm lỗi tĩnh, sửa lỗi sinh mã
 

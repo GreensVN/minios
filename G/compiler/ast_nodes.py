@@ -104,6 +104,7 @@ class Let:
     value: object
     mutable: bool
     c_name: str = ""        # tên C duy nhất (do checker cấp, hỗ trợ shadowing)
+    is_const: bool = False  # khai báo bằng 'const' (hằng biên dịch, dùng làm cỡ mảng)
     line: int = 0
     col: int = 0
 
@@ -277,6 +278,7 @@ class ArrayLit:
     elements: list
     line: int = 0
     col: int = 0
+    repeat: object = None   # '[v; N]': biểu thức đếm N (hằng) — elements = [v]
 
 
 @dataclass
@@ -374,5 +376,21 @@ class SizeOfExpr:          # sizeof(biểu_thức) — lấy kích thước theo
 class StructLit:
     name: str
     fields: list            # list[(field_name, expr)]
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class IfExpr:              # 'if c { a } else { b }' ở vị trí BIỂU THỨC
+    cond: object
+    then: object           # biểu thức giá trị của nhánh then
+    els: object            # biểu thức giá trị của nhánh else (bắt buộc)
+    line: int = 0
+    col: int = 0
+
+
+@dataclass
+class MatchExpr:           # 'match x { p => v, ... }' ở vị trí BIỂU THỨC
+    subject: object
+    arms: list             # list[(patterns_list | None, guard | None, value_expr)]
     line: int = 0
     col: int = 0

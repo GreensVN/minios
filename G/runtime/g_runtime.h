@@ -188,6 +188,7 @@ _Noreturn static inline void g_todo(const char* w) { (void)w; g_cli(); for (;;) 
 #include <math.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdarg.h>
 
 /* Mã màu ANSI — chỉ bật khi stderr là terminal (đường ống/redirect -> chuỗi
  * rỗng, giữ output sạch để so khớp test). Kiểm tra isatty một lần rồi nhớ. */
@@ -348,6 +349,42 @@ static inline const char* g_bin_str(uint64_t v, int bits) {
     return buf;
 }
 
+/* Định dạng MỘT giá trị theo 'fmt' vào bộ đệm xoay vòng tĩnh (không cần g_free).
+ * Dùng cho cờ căn giữa '{:^N}': printf không căn giữa được, nên G kết xuất giá
+ * trị ra chuỗi trước rồi đệm hai bên bằng g_center(). */
+#ifndef G_FREESTANDING
+static inline const char* g_fmt1(const char* fmt, ...) {
+    static char bufs[8][256];
+    static unsigned idx = 0;
+    char* buf = bufs[idx++ & 7];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(bufs[0]), fmt, ap);
+    va_end(ap);
+    return buf;
+}
+#endif
+
+/* Căn GIỮA một chuỗi trong bề rộng 'w' (cho cờ định dạng '{:^N}' kiểu Rust —
+ * printf không có căn giữa). Phần dư lẻ được thêm vào bên PHẢI, giống Rust.
+ * Trả về con trỏ vào bộ đệm xoay vòng tĩnh (không cần g_free); chuỗi dài hơn
+ * 'w' được trả nguyên vẹn (không cắt), như printf với width tối thiểu. */
+static inline const char* g_center(const char* s, int w) {
+    static char bufs[8][256];
+    static unsigned idx = 0;
+    if (!s) s = "";
+    int n = 0;
+    while (s[n]) n++;
+    if (w <= n || w >= 256) return s;
+    char* buf = bufs[idx++ & 7];
+    int left = (w - n) / 2, i = 0;
+    for (int k = 0; k < left; k++) buf[i++] = ' ';
+    for (int k = 0; k < n; k++) buf[i++] = s[k];
+    while (i < w) buf[i++] = ' ';
+    buf[i] = 0;
+    return buf;
+}
+
 /* Đảo ngược chuỗi -> chuỗi mới (heap). */
 static inline const char* g_str_rev(const char* s) {
     if (!s) s = "";
@@ -420,6 +457,30 @@ static inline const char* g_str_trim(const char* s) {
     memcpy(p, a, n);
     p[n] = '\0';
     return p;
+}
+
+/* ---- Bọc kiểu cho method dựng sẵn của 'str' ('s.len()', 's.sub(a,b)'...) ----
+ * Kiểu trả về khớp đúng kiểu G khai báo trong _STR_METHODS (usize/int/char),
+ * để printf và phép gán không cần ép kiểu thủ công. */
+static inline size_t g_str_len_i(const char* s) { return s ? strlen(s) : 0; }
+static inline bool   g_str_is_empty(const char* s) { return !s || !s[0]; }
+static inline int    g_str_index_i(const char* h, const char* n) {
+    return (int)g_str_index(h, n);
+}
+static inline int    g_str_count_i(const char* s, char c) {
+    return (int)g_str_count(s, c);
+}
+static inline const char* g_str_repeat_i(const char* s, int k) {
+    return g_str_repeat(s, (ptrdiff_t)k);
+}
+static inline const char* g_substr_i(const char* s, int start, int len) {
+    return g_substr(s, (ptrdiff_t)start, (ptrdiff_t)len);
+}
+/* Ký tự tại vị trí i, có KIỂM biên (i ngoài [0, len] -> '\0' thay vì đọc rác). */
+static inline char g_str_at(const char* s, int i) {
+    if (!s || i < 0) return '\0';
+    size_t n = strlen(s);
+    return ((size_t)i > n) ? '\0' : s[i];
 }
 
 /* Thay mọi ký tự 'from' bằng 'to' -> chuỗi mới (heap). */

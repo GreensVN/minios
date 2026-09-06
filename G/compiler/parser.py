@@ -395,7 +395,7 @@ class Parser:
         if self.accept("op", "="):
             value = self.parse_expr()
         self.skip_semis()
-        return A.Let(name, typ, value, mutable, **self.pos_of(t))
+        return A.Let(name, typ, value, mutable, is_const=is_const, **self.pos_of(t))
 
     def parse_if(self) -> A.If:
         self.expect("kw", "if")
@@ -466,6 +466,78 @@ class Parser:
             self.skip_semis()
         self.expect("op", "}")
         return A.Match(subject, arms, **self.pos_of(t))
+
+    def _parse_value_block(self, what):
+        """Thân của một nhánh if/match Ở VỊ TRÍ BIỂU THỨC: '{ expr }' (đúng MỘT
+        biểu thức, không phải câu lệnh). Chuỗi câu lệnh cần 'if' dạng lệnh."""
+        self.expect("op", "{")
+        self.skip_semis()
+        if self.is_op("}"):
+            self.error(f"nhánh {what} ở vị trí biểu thức phải cho một GIÁ TRỊ — "
+                       f"khối '{{ }}' rỗng không có giá trị")
+        saved = self.no_struct_lit
+        self.no_struct_lit = False
+        e = self.parse_expr()
+        self.no_struct_lit = saved
+        self.skip_semis()
+        if not self.is_op("}"):
+            self.error(f"nhánh {what} ở vị trí biểu thức chỉ được chứa MỘT biểu "
+                       f"thức (không phải câu lệnh) — dùng '{what}' dạng câu lệnh "
+                       f"nếu cần nhiều lệnh")
+        self.expect("op", "}")
+        return e
+
+    def parse_if_expr(self) -> A.IfExpr:
+        """'let v = if c { a } else { b }' — nhánh 'else' BẮT BUỘC (biểu thức
+        luôn phải có giá trị); hạ về toán tử ba ngôi C."""
+        t = self.cur()
+        self.expect("kw", "if")
+        cond = self.parse_cond()
+        then = self._parse_value_block("if")
+        if not self.accept("kw", "else"):
+            self.error("'if' ở vị trí biểu thức bắt buộc có 'else' (mọi nhánh "
+                       "phải cho một giá trị)")
+        if self.is_kw("if"):
+            els = self.parse_if_expr()
+        else:
+            els = self._parse_value_block("else")
+        # Hạ thẳng về toán tử ba ngôi: cùng ngữ nghĩa (đánh giá lười một nhánh),
+        # và tái dùng toàn bộ kiểm kiểu/sinh mã đã có của '?:'.
+        return A.Ternary(cond, then, els, t.line, t.col)
+
+    def parse_match_expr(self) -> A.MatchExpr:
+        """'let v = match x { p => val, ... }' — mỗi nhánh cho một GIÁ TRỊ."""
+        t = self.cur()
+        self.expect("kw", "match")
+        subject = self.parse_cond()
+        self.expect("op", "{")
+        arms = []
+        self.skip_semis()
+        while not self.is_op("}"):
+            if self.accept("id", "_"):
+                pats = None
+            else:
+                pats = [self.parse_match_pattern()]
+                while self.accept("op", "|"):
+                    pats.append(self.parse_match_pattern())
+            guard = None
+            if self.accept("kw", "if"):
+                guard = self.parse_cond()
+            self.expect("op", "=>")
+            if self.is_op("{"):
+                value = self._parse_value_block("match")
+            else:
+                saved = self.no_struct_lit
+                self.no_struct_lit = False
+                value = self.parse_expr()
+                self.no_struct_lit = saved
+            arms.append((pats, guard, value))
+            self.accept("op", ",")
+            self.skip_semis()
+        self.expect("op", "}")
+        if not arms:
+            self.error("'match' ở vị trí biểu thức cần ít nhất một nhánh")
+        return A.MatchExpr(subject, arms, t.line, t.col)
 
     def parse_match_pattern(self):
         """Một pattern trong match: biểu thức đơn, hoặc khoảng lo..hi / lo..=hi."""
@@ -598,6 +670,10 @@ class Parser:
 
     def parse_primary(self):
         t = self.cur()
+        if self.is_kw("if"):
+            return self.parse_if_expr()
+        if self.is_kw("match"):
+            return self.parse_match_expr()
         if t.kind == "int":
             self.advance(); return A.IntLit(t.value, t.line, t.col)
         if t.kind == "float":
@@ -639,6 +715,14 @@ class Parser:
             elems = []
             while not self.is_op("]"):
                 elems.append(self.parse_expr())
+                # '[v; N]' — mảng N phần tử cùng giá trị (kiểu Rust). N phải là
+                # hằng số nguyên (kích thước mảng biết lúc biên dịch).
+                if len(elems) == 1 and self.is_op(";"):
+                    self.advance()
+                    count = self.parse_expr()
+                    self.no_struct_lit = saved
+                    self.expect("op", "]")
+                    return A.ArrayLit(elems, t.line, t.col, repeat=count)
                 if not self.accept("op", ","):
                     break
             self.no_struct_lit = saved

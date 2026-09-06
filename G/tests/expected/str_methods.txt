@@ -1,0 +1,9 @@
+[Hello World] 11
+HELLO WORLD hello world
+true true true
+6 3 H
+false true
+Hello olleH
+43 ababab
+ab true
+long

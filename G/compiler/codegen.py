@@ -8,6 +8,7 @@ Nơi 5 ngôn ngữ hội tụ:
 Tận dụng thông tin kiểu để: print tự chọn định dạng, auto-deref con trỏ, gọi method.
 """
 
+import dataclasses
 import re
 from . import ast_nodes as A
 from .checker import Checker
@@ -371,6 +372,15 @@ class Codegen:
             return (f"g_wrmsr((uint32_t)({self.gen_expr(e.args[0])}), "
                     f"(uint64_t)({self.gen_expr(e.args[1])}))")
         raise CodegenError(f"intrinsic OS chưa hỗ trợ: {name}")
+
+    def _is_array_decl(self, st) -> bool:
+        """Khai báo 'let' này có kiểu MẢNG (theo chú thích hoặc theo giá trị)?"""
+        if getattr(st, "type", None) is not None and self._dims(st.type):
+            return True
+        if isinstance(getattr(st, "value", None), A.ArrayLit):
+            return True
+        gt = getattr(getattr(st, "value", None), "gtype", None)
+        return gt is not None and gt.kind == "array"
 
     def emit_var_decl(self, name, t: A.Type, init_c=None, const=False):
         return self.c_decl(name, t, init_c, const=const) + ";"
@@ -856,6 +866,12 @@ class Codegen:
     def gen_let(self, st: A.Let):
         const = not st.mutable
         name = getattr(st, "c_name", st.name)
+        # MẢNG bất biến: KHÔNG gắn 'const' ở C. Tính bất biến của G đã được checker
+        # bảo đảm tĩnh; còn ở C mảng phân rã thành 'const T*' khi truyền cho tham số
+        # 'T*' -> cảnh báo 'discards const qualifier' (và với '-Werror' là lỗi) dù mã
+        # G hoàn toàn hợp lệ. Vô hướng/struct/con trỏ vẫn giữ 'const'.
+        if const and self._is_array_decl(st):
+            const = False
         # ----- mảng literal (kể cả nhiều chiều): T name[..][..] = { ... } -----
         if isinstance(st.value, A.ArrayLit):
             init = self.gen_array_init(st.value)
@@ -1033,7 +1049,10 @@ class Codegen:
         self.indent += 1
         end = self.tmp("_gend")
         start = self.gen_expr(st.start)
-        self.w(f"__auto_type {end} = ({self.gen_expr(st.end)});")
+        # Cận trên mang ĐÚNG kiểu của biến đếm: '__auto_type' giữ kiểu gốc của
+        # biểu thức ('int' khi biến đếm là 'size_t' -> gcc -Wsign-compare, và
+        # so sánh có dấu/không dấu có thể sai với giá trị lớn).
+        self.w(f"{ctype} {end} = ({ctype})({self.gen_expr(st.end)});")
         if st.step is None:
             cmp = "<=" if st.inclusive else "<"
             self.w(f"for ({ctype} {v} = {start}; {v} {cmp} {end}; {v}++) {{")
@@ -1193,6 +1212,63 @@ class Codegen:
         self.indent -= 1
         self.w("}")
 
+    def gen_match_expr(self, e: A.MatchExpr) -> str:
+        """'match' ở vị trí BIỂU THỨC -> statement-expression GNU:
+            ({ T _r; S _s = subj; if (p1) _r = v1; else if ... ; _r; })
+        Nhánh đầu khớp thắng (else-if nối tiếp); binding + guard được đặt trong
+        khối riêng. Checker đã bảo đảm vét cạn nên _r luôn được gán."""
+        subj_t = self.gtype_of(e.subject)
+        subj_c = self.gen_expr(e.subject)
+        if getattr(e, "deref_subject", False):
+            subj_t = subj_t.elem
+            subj_c = f"(*({subj_c}))"
+        is_str = subj_t.kind == "str" or (
+            subj_t.kind == "ptr" and subj_t.elem and subj_t.elem.kind == "char")
+        tmp = self.tmp("_gmx")
+        res = self.tmp("_gmr")
+        sub_ct = T.c_type(subj_t) if subj_t.kind != "unknown" else "__auto_type"
+        res_t = getattr(e, "result_type", None)
+        res_ct = T.c_type(res_t) if res_t is not None and res_t.kind != "unknown" \
+            else "__auto_type"
+
+        def cond_for(pats):
+            tests = []
+            for p in pats:
+                if isinstance(p, A.RangePat):
+                    lo, hi = self.gen_expr(p.lo), self.gen_expr(p.hi)
+                    up = "<=" if p.inclusive else "<"
+                    tests.append(f"({tmp} >= {lo} && {tmp} {up} {hi})")
+                elif is_str:
+                    tests.append(f"strcmp({tmp}, {self.gen_expr(p)}) == 0")
+                else:
+                    tests.append(f"{tmp} == {self.gen_expr(p)}")
+            return " || ".join(tests) if tests else "1"
+
+        bindings = getattr(e, "bindings", [None] * len(e.arms))
+        parts = [f"{{ {sub_ct} {tmp} = {subj_c}; {res_ct} {res};"]
+        for (pats, guard, value), bcname in zip(e.arms, bindings):
+            if bcname is not None:
+                # binding: cần một khối để đưa tên vào phạm vi cho guard + giá trị
+                g = "1" if guard is None else f"({self.gen_expr(guard)})"
+                parts.append(f" {{ {sub_ct} {bcname} = {tmp}; (void){bcname};"
+                             f" if ({g}) {{ {res} = {self.gen_expr(value)};"
+                             f" goto {res}_done; }} }}")
+                continue
+            pat_cond = "1" if pats is None else cond_for(pats)
+            if guard is None:
+                cond = pat_cond
+            elif pat_cond == "1":
+                cond = f"({self.gen_expr(guard)})"
+            else:
+                cond = f"({pat_cond}) && ({self.gen_expr(guard)})"
+            parts.append(f" if ({cond}) {{ {res} = {self.gen_expr(value)};"
+                         f" goto {res}_done; }}")
+        # Vét cạn đã được checker bảo đảm; nhánh này chỉ để C không cảnh báo
+        # 'may be used uninitialized' khi mọi test đều là runtime.
+        parts.append(f" {res} = ({res_ct}){{0}};")
+        parts.append(f" {res}_done: ; {res}; }}")
+        return "(" + "".join(parts) + ")"
+
     def _gen_arm_body(self, body, end_label) -> bool:
         """Sinh thân một nhánh match rồi nhảy tới nhãn cuối (nếu thân chưa tự
         thoát bằng return/break/continue) — bảo đảm chỉ nhánh khớp đầu tiên chạy.
@@ -1285,9 +1361,22 @@ class Codegen:
                 # '-w' với w: u32 -> C tính trong unsigned (4294967295); ép sang
                 # int64 TRƯỚC khi phủ định để ra -1 đúng như kiểu suy luận (i64).
                 return f"(-(int64_t)({self.gen_expr(e.operand)}))"
+            if e.op == "&":
+                # '&x' với x là biến 'let' (sinh 'T const x') cho 'const T*' ở C,
+                # nhưng G CHO PHÉP ghi qua con trỏ ('*p = v'). Ép bỏ 'const' để C
+                # không cảnh báo 'discards const qualifier'; tính bất biến của G
+                # đã được checker bảo đảm tĩnh.
+                # (chỉ con trỏ ĐƠN tới vô hướng/struct: '*[N]T' có kiểu C phức tạp
+                # 'T (*)[N]' mà T.c_type không diễn đạt được -> để nguyên)
+                gt = getattr(e, "gtype", None)
+                if (gt is not None and gt.kind == "ptr" and self._ptr_decl_ok(gt)
+                        and gt.elem is not None and gt.elem.kind != "array"):
+                    return f"(({T.c_type(gt)})&({self.gen_expr(e.operand)}))"
             return f"({e.op}{self.gen_expr(e.operand)})"
         if isinstance(e, A.Ternary):
             return f"({self.gen_expr(e.cond)} ? {self.gen_expr(e.then)} : {self.gen_expr(e.els)})"
+        if isinstance(e, A.MatchExpr):
+            return self.gen_match_expr(e)
         if isinstance(e, A.Call):
             return self.gen_call(e)
         if isinstance(e, A.Index):
@@ -1366,6 +1455,11 @@ class Codegen:
         if getattr(e, "is_static_method", False):
             arg_c = [self.gen_expr(a) for a in e.args]
             return f"{self.cn(e.struct)}__{e.method}({', '.join(arg_c)})"
+        # method DỰNG SẴN của 'str': 's.upper()' -> g_str_upper(s) (receiver là
+        # tham số đầu). Chỉ là đường cú pháp cho hàm runtime.
+        if getattr(e, "is_str_method", False):
+            args = [self.gen_expr(e.recv)] + [self.gen_expr(a) for a in e.args]
+            return f"{e.str_c_fn}({', '.join(args)})"
         # method call (đã phân giải trong checker)
         if getattr(e, "is_method", False):
             recv_c = self.gen_expr(e.recv)
@@ -1747,6 +1841,17 @@ class Codegen:
                 if m:
                     carg = carg[:carg.rfind(",")] + f", {m.group(1)})"
                     flags = ""
+            # '^' = CĂN GIỮA (Rust): printf không có — kết xuất giá trị ra chuỗi
+            # rồi đệm hai bên bằng g_center(). Trước đây '^' bị bỏ qua âm thầm và
+            # in ra căn phải.
+            m = re.match(r"^\^(.*)$", flags)
+            if m and carg is not None:
+                rest = m.group(1)
+                mw = re.match(r"^[+ ]?#?0?(\d+)(\.\d+)?$", rest)
+                if mw:
+                    width = mw.group(1)
+                    inner = self._apply_fmt_flags(spec, rest.replace(width, "", 1))
+                    return "%s", f"g_center(g_fmt1({self.c_string(inner)}, {carg}), {width})"
             return self._apply_fmt_flags(spec, flags), carg
         if ce is None:
             ce = self.gen_expr(arg) if arg is not None else None
@@ -1825,12 +1930,47 @@ class Codegen:
         parts.append(" }")
         return "".join(parts), cargs
 
+    # Số phần tử tối đa được BUNG khi in một trường mảng của struct; dài hơn thì
+    # in phần đầu rồi '...' (giữ chuỗi định dạng C ở kích thước hợp lý).
+    _PRINT_ARRAY_MAX = 8
+
     def _field_print_frag(self, t: A.Type, fexpr):
         """(đoạn_fmt, [c_args]) cho MỘT trường khi in struct, dựa trên A.Type."""
-        if self._dims(t):
-            return "[…]", []                       # mảng theo giá trị: nhãn rút gọn
+        dims = self._dims(t)
+        if dims:
+            # Mảng cỡ TĨNH: bung thành '[a, b, c]' (đệ quy cho mảng nhiều chiều)
+            # thay vì nhãn '[…]' vô nghĩa. Cỡ động ('dyn') vẫn là nhãn rút gọn.
+            if all(isinstance(d, int) for d in dims):
+                return self._array_print_frag(t, dims, fexpr)
+            return "[…]", []
         if getattr(t, "is_fn", False):
             return "<fn>", []
+        return self._scalar_print_frag(t, fexpr)
+
+    def _array_print_frag(self, t: A.Type, dims, fexpr):
+        """Bung một trường mảng cỡ tĩnh thành '[v0, v1, ...]' (đệ quy nhiều chiều)."""
+        n = dims[0]
+        inner = dataclasses.replace(t, dims=(list(dims[1:]) or None),
+                                    array=(dims[1] if len(dims) > 1 else None))
+        parts = ["["]
+        cargs = []
+        shown = min(n, self._PRINT_ARRAY_MAX)
+        for i in range(shown):
+            if i:
+                parts.append(", ")
+            if len(dims) > 1:
+                frag, fa = self._array_print_frag(inner, dims[1:], f"({fexpr})[{i}]")
+            else:
+                frag, fa = self._scalar_print_frag(t, f"({fexpr})[{i}]")
+            parts.append(frag)
+            cargs += fa
+        if shown < n:
+            parts.append(f", ... ({n} phần tử)")
+        parts.append("]")
+        return "".join(parts), cargs
+
+    def _scalar_print_frag(self, t: A.Type, fexpr):
+        """(đoạn_fmt, [c_args]) cho một giá trị KHÔNG phải mảng (phần tử/trường)."""
         if t.ptr > 0 or getattr(t, "elem_ptr", 0) > 0:
             if t.name == "char" and t.ptr == 1:    # *char -> chuỗi
                 return "%s", [f"({fexpr})"]

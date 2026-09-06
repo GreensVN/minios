@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'match' ở vị trí biểu thức phải vét cạn (luôn cho một giá trị) — thêm nhánh '_ => ...' để bắt các trường hợp còn lại

@@ -1,0 +1,1 @@
+lỗi cú pháp: 'if' ở vị trí biểu thức bắt buộc có 'else' (mọi nhánh phải cho một giá trị)

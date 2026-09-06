@@ -174,6 +174,38 @@ earlier range arm are errors; `@naked` bodies must be pure `asm { }` with no ret
 Array literals in expression position (call args, `[1,2][i]`) lower to C99 compound
 literals; inside struct literals / `let` / globals they stay as bare `{ ... }` initializers.
 
+### Expression forms lowered in the parser/codegen
+
+`if`/`match` in *expression* position are separate from their statement forms.
+`if c { a } else { b }` is desugared by the parser straight into `A.Ternary`
+(so it reuses all `?:` checking/codegen); `match` becomes `A.MatchExpr`, checked
+by `infer_match_expr` (which sets `is_expr` and reuses `check_match` for
+exhaustiveness/dead-arm/binding checks) and emitted by `gen_match_expr` as a GNU
+statement-expression. Both require every branch to yield a value: `else` is
+mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
+`repeat` field that the *checker* expands into N copies of the element before
+any inference runs, so everything downstream sees a plain `ArrayLit`.
+
+### `str` has built-in methods
+
+`s.len()`, `s.upper()`, `s.sub(a, b)` etc. are pure syntax sugar: `_STR_METHODS`
+in the checker maps a method name to a runtime C function, the receiver becomes
+the first argument, and `gen_call` emits `g_str_*(recv, args...)`. They are NOT
+real methods — you cannot define new ones on `str` via `impl`. Wrapper functions
+(`g_str_len_i`, `g_substr_i`, ...) exist purely to return the exact G-declared
+type without callers casting.
+
+### Generated C must stay warning-free
+
+The generated C compiles clean under `-Wall -Wextra` and the test runner assumes
+that. Three deliberate choices keep it that way, so don't "simplify" them:
+immutable *arrays* get no C `const` (a `const T[]` decaying into a `T*` parameter
+warns even though G already proved immutability statically); `&x` on a `let`
+scalar/struct casts away `const` (G permits writing through such pointers);
+and the `for i in a..b` upper bound is cast to the loop variable's type rather
+than `__auto_type` (otherwise `size_t` counters vs `int` bounds trip
+`-Wsign-compare`).
+
 ### C backend is GCC/Clang-specific, not portable C
 
 Generated code is compiled with `-std=gnu11` and uses extensions deliberately:
