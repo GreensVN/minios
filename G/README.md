@@ -610,9 +610,19 @@ Một nền tảng vững để mở rộng tiếp. 🚀
   `Type.item`. `::` đã được lexer nhận nhưng không parser nào dùng, nên
   `Color::Red` báo "cần biểu thức" rất khó hiểu; dùng `::` sau một *giá trị* nay
   báo lỗi kèm gợi ý dùng `.`.
-- 🧪 **Bộ test: 186 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
-  `fmt_center`, `null_guard`, `foreach_mut`, `print_array`, `path_sep` và
-  17 ca "phải lỗi".
+- 🐛 **`s.at(i)` ngoài biên trả `'\0'` âm thầm** trong khi `a[i]` ngoài biên thì
+  panic — lỗi off-by-one lọt qua không dấu vết. Nay `s.at(i)` cũng panic
+  (`--no-checks` tắt cả hai như nhau).
+- 🐛 **`--freestanding` rò rỉ lỗi C thô**: gọi `println` trong chế độ không-libc
+  vỡ ở backend với `'stdout' undeclared` — một lỗi C khó hiểu với người viết G.
+  Nay checker biết chế độ freestanding và từ chối ngay các built-in cần
+  stdio/heap (`print*`, `format`, `dbg`, `assert_eq`, `g_alloc`…) cùng các method
+  `str` cấp phát (`upper`, `sub`, `trim`…), kèm gợi ý dùng `outb`/`vol_write`;
+  các method `str` chỉ đọc vẫn dùng được.
+- 🧪 **Bộ test: 190 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
+  `fmt_center`, `null_guard`, `foreach_mut`, `print_array`, `path_sep`,
+  `str_at_bounds`, 17 ca "phải lỗi" và một hạng mục test mới `tests/fail_fs/`
+  (hợp lệ khi hosted, phải bị từ chối ở `--freestanding`).
 
 ## Mới trong 0.9.0 — 🔍 Bắt thêm lỗi tĩnh, sửa lỗi sinh mã
 

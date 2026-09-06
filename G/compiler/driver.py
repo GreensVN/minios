@@ -113,7 +113,7 @@ def has_main(prog):
                for it in prog.items)
 
 
-def compile_to_c(main_path):
+def compile_to_c(main_path, freestanding=False):
     """Trả về dict {c, has_main}. Báo lỗi đúng file nguồn (kể cả module import)."""
     sources = {}
     main_ap = os.path.abspath(main_path)
@@ -123,7 +123,7 @@ def compile_to_c(main_path):
         fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
         return GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
     try:
-        Checker(prog).check()
+        Checker(prog, freestanding=freestanding).check()
     except CheckErrors as e:
         errs = [_to_gerror(x) for x in e.errors]
         first = errs[0]
@@ -332,10 +332,10 @@ def main(argv):
             dump_ast(args.input)
             return 0
         if args.check:
-            compile_to_c(args.input)  # chạy tới hết checker
+            compile_to_c(args.input, args.freestanding)  # chạy tới hết checker
             print(f"gc: \033[32mOK\033[0m — không phát hiện lỗi kiểu trong {args.input}")
             return 0
-        result = compile_to_c(args.input)
+        result = compile_to_c(args.input, args.freestanding)
     except GError as e:
         print(render_diag(e.filename, e.source, e.line, e.col, e.msg, e.phase),
               file=sys.stderr)

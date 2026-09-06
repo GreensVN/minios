@@ -583,8 +583,26 @@ _Noreturn static inline void g_div_zero_fail(const char* where) {
     (void)where; g_cli(); for (;;) g_hlt();
 #endif
 }
+_Noreturn static inline void g_str_at_fail(long long i, long long n, const char* where) {
+#ifndef G_FREESTANDING
+    fprintf(stderr, "\033[1;31mG panic:\033[0m chỉ số %lld vượt biên chuỗi dài %lld tại %s\n",
+            i, n, where);
+    exit(101);
+#else
+    (void)i; (void)n; (void)where; g_cli(); for (;;) g_hlt();
+#endif
+}
+/* 's.at(i)' CÓ kiểm biên: chỉ số ngoài [0, len) là panic, giống 'a[i]' trên mảng
+ * tĩnh. Trước đây trả '\0' âm thầm nên lỗi off-by-one lọt qua không dấu vết. */
+static inline char g_str_at_chk(const char* s, int i, const char* where) {
+    long long n = s ? (long long)strlen(s) : 0;
+    if (i < 0 || (long long)i >= n) g_str_at_fail((long long)i, n, where);
+    return s[i];
+}
+
 #ifdef G_NO_CHECKS
 #define g_idx(i, n, where)      (i)
+#define g_str_at_c(s, i, where) g_str_at((s), (i))
 #define g_chk_div(a, op, b, where) ((a) op (b))
 #else
 #define g_idx(i, n, where) \
@@ -596,6 +614,7 @@ _Noreturn static inline void g_div_zero_fail(const char* where) {
     ({ __auto_type _gb = (b); \
        if (__builtin_expect(_gb == 0, 0)) g_div_zero_fail(where); \
        (a) op _gb; })
+#define g_str_at_c(s, i, where) g_str_at_chk((s), (i), (where))
 #endif
 
 

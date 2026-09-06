@@ -123,6 +123,51 @@ run_fs() {
     fi
 }
 
+# Test "phải lỗi ở FREESTANDING": chương trình HỢP LỆ khi hosted nhưng phải bị
+# checker từ chối ở '--freestanding' (dùng built-in cần libc). Khoá lại việc lỗi
+# được báo ở tầng G thay vì rò rỉ lỗi biên dịch C thô.
+run_fail_fs() {
+    local src="$1"
+    local name; name="$(basename "$src" .g)"
+    local exp="$ROOT/tests/fail_fs/$name.txt"
+    local got; got="$("$GC" "$src" --freestanding --check 2>&1 | strip_ansi)"
+    if echo "$got" | grep -q "không phát hiện lỗi"; then
+        echo -e "${RED}PHẢI LỖI NHƯNG OK${RST}  $name (freestanding)"
+        fail=$((fail+1)); return
+    fi
+    # Cùng chương trình đó phải biên dịch được ở chế độ HOSTED.
+    if ! "$GC" "$src" --check >/dev/null 2>&1; then
+        echo -e "${RED}FAIL${RST}         $name (fail_fs: hosted cũng lỗi)"
+        fail=$((fail+1)); return
+    fi
+    if [ "$bless" = "1" ]; then
+        mkdir -p "$ROOT/tests/fail_fs"
+        echo "$got" | grep -oE 'lỗi [^:]+: .*' | head -1 > "$exp"
+        echo -e "${YEL}BLESS${RST}        $name (fail_fs)"; return
+    fi
+    if [ ! -f "$exp" ]; then
+        echo -e "${YEL}THIẾU KQ${RST}     $name (fail_fs) (chạy --bless để tạo)"
+        fail=$((fail+1)); return
+    fi
+    local ok=1 want
+    while IFS= read -r want; do
+        [ -z "$want" ] && continue
+        if ! echo "$got" | grep -qF "$want"; then
+            ok=0
+            echo -e "${RED}FAIL${RST}         $name (fail_fs)"
+            echo "  mong đợi chứa: $want"
+            echo "  thực tế:       $(echo "$got" | head -1)"
+            break
+        fi
+    done < "$exp"
+    if [ "$ok" = "1" ]; then
+        echo -e "${GREEN}PASS${RST}         $name (fail_fs)"
+        pass=$((pass+1))
+    else
+        fail=$((fail+1))
+    fi
+}
+
 echo "=== Bộ test ngôn ngữ G ==="
 for src in "$ROOT"/examples/*.g "$ROOT"/tests/cases/*.g; do
     [ -e "$src" ] || continue
@@ -135,6 +180,10 @@ done
 for src in "$ROOT"/tests/freestanding/*.g "$ROOT"/examples/kernel/*.g; do
     [ -e "$src" ] || continue
     run_fs "$src"
+done
+for src in "$ROOT"/tests/fail_fs/*.g; do
+    [ -e "$src" ] || continue
+    run_fail_fs "$src"
 done
 
 echo "-------------------------"

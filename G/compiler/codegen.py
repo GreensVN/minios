@@ -1484,6 +1484,10 @@ class Codegen:
         # tham số đầu). Chỉ là đường cú pháp cho hàm runtime.
         if getattr(e, "is_str_method", False):
             args = [self.gen_expr(e.recv)] + [self.gen_expr(a) for a in e.args]
+            # 's.at(i)' đi qua macro có kiểm biên (tắt cùng '--no-checks' như
+            # 'a[i]'), thay vì trả '\0' âm thầm khi i ngoài chuỗi.
+            if e.str_c_fn == "g_str_at":
+                return f"g_str_at_c({', '.join(args)}, {self._where(e)})"
             return f"{e.str_c_fn}({', '.join(args)})"
         # method call (đã phân giải trong checker)
         if getattr(e, "is_method", False):

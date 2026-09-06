@@ -178,9 +178,33 @@ def suggest(name: str, candidates) -> str:
     return best if best is not None and best_d <= limit else None
 
 
+# Built-in cần libc (stdio/stdlib/heap) — KHÔNG dùng được ở '--freestanding'.
+# Trước đây gọi 'println' trong chế độ này lọt qua checker rồi vỡ ở backend C
+# với thông báo "'stdout' undeclared", tức lỗi C thô lộ ra người dùng G.
+_HOSTED_ONLY = {
+    "print": "in ấn cần stdio", "println": "in ấn cần stdio",
+    "eprint": "in ấn cần stdio", "eprintln": "in ấn cần stdio",
+    "printf": "in ấn cần stdio", "format": "cấp phát chuỗi cần heap",
+    "g_alloc": "cấp phát động cần heap", "g_free": "cấp phát động cần heap",
+    "g_realloc": "cấp phát động cần heap",
+    "dbg": "in ấn cần stdio",
+    "assert_eq": "báo lỗi cần stdio", "assert_ne": "báo lỗi cần stdio",
+    "check_eq": "báo lỗi cần stdio", "check_ne": "báo lỗi cần stdio",
+    "test_summary": "báo lỗi cần stdio",
+    "assert_lt": "báo lỗi cần stdio", "assert_le": "báo lỗi cần stdio",
+    "assert_gt": "báo lỗi cần stdio", "assert_ge": "báo lỗi cần stdio",
+    "check_lt": "báo lỗi cần stdio", "check_le": "báo lỗi cần stdio",
+    "check_gt": "báo lỗi cần stdio", "check_ge": "báo lỗi cần stdio",
+}
+
+# Method của 'str' cấp phát chuỗi mới trên heap -> không dùng được freestanding.
+_HEAP_STR_METHODS = {"concat", "sub", "upper", "lower", "trim", "rev", "repeat"}
+
+
 class Checker:
-    def __init__(self, program: A.Program):
+    def __init__(self, program: A.Program, freestanding: bool = False):
         self.prog = program
+        self.freestanding = freestanding
         self.structs = {}          # name -> {field: GType}
         self.struct_order = {}     # name -> [field names]
         self.enums = {}            # name -> {variant: value_int}
@@ -2835,6 +2859,14 @@ class Checker:
             # đường cú pháp gọi hàm runtime, receiver là tham số đầu.
             if bt.kind == "str" or (bt.kind == "ptr" and bt.elem
                                     and bt.elem.kind == "char"):
+                if self.freestanding and mname in _HEAP_STR_METHODS:
+                    self.err(
+                        f"'str.{mname}()' cấp phát chuỗi mới trên heap nên không "
+                        f"dùng được ở chế độ '--freestanding' — các method CHỈ "
+                        f"ĐỌC (len, at, eq, contains, starts_with, ends_with, "
+                        f"index_of, count, is_empty, to_int, to_float) vẫn dùng "
+                        f"được", e)
+                    return T.UNKNOWN
                 return self._check_str_method(e, recv, mname)
             sname = bt.name if bt.kind in ("struct", "enum") else (
                 bt.elem.name if bt.kind == "ptr" and bt.elem and bt.elem.kind in ("struct", "enum") else None)
@@ -2871,6 +2903,13 @@ class Checker:
                 return self.resolve(m.ret)
         # ----- builtin -----
         if isinstance(e.func, A.Ident) and e.func.name in BUILTINS:
+            if self.freestanding and e.func.name in _HOSTED_ONLY:
+                self.err(
+                    f"'{e.func.name}' không dùng được ở chế độ "
+                    f"'--freestanding' ({_HOSTED_ONLY[e.func.name]}, mà "
+                    f"kernel/firmware không có libc) — hãy tự viết hàm xuất ra "
+                    f"thiết bị (vd VGA/UART qua 'outb'/'vol_write')", e)
+                return T.UNKNOWN
             return self.infer_builtin(e)
         # ----- gọi qua một định danh: biến/tham số CHE (shadow) hàm cùng tên -----
         # Một biến cục bộ/tham số/global trùng tên với hàm toàn cục phải được ưu

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'println' không dùng được ở chế độ '--freestanding' (in ấn cần stdio, mà kernel/firmware không có libc) — hãy tự viết hàm xuất ra thiết bị (vd VGA/UART qua 'outb'/'vol_write')

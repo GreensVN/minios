@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'str.upper()' cấp phát chuỗi mới trên heap nên không dùng được ở chế độ '--freestanding'

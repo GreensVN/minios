@@ -186,6 +186,16 @@ mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
 `repeat` field that the *checker* expands into N copies of the element before
 any inference runs, so everything downstream sees a plain `ArrayLit`.
 
+### The checker knows about `--freestanding`
+
+`Checker(prog, freestanding=...)` is threaded from `driver.compile_to_c`. When
+set, `_HOSTED_ONLY` built-ins (anything needing stdio or the heap) and
+`_HEAP_STR_METHODS` are rejected with a G-level diagnostic. Without this the
+program type-checked fine and then died inside the C backend with errors like
+`'stdout' undeclared`, which is unreadable for a G user. If you add a built-in
+that calls libc, add it to `_HOSTED_ONLY` too. `tests/fail_fs/` covers this: each
+case must pass `--check` hosted and fail `--freestanding --check`.
+
 ### Printing a whole array
 
 `_gtype_print_frag` (codegen) is the single generic "print one value of GType

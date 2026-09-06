@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'g_alloc' không dùng được ở chế độ '--freestanding' (cấp phát động cần heap, mà kernel/firmware không có libc)
