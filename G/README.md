@@ -566,6 +566,39 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.14.0 — 🎯 Lớp Target/HAL
+
+- 🐛 **Sửa lỗi âm thầm nguy hiểm nhất từng có trong G.** `outb`/`inb`/`cli`/
+  `read_cr3`/`rdmsr`… là built-in **toàn cục**: chúng qua được checker trên mọi
+  kiến trúc, rồi runtime C hạ chúng thành **no-op im lặng** ngoài x86. Nghĩa là:
+  ```g
+  fn uart_putc(c: u8) { outb(0x3F8, c) }   // aarch64: biên dịch SẠCH
+                                            //          chạy KHÔNG LÀM GÌ
+  ```
+  Một driver chết lặng, không một cảnh báo. Nay là **lỗi biên dịch** kèm gợi ý
+  thay thế (dùng MMIO `vol_write`/`vol_read`).
+- 🎯 **Mô hình NĂNG LỰC, không phải tên kiến trúc** (`compiler/target.py`). Mỗi
+  intrinsic gắn với một năng lực (`port_io`, `control_regs`, `cycle_counter`,
+  `msr`, `tlb`, `privileged`…); mỗi target khai báo tập năng lực của nó. Nhờ vậy
+  `rdtsc()` **vẫn dùng được** trên aarch64/riscv64 (có `cntvct_el0`/`rdcycle`)
+  trong khi `outb()` thì không — điều mà cách chặn theo "arch == x86" làm sai.
+- 🎯 **`--target`** (`x86_64-linux|-none`, `aarch64-…`, `riscv64-…`, `wasm32`) và
+  **`--list-targets`** hiển thị năng lực từng target. Cross-compile thất bại vì
+  thiếu toolchain nay báo lỗi **hành động được** (gợi ý `--cc=<triple>-gcc`),
+  không còn đổ tại "lỗi nội bộ của G".
+- 🔧 **Runtime không còn no-op giả.** Ngoài x86, những thứ **có tương đương thật**
+  được cài đúng (aarch64: `wfi`/`yield`/`brk`/`cntvct_el0`/`daifset`; riscv64:
+  `wfi`/`ebreak`/`rdcycle`/`csrci`), còn những thứ **không tồn tại** (cổng I/O,
+  CR, MSR) thì **không định nghĩa nữa** — lỗi liên kết còn tốt hơn no-op âm thầm.
+- 🐛 **`if f` (quên dấu ngoặc)** — con trỏ hàm luôn khác null nên điều kiện luôn
+  đúng; trước đây lọt qua checker. Nay bị từ chối kèm gợi ý `f()`. Tương tự cho
+  `f && ...` và điều kiện là `slice`.
+- 🧪 **Bộ target mới** (`tests/run_target.sh`, 17 khẳng định): mỗi ca ghi rõ
+  `//! accept <target>` / `//! reject <target> <thông báo>`. Đã kiểm ngược: cố ý
+  thêm `port_io` cho aarch64 thì bộ này **đỏ** — nó thật sự bắt lỗi.
+- 🧪 **Bộ test: 223 ca** + target 17 + panic 4 + IR 96 + IR-unit 25 + ASan 92;
+  fuzz **60 000 vòng** xoay vòng qua mọi target, 0 crash.
+
 ## Mới trong 0.13.0 — 🔪 Slice thật (`slice<T>`)
 
 - ✨ **`slice<T>` / `mut slice<T>` — con trỏ BÉO `(ptr, len)`.** Khác hẳn `[]T`

@@ -16,7 +16,7 @@ from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -118,7 +118,7 @@ def has_main(prog):
 
 
 def compile_to_c(main_path, freestanding=False, no_warnings=False,
-                 warnings_as_errors=False):
+                 warnings_as_errors=False, target=None):
     """Trả về dict {c, has_main}. Báo lỗi đúng file nguồn (kể cả module import)."""
     sources = {}
     main_ap = os.path.abspath(main_path)
@@ -127,7 +127,7 @@ def compile_to_c(main_path, freestanding=False, no_warnings=False,
     def _to_gerror(e):
         fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
         return GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
-    ck = Checker(prog, freestanding=freestanding)
+    ck = Checker(prog, freestanding=freestanding, target=target)
     try:
         ck.check()
     except CheckErrors as e:
@@ -156,7 +156,7 @@ def compile_to_c(main_path, freestanding=False, no_warnings=False,
     return {"c": c_code, "has_main": has_main(prog), "prog": prog}
 
 
-def build_ir(main_path, freestanding=False):
+def build_ir(main_path, freestanding=False, target=None):
     """Chạy tới hết checker rồi HẠ sang G-IR. Trả về (ir.Module, prog).
 
     Tách riêng khỏi compile_to_c: đường sinh mã C mặc định KHÔNG đi qua IR trong
@@ -173,7 +173,7 @@ def build_ir(main_path, freestanding=False):
         return GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
 
     try:
-        Checker(prog, freestanding=freestanding).check()
+        Checker(prog, freestanding=freestanding, target=target).check()
     except CheckErrors as e:
         errs = [_to_gerror(x) for x in e.errors]
         first = errs[0]
@@ -189,20 +189,37 @@ def build_ir(main_path, freestanding=False):
     return mod, prog
 
 
+def _target_names():
+    from . import target as _t
+    return _t.available()
+
+
+def list_targets():
+    from . import target as _t
+    cur = _t.default_target()
+    print("Target khả dụng (★ = mặc định trên máy này):")
+    for name in _t.available():
+        tg = _t.TARGETS[name]
+        mark = "★" if tg.name == cur.name else " "
+        caps = ", ".join(sorted(tg.caps)) or "(không có năng lực phần cứng thô)"
+        print(f" {mark} {name:<16} {tg.arch:<9} {tg.ptr_bits}-bit  {caps}")
+    return 0
+
+
 def _backend_names():
     from . import backend as B
     return B.available()
 
 
-def emit_ir(main_path, freestanding=False):
-    mod, _ = build_ir(main_path, freestanding)
+def emit_ir(main_path, freestanding=False, target=None):
+    mod, _ = build_ir(main_path, freestanding, target)
     print(str(mod))
     return 0
 
 
-def verify_ir(main_path, freestanding=False):
+def verify_ir(main_path, freestanding=False, target=None):
     from . import irverify
-    mod, _ = build_ir(main_path, freestanding)
+    mod, _ = build_ir(main_path, freestanding, target)
     errs = irverify.verify(mod)
     if errs:
         for e in errs[:20]:
@@ -284,6 +301,14 @@ def _cc_common_flags(args):
         # freestanding (memcpy/memset tự cài, panic = dừng CPU).
         flags += ["-ffreestanding", "-fno-stack-protector", "-fno-pic",
                   "-DG_FREESTANDING"]
+    # Cross-compile: chỉ thêm '--target=' khi target KHÁC máy hiện tại (gcc bản
+    # thường không hiểu cờ này; clang thì có). Người dùng vẫn có thể chỉ định
+    # trình biên dịch chéo qua '--cc'.
+    tgt = getattr(args, "_target", None)
+    if tgt is not None:
+        from . import target as _t
+        if tgt.name != _t.default_target().name and tgt.triple:
+            flags.append(f"--target={tgt.triple}")
     return flags
 
 
@@ -346,6 +371,20 @@ def build_native(args, extra, result):
                   f"trả về cho khớp (xem 'note: previous declaration' bên dưới; "
                   f"'str' = const char*, 'u32' = unsigned int, 'usize' = size_t):",
                   file=sys.stderr)
+        elif ("--target=" in proc.stderr
+              or "unrecognized command-line option" in proc.stderr):
+            # Cross-compile thất bại vì TOOLCHAIN, không phải lỗi của G.
+            tg = getattr(args, "_target", None)
+            triple = getattr(tg, "triple", "?") if tg else "?"
+            print(f"gc: \033[31mlỗi\033[0m: trình biên dịch C '{cc}' không "
+                  f"biên dịch chéo được sang '{tg}'.\n"
+                  f"    Cần một toolchain cho {triple}, ví dụ:\n"
+                  f"      gc ... --target={tg} --cc={triple}-gcc\n"
+                  f"      gc ... --target={tg} --cc=clang\n"
+                  f"    (gcc bản thường không hiểu '--target='; clang thì có.)",
+                  file=sys.stderr)
+            print(proc.stderr, file=sys.stderr)
+            return 1
         else:
             print("gc: lỗi biên dịch C backend (đây thường là lỗi nội bộ của G):",
                   file=sys.stderr)
@@ -369,7 +408,8 @@ def build_native(args, extra, result):
 def main(argv):
     import argparse
     ap = argparse.ArgumentParser(prog="gc", description="Trình biên dịch ngôn ngữ G")
-    ap.add_argument("input", help="file nguồn .g")
+    # nargs="?" để '--list-targets' / '--version' dùng được mà không cần file.
+    ap.add_argument("input", nargs="?", help="file nguồn .g")
     ap.add_argument("-o", "--output", help="tên file thực thi đầu ra")
     ap.add_argument("--emit-c", action="store_true", help="xuất mã C, không biên dịch")
     ap.add_argument("--keep-c", action="store_true", help="giữ lại file .c trung gian")
@@ -394,6 +434,11 @@ def main(argv):
     ap.add_argument("--no-checks", action="store_true",
                     help="tắt kiểm tra lúc chạy (biên mảng tĩnh, chia cho 0) — "
                          "nhanh hơn, nhưng lỗi trở thành hành vi không xác định")
+    ap.add_argument("--target", default=None,
+                    help="kiến trúc đích: " + ", ".join(_target_names())
+                         + " (mặc định: máy hiện tại)")
+    ap.add_argument("--list-targets", action="store_true",
+                    help="liệt kê target và năng lực phần cứng của chúng")
     ap.add_argument("--emit-ir", action="store_true",
                     help="xuất G-IR dạng văn bản (biểu diễn trung gian)")
     ap.add_argument("--verify-ir", action="store_true",
@@ -404,6 +449,23 @@ def main(argv):
                     help="in traceback đầy đủ khi gặp lỗi nội bộ")
     ap.add_argument("--version", action="version", version=f"gc (ngôn ngữ G) {VERSION}")
     args, extra = ap.parse_known_args(argv)
+
+    if args.list_targets:
+        return list_targets()
+
+    if not args.input:
+        ap.print_usage(sys.stderr)
+        print("gc: thiếu file nguồn .g", file=sys.stderr)
+        return 1
+
+    # Phân giải target một lần rồi truyền xuống checker/backend.
+    from . import target as _t
+    try:
+        tgt = _t.get(args.target)
+    except KeyError:
+        print(f"gc: target không tồn tại: '{args.target}' — có: "
+              f"{', '.join(_t.available())}", file=sys.stderr)
+        return 1
 
     if not os.path.exists(args.input):
         print(f"gc: không tìm thấy file: {args.input}", file=sys.stderr)
@@ -428,18 +490,18 @@ def main(argv):
             print(f"gc: {e}", file=sys.stderr)
             return 1
         if args.backend == "ir":
-            return emit_ir(args.input, args.freestanding)
+            return emit_ir(args.input, args.freestanding, tgt)
         if args.emit_ir:
-            return emit_ir(args.input, args.freestanding)
+            return emit_ir(args.input, args.freestanding, tgt)
         if args.verify_ir:
-            return verify_ir(args.input, args.freestanding)
+            return verify_ir(args.input, args.freestanding, tgt)
         if args.check:
             compile_to_c(args.input, args.freestanding, args.no_warnings,
-                         args.warnings_as_errors)  # chạy tới hết checker
+                         args.warnings_as_errors, tgt)  # chạy tới hết checker
             print(f"gc: \033[32mOK\033[0m — không phát hiện lỗi kiểu trong {args.input}")
             return 0
         result = compile_to_c(args.input, args.freestanding, args.no_warnings,
-                              args.warnings_as_errors)
+                              args.warnings_as_errors, tgt)
     except GError as e:
         print(render_diag(e.filename, e.source, e.line, e.col, e.msg, e.phase),
               file=sys.stderr)
@@ -474,4 +536,5 @@ def main(argv):
             print(result["c"])
         return 0
 
+    args._target = tgt
     return build_native(args, extra, result)

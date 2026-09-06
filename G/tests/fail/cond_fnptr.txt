@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: điều kiện 'if' không thể là giá trị kiểu 'fn() -> int' — con trỏ hàm luôn khác null nên điều kiện này luôn đúng; có phải bạn quên dấu ngoặc: 'f()'?

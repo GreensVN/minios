@@ -202,6 +202,24 @@ user's `let mut log = 0` becomes `static int log;`, colliding with `log()` and
 surfacing a raw C error. Add to this set whenever the runtime pulls in a new
 library.
 
+### Target capabilities, not architecture names
+
+`compiler/target.py` maps each OS-dev intrinsic to a *capability*
+(`INTRINSIC_CAPS`), and each `Target` declares the set it has. `Checker.
+_check_target_cap` rejects anything the target lacks. Adding an architecture is
+one entry in `TARGETS` — no checker or codegen changes.
+
+Use capabilities rather than `if arch == "x86"`: `rdtsc` and `outb` are both
+x86 instructions, but a cycle counter *has* an equivalent on aarch64
+(`cntvct_el0`) while port I/O simply does not exist. Lumping them under "x86"
+would wrongly block `rdtsc` on ARM.
+
+The runtime half matters just as much: the non-x86 `#else` block used to define
+every x86 intrinsic as a silent no-op, so an `outb`-based driver compiled clean
+and did nothing. Now it implements what genuinely has an equivalent and
+**omits** what does not — a link error beats a silent no-op. Never add a no-op
+stub there to "make it compile".
+
 ### Slices are fat pointers, and the checker owns the coercion
 
 `slice<T>` is `GType(kind="slice", elem=T, mutable_slice=bool)`, lowered to a C

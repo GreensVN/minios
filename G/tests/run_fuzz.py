@@ -37,6 +37,7 @@ from compiler.lexer import Lexer, LexError            # noqa: E402
 from compiler.parser import Parser, ParseError        # noqa: E402
 from compiler.checker import Checker, CheckError, CheckErrors  # noqa: E402
 from compiler import irgen, irverify                  # noqa: E402
+from compiler import target as _tgt                   # noqa: E402
 from compiler.irgen import IRGenError                 # noqa: E402
 
 #: Lỗi HỢP LỆ — trình biên dịch từ chối đầu vào một cách có kiểm soát.
@@ -122,12 +123,12 @@ def random_src(rng):
     return " ".join(rng.choice(TOKENS) for _ in range(n))
 
 
-def run_one(src, freestanding=False):
+def run_one(src, freestanding=False, target=None):
     """Chạy hết đường ống. Trả về (ok, mô_tả_sự_cố_hoặc_None)."""
     try:
         toks = Lexer(src, "<fuzz>").tokenize()
         prog = Parser(toks, "<fuzz>").parse()
-        Checker(prog, freestanding=freestanding).check()
+        Checker(prog, freestanding=freestanding, target=target).check()
         mod = irgen.IRGen(prog).generate()
         errs = irverify.verify(mod)
         if errs:
@@ -162,7 +163,9 @@ def main():
             src = mutate(rng.choice(base), rng)
         else:
             src = random_src(rng)
-        ok, why = run_one(src, freestanding=(rng.random() < 0.15))
+        # Xoay vòng qua các target để lớp năng lực cũng bị fuzz.
+        tg = _tgt.TARGETS[rng.choice(_tgt.available())]
+        ok, why = run_one(src, freestanding=(rng.random() < 0.15), target=tg)
         if not ok:
             crashes.append((src, why))
             if len(crashes) >= 5:

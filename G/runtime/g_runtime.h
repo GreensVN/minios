@@ -104,32 +104,45 @@ static inline void g_wrmsr(uint32_t msr, uint64_t val) {
     __asm__ __volatile__("wrmsr" : : "a"(lo), "d"(hi), "c"(msr));
 }
 #else
-static inline void g_hlt(void)   { for (;;) {} }
-static inline void g_cli(void)   {}
-static inline void g_sti(void)   {}
+/* ---- NGOÀI x86 ----
+ * Trước đây khối này định nghĩa MỌI intrinsic x86 thành no-op im lặng, nên
+ * 'outb(0x3F8, c)' trên aarch64 biên dịch sạch rồi KHÔNG LÀM GÌ — một driver
+ * chết lặng, không cảnh báo. Nay:
+ *   - thứ CÓ tương đương thật (spin hint, hlt-như-wfi) thì cài đúng;
+ *   - thứ KHÔNG tồn tại (cổng I/O, CR, MSR) thì KHÔNG định nghĩa nữa.
+ * Checker của G chặn chúng theo NĂNG LỰC TARGET (compiler/target.py) trước khi
+ * tới đây; nếu vì lý do nào đó vẫn lọt xuống, lỗi liên kết C còn tốt hơn nhiều
+ * so với một no-op âm thầm. */
+#if defined(__aarch64__)
+static inline void g_hlt(void)   { __asm__ __volatile__("wfi"); }
+static inline void g_pause(void) { __asm__ __volatile__("yield"); }
+static inline void g_breakpoint(void) { __asm__ __volatile__("brk #0"); }
+static inline uint64_t g_rdtsc(void) {
+    uint64_t v; __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v)); return v;
+}
+static inline void g_cli(void) { __asm__ __volatile__("msr daifset, #2"); }
+static inline void g_sti(void) { __asm__ __volatile__("msr daifclr, #2"); }
+#elif defined(__riscv) && __riscv_xlen == 64
+static inline void g_hlt(void)   { __asm__ __volatile__("wfi"); }
 static inline void g_pause(void) { __asm__ __volatile__("" ::: "memory"); }
-static inline void g_nop(void)   {}
+static inline void g_breakpoint(void) { __asm__ __volatile__("ebreak"); }
+static inline uint64_t g_rdtsc(void) {
+    uint64_t v; __asm__ __volatile__("rdcycle %0" : "=r"(v)); return v;
+}
+static inline void g_cli(void) { __asm__ __volatile__("csrci sstatus, 2"); }
+static inline void g_sti(void) { __asm__ __volatile__("csrsi sstatus, 2"); }
+#else
+/* Kiến trúc không rõ: chỉ giữ những gì diễn đạt được bằng C thuần. */
+static inline void g_hlt(void)   { for (;;) {} }
+static inline void g_pause(void) { __asm__ __volatile__("" ::: "memory"); }
 static inline void g_breakpoint(void) {}
 static inline uint64_t g_rdtsc(void) { return 0; }
-static inline void g_outb(uint16_t port, uint8_t val) { (void)port; (void)val; }
-static inline void g_outw(uint16_t port, uint16_t val) { (void)port; (void)val; }
-static inline void g_outl(uint16_t port, uint32_t val) { (void)port; (void)val; }
-static inline uint8_t  g_inb(uint16_t port) { (void)port; return 0; }
-static inline uint16_t g_inw(uint16_t port) { (void)port; return 0; }
-static inline uint32_t g_inl(uint16_t port) { (void)port; return 0; }
-static inline void g_io_wait(void) {}
-/* Ngoài x86: control register/TLB/MSR không tồn tại — no-op an toàn để biên dịch. */
-static inline uint64_t g_read_cr0(void) { return 0; }
-static inline uint64_t g_read_cr2(void) { return 0; }
-static inline uint64_t g_read_cr3(void) { return 0; }
-static inline uint64_t g_read_cr4(void) { return 0; }
-static inline void g_write_cr0(uint64_t v) { (void)v; }
-static inline void g_write_cr3(uint64_t v) { (void)v; }
-static inline void g_write_cr4(uint64_t v) { (void)v; }
-static inline void g_invlpg(void* addr) { (void)addr; }
-static inline void g_wbinvd(void) {}
-static inline uint64_t g_rdmsr(uint32_t msr) { (void)msr; return 0; }
-static inline void g_wrmsr(uint32_t msr, uint64_t val) { (void)msr; (void)val; }
+static inline void g_cli(void) {}
+static inline void g_sti(void) {}
+#endif
+static inline void g_nop(void) { __asm__ __volatile__("" ::: "memory"); }
+/* CỐ Ý không định nghĩa: g_inb/g_outb/... (cổng I/O), g_read_crN/g_write_crN,
+ * g_rdmsr/g_wrmsr, g_invlpg/g_wbinvd — chúng KHÔNG tồn tại ngoài x86. */
 #endif
 
 /* ===================================================================== */

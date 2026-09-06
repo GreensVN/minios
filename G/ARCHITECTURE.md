@@ -192,7 +192,16 @@ Ba bất biến của thiết kế, được khoá bằng test:
 3. chuyển ngầm mảng→slice quyết định ở **một chỗ duy nhất** (`Checker.coerce`),
    codegen và irgen chỉ đọc dấu — không lặp lại suy luận đích.
 
-## 6. CHƯA làm (nói rõ để không gây hiểu nhầm)
+## 6. Đã triển khai trong Phase 5 (một phần): Target/HAL
+
+`compiler/target.py` — mô hình **năng lực**; xem README 0.14.0. Việc này được
+kéo lên trước generics vì nó không phải "tính năng thiếu" mà là một **lỗi đúng
+nghĩa**: mã dùng `outb` biên dịch sạch trên aarch64 rồi chạy no-op.
+
+Còn lại của Phase 5: chọn toolchain chéo tự động, layout/ABI theo target
+(hiện `ptr_bits` đã có trong `Target` nhưng `types.py` vẫn giả định 64-bit).
+
+## 7. CHƯA làm (nói rõ để không gây hiểu nhầm)
 
 Các mục sau **chưa được triển khai**, mới chỉ có chỗ đứng trong kiến trúc:
 
@@ -200,8 +209,6 @@ Các mục sau **chưa được triển khai**, mới chỉ có chỗ đứng tr
 - backend LLVM / WASM / native;
 - generics, traits, `Result<T,E>`;
 - allocator abstraction; memory model hình thức (owned/borrowed);
-- target/HAL layer (intrinsic vẫn giả định x86-64) — **đây là lỗ hổng đúng
-  đắn**: `inb`/`outb`/`cli` qua được checker trên mọi kiến trúc;
 - incremental compilation, IR cache, package manager, LSP.
 
 Roadmap chi tiết cho từng mục: xem §2 (xếp hạng) và §3 (thứ tự).

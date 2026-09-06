@@ -10,6 +10,8 @@ G Language - Semantic Analyzer / Type Checker.
 import re
 from . import ast_nodes as A
 from . import types as T
+from . import target as _tgt
+from .target import INTRINSIC_CAPS as TARGET_CAPS, CAP_HINTS as TARGET_HINTS
 
 
 class _CTReturn(Exception):
@@ -202,9 +204,11 @@ _HEAP_STR_METHODS = {"concat", "sub", "upper", "lower", "trim", "rev", "repeat"}
 
 
 class Checker:
-    def __init__(self, program: A.Program, freestanding: bool = False):
+    def __init__(self, program: A.Program, freestanding: bool = False,
+                 target=None):
         self.prog = program
         self.freestanding = freestanding
+        self.target = target if target is not None else _tgt.default_target()
         self.warnings = []         # [(msg, line, col, file)] — không chặn biên dịch
         self._decl_nodes = {}      # id(info) -> node khai báo (cho cảnh báo không dùng)
         self._used_names = set()   # tên đã được ĐỌC ở đâu đó
@@ -1350,6 +1354,16 @@ class Checker:
         return str(t) if t is not None else "?"
 
     # ---------- kiểm tra hàm ----------
+    def _check_target_cap(self, name, node):
+        """Từ chối intrinsic mà TARGET hiện tại không có năng lực tương ứng."""
+        cap = TARGET_CAPS.get(name)
+        if cap is None or self.target is None or self.target.has(cap):
+            return
+        hint = TARGET_HINTS.get(cap, "")
+        self.err(
+            f"'{name}()' không dùng được trên target '{self.target}' — {hint}",
+            node)
+
     def _is_param(self, name) -> bool:
         """'name' là một tham số của hàm đang kiểm? (để gợi ý 'mut x: T' thay vì
         'let mut')."""
@@ -2628,7 +2642,13 @@ class Checker:
                     self.err(
                         f"toán hạng của '{op}' không thể là giá trị kiểu 'void' "
                         f"— hàm không trả về giá trị", node)
-                elif side.kind in ("struct", "array"):
+                elif side.kind == "func":
+                    nm = node.name if isinstance(node, A.Ident) else "f"
+                    self.err(
+                        f"toán hạng của '{op}' là CON TRỎ HÀM (luôn khác null "
+                        f"nên luôn đúng) — có phải bạn quên dấu ngoặc: "
+                        f"'{nm}()'?", node)
+                elif side.kind in ("struct", "array", "slice"):
                     self.err(
                         f"toán hạng của '{op}' không thể là "
                         f"'{self.tyname(side)}' — cần giá trị dùng được làm "
@@ -2860,12 +2880,20 @@ class Checker:
         với 0/null). Chuỗi, struct, mảng tĩnh, void... không phải điều kiện:
         'if s' với s: str luôn đúng (con trỏ khác null) — gần như luôn là lỗi."""
         ct = self.infer(cond)
-        if ct.kind in ("str", "struct", "void") or self._is_static_array(ct):
+        if (ct.kind in ("str", "struct", "void", "func", "slice")
+                or self._is_static_array(ct)):
             hint = ""
             if ct.kind == "str":
                 hint = " — muốn kiểm tra rỗng dùng 'strlen(s) == 0' hoặc so sánh '=='"
             elif ct.kind == "void":
                 hint = " — hàm không trả về giá trị"
+            elif ct.kind == "func":
+                # 'if f' (quên dấu ngoặc) là con trỏ hàm khác null -> LUÔN đúng.
+                nm = cond.name if isinstance(cond, A.Ident) else "f"
+                hint = (f" — con trỏ hàm luôn khác null nên điều kiện này luôn "
+                        f"đúng; có phải bạn quên dấu ngoặc: '{nm}()'?")
+            elif ct.kind == "slice":
+                hint = " — muốn kiểm tra rỗng dùng 'len(s) == 0'"
             self.err(
                 f"điều kiện '{where}' không thể là giá trị kiểu '{self.tyname(ct)}'"
                 f"{hint}", cond)
@@ -3612,6 +3640,10 @@ class Checker:
                 self.err("test_summary() không nhận tham số", e)
             return T.INT
         # ===== intrinsics phát triển hệ điều hành =====
+        # Gác NĂNG LỰC TARGET trước tiên: 'outb' trên aarch64 từng qua checker
+        # rồi hạ thành no-op im lặng trong runtime — driver không chạy mà không
+        # có một cảnh báo nào. Xem compiler/target.py.
+        self._check_target_cap(name, e)
         if name in _OS_NULLARY_VOID:
             if e.args:
                 self.err(f"{name}() không nhận tham số", e)
