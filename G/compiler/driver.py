@@ -140,7 +140,6 @@ def dump_tokens(main_path):
 def dump_ast(main_path):
     sources = {}
     prog = build_program(main_path, sources)
-    import pprint
     for it in prog.items:
         print(pprint_node(it))
 

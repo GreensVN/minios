@@ -1,701 +1,196 @@
-# MiniOS v4.0 ULTIMATE - Complete Operating System
+# MiniOS (TreeOS) v4.1 — a small educational x86 operating system
 
-<div align="center">
+MiniOS is a from-scratch 32-bit x86 kernel written in C and NASM assembly, small
+enough to read in an afternoon but complete enough to *actually boot*: it has its
+own two-stage bootloader, a protected-mode kernel with interrupts, a heap, a
+physical frame allocator, preemptive multithreading, system calls and an
+interactive shell.
 
-```
-╔════════════════════════════════════════════════════════════════════════════╗
-║                                                                            ║
-║     ███╗   ███╗██╗███╗   ██╗██╗     ██████╗ ███████╗                     ║
-║     ████╗ ████║██║████╗  ██║██║    ██╔═══██╗██╔════╝                     ║
-║     ██╔████╔██║██║██╔██╗ ██║██║    ██║   ██║███████╗                     ║
-║     ██║╚██╔╝██║██║██║╚██╗██║██║    ██║   ██║╚════██║                     ║
-║     ██║ ╚═╝ ██║██║██║ ╚████║██║    ╚██████╔╝███████║                     ║
-║     ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝     ╚═════╝ ╚══════╝                     ║
-║                                                                            ║
-║                  Version 4.0 ULTIMATE - Complete Edition                   ║
-║                                                                            ║
-╚════════════════════════════════════════════════════════════════════════════╝
-```
+It boots two ways:
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-4.0.0-green.svg)](CHANGELOG.md)
-[![Build](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](BUILD.md)
-[![Status](https://img.shields.io/badge/Status-Production-success.svg)](https://github.com/minios)
+* from its own bootloader (`output/minios.img` — a raw disk image; `dd` it to a
+  USB stick or give it to QEMU as a hard disk), or
+* from any Multiboot 1 loader such as GRUB (`build/kernel.elf`, or `make iso`).
 
-**A complete, production-ready educational operating system with advanced features**
-
-[Features](#-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [Contributing](#-contributing)
-
-</div>
+The other files in this directory (`minios_shell.py`, `FileSystemSimulator.java`,
+`NetworkStackSimulator.cs`, `Terminal.html`, `desktop.js`) are **host-side
+simulators** written in different languages that demonstrate OS concepts (shells,
+inode file systems, TCP/IP framing, a desktop UI). They are *not* part of the
+kernel image.
 
 ---
 
-## 🎯 Overview
-
-MiniOS v4.0 ULTIMATE is a **complete, modern operating system** built from scratch for educational purposes. It demonstrates **real OS concepts** that actually run on hardware, not just simulations.
-
-### What Makes This Special?
-
-✅ **Actually Runs on Hardware** - Not a simulator, boots on real PCs
-✅ **Production Quality** - Clean, well-documented, maintainable code
-✅ **Complete System** - All major OS components implemented
-✅ **Educational** - Perfect for learning OS development
-✅ **Modern Features** - Paging, multitasking, syscalls, networking
-✅ **Multiple Languages** - Shows different programming paradigms
-
----
-
-## ✨ Features
-
-### Core System
-
-#### 🔥 Advanced Bootloader
-- **Stage 1 & 2 Loading** - Multi-stage boot process
-- **A20 Gate** - Multiple enabling methods (BIOS, Keyboard, Fast)
-- **Memory Detection** - E820, E801, 88h methods
-- **CPU Detection** - CPUID, SSE, AVX, Long Mode
-- **Error Recovery** - Retry logic with fallback
-- **Protected Mode** - Full 32-bit mode setup
-- **GDT Configuration** - Complete segment descriptors
-
-#### ⚙️ Kernel Core
-- **Memory Management** - Paging, virtual memory, heap allocator
-- **Process Management** - Multitasking, scheduling, context switching
-- **Interrupt Handling** - IDT, ISR, IRQ, exceptions
-- **System Calls** - Complete syscall interface (INT 0x80)
-- **VGA Driver** - 80x25 color text mode
-- **Keyboard Driver** - PS/2 keyboard with full scancode support
-- **Timer Driver** - PIT at 100Hz with preemptive scheduling
-- **Exception Handling** - Kernel panic with register dump
-
-### Advanced Features
-
-#### 🧠 Memory Management
-- **Physical Memory**
-  - Frame allocator with bitmap
-  - 4KB page management
-  - Memory statistics
-  - Fragmentation prevention
-  
-- **Virtual Memory**
-  - Page directory/tables
-  - Kernel/user space separation
-  - Demand paging (basic)
-  - Memory protection
-  
-- **Heap Allocator**
-  - kmalloc/kfree
-  - kcalloc/krealloc
-  - Alignment support
-  - Coalescing free blocks
-  - Magic number protection
-
-#### 🔄 Process Management
-- **Multitasking**
-  - Preemptive scheduling
-  - Round-robin scheduler
-  - Process states (NEW, READY, RUNNING, BLOCKED, ZOMBIE)
-  - Context switching
-  - Priority levels
-  
-- **Process Features**
-  - Process ID (PID)
-  - Parent/child relationships
-  - CPU time tracking
-  - User/kernel separation
-  - Open file descriptors
-  - Working directory
-
-#### 🔌 System Calls
-```c
-// Available syscalls
-SYSCALL_EXIT      // Exit process
-SYSCALL_FORK      // Fork process
-SYSCALL_READ      // Read from fd
-SYSCALL_WRITE     // Write to fd
-SYSCALL_OPEN      // Open file
-SYSCALL_CLOSE     // Close file
-SYSCALL_WAIT      // Wait for child
-SYSCALL_EXEC      // Execute program
-SYSCALL_GETPID    // Get process ID
-SYSCALL_SLEEP     // Sleep milliseconds
-SYSCALL_YIELD     // Yield CPU
-SYSCALL_KILL      // Send signal
-SYSCALL_SIGNAL    // Handle signals
-SYSCALL_MMAP      // Map memory
-SYSCALL_MUNMAP    // Unmap memory
-SYSCALL_BRK       // Set heap break
-```
-
-### Statistics & Monitoring
-
-- **Kernel Statistics**
-  - Context switches
-  - Interrupts handled
-  - Page faults
-  - System calls
-  - Memory allocations/frees
-  - Kernel/user time
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-**Required:**
-- `nasm` ≥ 2.14 (Assembler)
-- `gcc` ≥ 9.0 (C Compiler with 32-bit support)
-- `ld` (GNU Linker)
-- `make` (Build system)
-
-**Optional:**
-- `qemu-system-i386` (Emulator)
-- `gdb` (Debugger)
-- `grub-mkrescue` (ISO creation)
-
-### Installation
-
-#### Ubuntu/Debian
-```bash
-sudo apt update
-sudo apt install -y build-essential nasm gcc-multilib \
-    binutils qemu-system-x86 gdb grub-pc-bin xorriso mtools
-```
-
-#### Arch Linux
-```bash
-sudo pacman -S base-devel nasm gcc multilib-devel \
-    qemu gdb grub mtools
-```
-
-#### macOS
-```bash
-brew install nasm qemu i386-elf-gcc i386-elf-binutils
-```
-
-### Build & Run
+## Quick start
 
 ```bash
-# Clone repository
-git clone https://github.com/yourusername/minios.git
-cd minios
+# Debian / Ubuntu
+sudo apt install build-essential gcc-multilib nasm qemu-system-x86
+# Arch:  sudo pacman -S base-devel nasm qemu-system-x86 (gcc has multilib via lib32-gcc-libs)
+# macOS: brew install nasm qemu x86_64-elf-gcc  → make CROSS=x86_64-elf-  (or i686-elf-)
 
-# Build everything
-make
-
-# Run in QEMU
-make run
-
-# That's it! 🎉
+cd TreeOS
+make            # → output/minios.img (bootable), build/kernel.elf (Multiboot)
+make test       # sanity checks on the produced binaries
+make run        # boot in QEMU (window)
+make run-serial # boot in QEMU with the console mirrored on your terminal (Ctrl-A X quits)
 ```
 
-### Expected Output
+`./build.sh [run|serial|test|clean]` wraps the same targets and checks that
+your toolchain can produce 32-bit code first.
+
+### What you should see
 
 ```
-╔════════════════════════════════════════════════════════════════╗
-║     MiniOS v4.0 ULTIMATE Bootloader                           ║
-║     Advanced | Stable | Production Ready                      ║
-╚════════════════════════════════════════════════════════════════╝
+MiniOS v4.1.0 - 32-bit protected mode kernel
+[BOOT] MiniOS bootloader, magic 0x4d494e49
+[MEM ] 639 KiB low, 261120 KiB high, 5 E820 entries, top 0x10000000
+[KRNL] 0x00100000 - 0x00112000 (72 KiB)
+[ OK ] GDT loaded (5 entries)
+[ OK ] IDT loaded (32 exceptions, 16 IRQs, INT 0x80)
+[ OK ] PIC remapped to vectors 32-47
+[ OK ] PIT at 100 Hz
+[ OK ] PS/2 keyboard ready
+[ OK ] heap 0x00112000 - 0x02112000 (32768 KiB)
+[ OK ] frame allocator: 57070 x 4 KiB frames (222 MiB)
+[ OK ] RTC: 2026-09-05 11:41:18
+[ OK ] ATA: QEMU HARDDISK (8 MiB)
+[ OK ] interrupts enabled, preemptive scheduler on (quantum 5 ticks)
+[ OK ] CPU: GenuineIntel ~2994 MHz
+[ OK ] background status thread started
 
-[STAGE 1] Hardware Detection
-  [OK] A20 Gate Enabled
-  [*] Memory: 256 MB
-  [*] CPU Features: SSE AVX
+System ready. Type 'help' for a list of commands.
 
-[STAGE 2] Loading Kernel
-  [OK] Kernel Loaded (64 sectors)
-  [OK] Signature Valid
-
-[STAGE 3] Entering Protected Mode
->>> Protected Mode Active - Starting Kernel...
-
-================================================================
-           MiniOS v4.0 ULTIMATE Kernel - Complete            
-================================================================
-
-[*] Kernel started at 0x00001234
-[MEM] Initializing memory manager...
-[MEM] Heap at 0x00400000 - 0x02400000 (32 MB)
-[MEM] Paging initialized: 32768 frames
-[*] Installing IDT...
-[IDT] Installed 256 entries
-[*] Remapping PIC...
-[PIC] Remapped to 0x20-0x2F
-[*] Installing timer...
-[TMR] Initialized at 100 Hz
-[*] Initializing multitasking...
-[TASK] Created idle process (PID 0)
-[*] Enabling interrupts...
-
-=== System Ready ===
-Press any key to interact...
-
-_
+minios:/$
 ```
+
+The bottom line of the screen is a status bar with the uptime clock, updated by
+a background kernel thread — proof that preemption works while you type.
 
 ---
 
-## 📖 Documentation
+## Shell commands
 
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                     User Space                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │ Applications │  │    Shell     │  │   Programs   │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-├─────────────────────────────────────────────────────────┤
-│              System Calls (INT 0x80)                    │
-├─────────────────────────────────────────────────────────┤
-│                     Kernel Space                        │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │              Kernel Core                          │  │
-│  │  • Memory Management  • Process Scheduler         │  │
-│  │  • System Calls       • Interrupt Handling        │  │
-│  └──────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │              Device Drivers                       │  │
-│  │  • VGA  • Keyboard  • Timer  • Disk              │  │
-│  └──────────────────────────────────────────────────┘  │
-├─────────────────────────────────────────────────────────┤
-│                    Hardware                             │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Memory Map
-
-```
-0x00000000  ┌───────────────────────────────┐
-            │ Real Mode IVT                 │
-0x00000500  ├───────────────────────────────┤
-            │ BIOS Data Area                │
-0x00007C00  ├───────────────────────────────┤
-            │ Bootloader (512 bytes)        │
-0x00007E00  ├───────────────────────────────┤
-            │ Bootloader Stack              │
-0x00001000  ├───────────────────────────────┤
-            │ Kernel Code (.text)           │
-            │ Kernel Data (.data)           │
-            │ Kernel BSS (.bss)             │
-0x00100000  ├───────────────────────────────┤
-            │ Kernel Heap (32MB)            │
-0x02400000  ├───────────────────────────────┤
-            │ Free Memory / User Space      │
-0xB8000     ├───────────────────────────────┤
-            │ VGA Text Buffer (4KB)         │
-0xB9000     ├───────────────────────────────┤
-            │ Upper Memory                  │
-0xFFFFFFFF  └───────────────────────────────┘
-```
-
-### File Structure
-
-```
-minios/
-├── 📄 bootloader_ultimate.asm      # Advanced bootloader
-├── 📄 kernel_v4_ultimate.c         # Complete kernel
-├── 📄 interrupts_complete.asm      # Interrupt handlers
-├── 📄 linker.ld                    # Memory layout
-├── 📄 Makefile                     # Build system
-├── 📝 README_ULTIMATE.md           # This file
-├── 📜 LICENSE                      # MIT License
-├── 🏗️ build/                       # Build artifacts
-│   ├── bootloader.bin
-│   ├── kernel.o
-│   ├── interrupts.o
-│   ├── kernel.elf
-│   └── kernel.bin
-├── 📦 output/                      # Final images
-│   ├── minios.img                  # Disk image
-│   └── minios.iso                  # Bootable ISO
-└── 📚 docs/                        # Documentation
-    ├── ARCHITECTURE.md
-    ├── API.md
-    ├── MEMORY.md
-    ├── PROCESSES.md
-    └── SYSCALLS.md
-```
+| Command | What it does |
+|---|---|
+| `help` | list commands |
+| `clear` | clear the screen |
+| `mem` | boot loader, E820 memory map, kernel layout, heap and frame statistics |
+| `ps` | task table (pid, state, ticks, stack) |
+| `uptime`, `ticks` | uptime from the PIT |
+| `cpuinfo` | CPUID vendor, family/model, feature flags |
+| `date` | CMOS real-time clock |
+| `drivers` | drivers registered with the C++ driver manager |
+| `disk [lba]` | identify the ATA disk and hex-dump one sector (`disk 0` shows the boot sector, `disk 8` the kernel header) |
+| `echo <text>` | print text |
+| `color <fg> [bg]` | change the console colours (0–15) |
+| `alloc <bytes>`, `heaptest` | exercise `kmalloc`/`kfree`; `heaptest` runs a self-check |
+| `spawn [n]` | start *n* demo threads that print interleaved output |
+| `kill <pid>` | terminate a thread |
+| `syscall` | demonstrate the `INT 0x80` interface from kernel mode |
+| `sleep <ms>` | block the shell (other threads keep running) |
+| `bp` | trigger `INT 3` — the breakpoint handler prints the frame and resumes |
+| `crash` | divide by zero → kernel panic screen with register dump |
+| `ud` | execute an invalid opcode → panic screen |
+| `reboot`, `halt` | via the keyboard controller / `hlt` |
 
 ---
 
-## 🔧 Advanced Usage
+## Layout
 
-### Building Components
+```
+TreeOS/
+├── Bootloader.asm        two-stage BIOS bootloader (4096 bytes: MBR + 7 sectors)
+├── entry.asm             kernel entry: header, Multiboot header, BSS clear, stack, call kernel_main
+├── interrupts.asm        ISR/IRQ stubs, INT 0x80 stub, context switch, GDT/IDT/TR loaders, atomics
+├── kernel.h              shared types: boot_info_t, interrupt frame, syscall numbers, asm prototypes
+├── Kernel.c              the kernel proper (console, GDT/IDT/PIC/PIT, heap, frames, tasks, syscalls, shell)
+├── driver_manager.h/.cpp C++ driver framework with keyboard, ATA PIO, PIT and RTC drivers + C API
+├── linker.ld             links everything at 1 MiB, exports the symbols used by the header
+├── Makefile              build / run / test / iso / debug / disassemble
+├── build.sh              friendly wrapper around the Makefile
+│
+├── minios_shell.py       host-side shell & system-monitor simulator (python3 minios_shell.py)
+├── FileSystemSimulator.java  inode/block file-system simulator (javac + java FileSystemSimulator)
+├── NetworkStackSimulator.cs  Ethernet/IP/TCP framing simulator (dotnet / csc)
+├── Terminal.html         browser terminal UI
+└── desktop.js            browser desktop UI (loaded by Terminal.html)
+```
+
+### Boot protocol
+
+| LBA | Contents | Loaded to |
+|---|---|---|
+| 0 | stage 1 (MBR) | `0x7C00` |
+| 1–7 | stage 2 | `0x7E00` |
+| 8… | `kernel.bin` (flat binary) | `0x100000` via a bounce buffer at `0x10000` |
+
+Stage 2 enables A20, collects the E820 map (at `0xA000`), reads the kernel size
+from its header, copies it above 1 MiB with unreal mode, builds a GDT, enters
+protected mode and jumps to the kernel with `EAX = 0x4D494E49` (`'MINI'`) and
+`EBX` pointing to a `boot_info_t`. When GRUB loads `kernel.elf` the same entry
+point receives `EAX = 0x2BADB002` and a Multiboot info pointer; `Kernel.c`
+normalises both into the same structure.
+
+The kernel header at the start of the image:
+
+| offset | field |
+|---|---|
+| +0 | `jmp` to entry |
+| +8 | magic `0xDEADBEEF` |
+| +12 | version `0x00040100` (4.1.0) |
+| +16 | end of the loaded image (`_load_end`) |
+| +20 | end of BSS (`_bss_end`) |
+| +24 | Multiboot 1 header |
+
+### Memory map at run time
+
+```
+0x00000000  IVT / BIOS data
+0x00007C00  stage 1, 0x7E00 stage 2, 0xA000 E820 map (boot only)
+0x00010000  bounce buffer (boot only)
+0x000B8000  VGA text buffer
+0x00100000  kernel .text / .rodata / .data / .bss (+ 32 KiB kernel stack)
+_kernel_end kernel heap (first-fit with coalescing, up to 32 MiB)
+heap end    bitmap-managed 4 KiB frames up to the top of usable RAM
+```
+
+There is **no paging** and no user mode: this is a single-address-space kernel,
+which keeps the code small enough to follow. System calls still go through a
+real `INT 0x80` gate so the mechanism is demonstrated end to end.
+
+---
+
+## Other targets
 
 ```bash
-# Build specific components
-make bootloader    # Only bootloader
-make kernel        # Only kernel
-make disk-image    # Create disk image
-make iso           # Create ISO image
-
-# Clean builds
-make clean         # Remove build files
-make distclean     # Remove everything
+make iso        # GRUB ISO from kernel.elf (needs grub-mkrescue + xorriso)
+make run-iso
+make debug      # QEMU paused with a GDB stub; then: gdb build/kernel.elf -ex 'target remote :1234'
+make disassemble  # build/kernel.dis
+make symbols      # build/kernel.sym
+make stats        # section sizes
+make clean
 ```
 
-### Running Options
-
-```bash
-# Different run modes
-make run           # Normal run
-make run-debug     # With GDB support
-make run-serial    # With serial output
-make run-vnc       # With VNC display
-
-# ISO boot
-make iso run-iso   # Boot from ISO
-```
-
-### Debugging
-
-```bash
-# Terminal 1: Start QEMU with GDB
-make run-debug
-
-# Terminal 2: Connect GDB
-gdb build/kernel.elf
-(gdb) target remote localhost:1234
-(gdb) break kernel_main
-(gdb) continue
-(gdb) step
-(gdb) info registers
-(gdb) x/10i $eip
-(gdb) backtrace
-```
-
-### Analysis Tools
-
-```bash
-# Disassemble kernel
-make disassemble
-cat build/kernel.asm
-
-# Extract symbols
-make symbols
-cat build/kernel.sym
-
-# Hex dump
-make hexdump
-
-# Statistics
-make stats
-```
-
-### Testing
-
-```bash
-# Run automated tests
-make test
-
-# Boot signature test
-hexdump -n 2 -s 510 build/bootloader.bin
-# Should output: 55aa
-
-# Kernel magic test
-hexdump -n 4 build/kernel.bin
-# Should start with: deadbeef
-```
+To write the image to a USB stick: `sudo dd if=output/minios.img of=/dev/sdX bs=1M
+&& sync` — double-check `/dev/sdX`, this destroys whatever is on it. The machine
+must boot in legacy BIOS/CSM mode.
 
 ---
 
-## 💿 Boot to Real Hardware
+## Known limitations
 
-### ⚠️ WARNING
-**This will ERASE all data on the target drive!**
-**Double-check device names before proceeding!**
+* No paging / virtual memory, no user mode, no real file system on the kernel
+  side (the ATA driver reads raw sectors).
+* PS/2 keyboard only (USB keyboards work through BIOS legacy emulation on most
+  machines); US layout.
+* Text mode 80×25 only; no networking.
+* Single CPU.
 
-### USB Boot Instructions
+These are deliberate: each would double the size of the code base. The
+simulators in the same directory cover file-system and network-stack concepts
+at a higher level.
 
-1. **Find USB Device**
-```bash
-# List block devices
-lsblk
+## License
 
-# Or use fdisk
-sudo fdisk -l
-
-# Your USB should be something like /dev/sdb or /dev/sdc
-# Make ABSOLUTELY SURE it's the correct device!
-```
-
-2. **Write Image**
-```bash
-# Build the OS first
-make
-
-# Write to USB (REPLACE /dev/sdX with your USB device)
-sudo dd if=output/minios.img of=/dev/sdX bs=4M status=progress
-sudo sync
-```
-
-3. **Boot from USB**
-- Insert USB drive
-- Restart computer
-- Enter BIOS/UEFI (usually F2, F12, Del, or Esc)
-- Disable Secure Boot (if enabled)
-- Enable Legacy BIOS mode (if using UEFI)
-- Select USB device as boot device
-- Save and exit
-
-4. **What to Expect**
-- Blue boot screen with progress
-- Kernel initialization messages
-- Green "System Ready" message
-- Interactive prompt
-- Keyboard input working
-
-### Troubleshooting Hardware Boot
-
-**Problem: Black screen**
-- Check BIOS settings (Legacy vs UEFI)
-- Try different USB port (USB 2.0 preferred)
-- Verify image was written correctly
-
-**Problem: "Invalid system disk"**
-- Boot signature might be wrong
-- Re-write USB image
-- Try different USB drive
-
-**Problem: Boots but crashes**
-- Some hardware might not be compatible
-- Check kernel logs (if available)
-- Try in QEMU first to verify image
-
-**Problem: Keyboard not working**
-- Need PS/2 keyboard (USB might not work)
-- Some laptops work, some don't
-- Try external PS/2 keyboard with adapter
-
----
-
-## 🎓 Learning Resources
-
-### Understanding the Code
-
-#### Bootloader Flow
-```
-1. BIOS loads bootloader to 0x7C00
-2. Setup stack and segments
-3. Enable A20 gate (access >1MB memory)
-4. Detect memory (E820/E801/88h)
-5. Detect CPU features (CPUID)
-6. Load kernel from disk (INT 0x13)
-7. Verify kernel signature
-8. Setup GDT (Global Descriptor Table)
-9. Switch to Protected Mode
-10. Jump to kernel entry point
-```
-
-#### Kernel Initialization
-```
-1. Clear screen, print banner
-2. Initialize memory manager
-3. Setup paging (virtual memory)
-4. Install IDT (Interrupt Descriptor Table)
-5. Remap PIC (Programmable Interrupt Controller)
-6. Install timer (100 Hz)
-7. Initialize multitasking
-8. Enable interrupts
-9. Enter main loop
-```
-
-### Key Concepts
-
-#### Memory Management
-- **Physical Memory**: Frame allocator with bitmap
-- **Virtual Memory**: Page directory + page tables
-- **Heap**: Dynamic memory allocation with coalescing
-
-#### Process Management
-- **Scheduling**: Round-robin with time slicing
-- **Context Switch**: Save/restore all registers
-- **States**: NEW → READY → RUNNING → BLOCKED/WAITING/ZOMBIE
-
-#### Interrupts
-- **Hardware IRQs**: Timer (IRQ0), Keyboard (IRQ1)
-- **Exceptions**: Page faults, GPF, divide-by-zero
-- **System Calls**: Software interrupts (INT 0x80)
-
-### Recommended Reading
-
-1. **"Operating Systems: Three Easy Pieces"** - Remzi H. Arpaci-Dusseau
-2. **"Operating System Concepts"** - Silberschatz
-3. **"xv6: A simple, Unix-like teaching operating system"** - MIT
-4. **[OSDev Wiki](https://wiki.osdev.org/)** - Comprehensive resource
-5. **[Intel Manual](https://software.intel.com/sdm)** - CPU documentation
-
----
-
-## 🐛 Known Issues & Limitations
-
-### Current Limitations
-
-❌ **No User Mode** - Everything runs in kernel mode
-❌ **No Filesystem** - No persistent storage yet
-❌ **Basic Scheduler** - Simple round-robin
-❌ **Limited Drivers** - Only VGA, keyboard, timer
-❌ **No Networking** - Network stack not integrated
-❌ **32-bit Only** - No 64-bit (Long Mode) support yet
-
-### Planned Features (v5.0)
-
-- [ ] User mode with privilege separation
-- [ ] ext2-like filesystem implementation
-- [ ] Better scheduler (priority-based, fair-share)
-- [ ] More drivers (mouse, sound, network)
-- [ ] GUI framework
-- [ ] 64-bit support
-- [ ] SMP (multi-core) support
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! This is an open-source educational project.
-
-### How to Contribute
-
-1. **Fork the repository**
-2. **Create a feature branch** (`git checkout -b feature/amazing-feature`)
-3. **Make your changes**
-4. **Test thoroughly** (`make clean && make && make test`)
-5. **Commit** (`git commit -m 'Add amazing feature'`)
-6. **Push** (`git push origin feature/amazing-feature`)
-7. **Open a Pull Request**
-
-### Contribution Guidelines
-
-- **Code Style**: Follow existing style (K&R for C)
-- **Comments**: Document complex logic
-- **Testing**: Test on both QEMU and real hardware if possible
-- **Documentation**: Update docs for new features
-- **Commits**: Clear, descriptive commit messages
-
-### Areas Needing Help
-
-- 📝 Documentation improvements
-- 🐛 Bug fixes and stability
-- ✨ New features and drivers
-- 🧪 Testing on various hardware
-- 🌐 Translations
-- 🎨 UI/UX improvements
-
----
-
-## 📜 License
-
-This project is licensed under the **MIT License**.
-
-```
-MIT License
-
-Copyright (c) 2024 MiniOS Project
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
----
-
-## 👥 Authors & Acknowledgments
-
-### Core Team
-- **Lead Developer** - System architecture, kernel development
-- **Contributors** - See [CONTRIBUTORS.md](CONTRIBUTORS.md)
-
-### Acknowledgments
-
-Special thanks to:
-- **OSDev Community** - Invaluable documentation and support
-- **Linux Kernel** - Design inspiration
-- **MINIX & xv6** - Educational OS examples
-- **Intel** - x86 architecture documentation
-- **QEMU Team** - Excellent emulator
-
-### Inspired By
-- Linux Kernel
-- MINIX
-- xv6 (MIT)
-- SerenityOS
-- ToaruOS
-
----
-
-## 📞 Support & Contact
-
-### Get Help
-
-- **Documentation**: Check `docs/` folder
-- **Issues**: [GitHub Issues](https://github.com/minios/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/minios/discussions)
-- **Discord**: [Join our server](https://discord.gg/minios)
-- **IRC**: #minios on Libera.Chat
-- **Reddit**: [r/MiniOS](https://reddit.com/r/MiniOS)
-
-### Reporting Bugs
-
-When reporting bugs, please include:
-1. Steps to reproduce
-2. Expected behavior
-3. Actual behavior
-4. System information (host OS, QEMU version, etc.)
-5. Build output and error messages
-6. Screenshots if applicable
-
----
-
-## 🌟 Star History
-
-If you find this project helpful, please ⭐ star it!
-
-[![Star History Chart](https://api.star-history.com/svg?repos=minios/minios&type=Date)](https://star-history.com/#minios/minios&Date)
-
----
-
-## 📊 Statistics
-
-![GitHub Stars](https://img.shields.io/github/stars/minios/minios?style=social)
-![GitHub Forks](https://img.shields.io/github/forks/minios/minios?style=social)
-![GitHub Contributors](https://img.shields.io/github/contributors/minios/minios)
-![Lines of Code](https://img.shields.io/tokei/lines/github/minios/minios)
-![Code Size](https://img.shields.io/github/languages/code-size/minios/minios)
-
----
-
-<div align="center">
-
-## 🎉 Success Stories
-
-*"MiniOS helped me understand OS concepts that textbooks couldn't explain!"* - Student
-
-*"Finally, an OS project that actually compiles and runs!"* - Developer
-
-*"Booting my own OS on real hardware was an incredible experience!"* - Hobbyist
-
----
-
-**Made with ❤️ by the MiniOS Team**
-
-**Happy Operating System Development! 🚀**
-
-[⬆ Back to Top](#minios-v40-ultimate---complete-operating-system)
-
-</div>
+MIT.

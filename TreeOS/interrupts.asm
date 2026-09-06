@@ -1,5 +1,15 @@
-; interrupts_complete.asm - Complete Interrupt Handlers for MiniOS v4.0
-; Compile: nasm -f elf32 interrupts_complete.asm -o interrupts.o
+; =============================================================================
+;  interrupts.asm - ISR/IRQ/syscall stubs, context switch and CPU helpers
+;
+;  Assemble: nasm -f elf32 interrupts.asm -o interrupts.o
+;
+;  Stack frame handed to the C handlers (matches interrupt_frame_t in
+;  kernel.h, lowest address first):
+;      gs, fs, es, ds
+;      edi, esi, ebp, esp, ebx, edx, ecx, eax     (pusha)
+;      int_no, err_code
+;      eip, cs, eflags, [useresp, ss]              (CPU)
+; =============================================================================
 
 [BITS 32]
 
@@ -7,278 +17,188 @@ extern isr_handler
 extern irq_handler
 extern syscall_handler
 
-; ========== ISR Macros ==========
+KERNEL_DS equ 0x10
+
+; ------------------------------------------------------------------ macros ---
 %macro ISR_NOERRCODE 1
     global isr%1
     isr%1:
-        cli
-        push byte 0
-        push byte %1
+        push dword 0                    ; dummy error code
+        push dword %1
         jmp isr_common_stub
 %endmacro
 
 %macro ISR_ERRCODE 1
     global isr%1
     isr%1:
-        cli
-        push byte %1
+        push dword %1                   ; CPU already pushed the error code
         jmp isr_common_stub
 %endmacro
 
 %macro IRQ 2
     global irq%1
     irq%1:
-        cli
-        push byte 0
-        push byte %2
+        push dword 0
+        push dword %2
         jmp irq_common_stub
 %endmacro
 
-; ========== CPU Exceptions (0-31) ==========
-ISR_NOERRCODE 0   ; Division By Zero
-ISR_NOERRCODE 1   ; Debug
-ISR_NOERRCODE 2   ; NMI
-ISR_NOERRCODE 3   ; Breakpoint
-ISR_NOERRCODE 4   ; Overflow
-ISR_NOERRCODE 5   ; Bound Range
-ISR_NOERRCODE 6   ; Invalid Opcode
-ISR_NOERRCODE 7   ; Device Not Available
-ISR_ERRCODE   8   ; Double Fault
-ISR_NOERRCODE 9   ; Coprocessor Segment Overrun
-ISR_ERRCODE   10  ; Invalid TSS
-ISR_ERRCODE   11  ; Segment Not Present
-ISR_ERRCODE   12  ; Stack Segment Fault
-ISR_ERRCODE   13  ; General Protection Fault
-ISR_ERRCODE   14  ; Page Fault
-ISR_NOERRCODE 15  ; Reserved
-ISR_NOERRCODE 16  ; x87 FPU Error
-ISR_ERRCODE   17  ; Alignment Check
-ISR_NOERRCODE 18  ; Machine Check
-ISR_NOERRCODE 19  ; SIMD Floating Point
-ISR_NOERRCODE 20  ; Virtualization
-ISR_NOERRCODE 21  ; Reserved
-ISR_NOERRCODE 22  ; Reserved
-ISR_NOERRCODE 23  ; Reserved
-ISR_NOERRCODE 24  ; Reserved
-ISR_NOERRCODE 25  ; Reserved
-ISR_NOERRCODE 26  ; Reserved
-ISR_NOERRCODE 27  ; Reserved
-ISR_NOERRCODE 28  ; Reserved
-ISR_NOERRCODE 29  ; Reserved
-ISR_ERRCODE   30  ; Security Exception
-ISR_NOERRCODE 31  ; Reserved
+section .text
 
-; ========== Hardware IRQs (32-47) ==========
-IRQ 0, 32   ; Timer
-IRQ 1, 33   ; Keyboard
-IRQ 2, 34   ; Cascade
-IRQ 3, 35   ; COM2
-IRQ 4, 36   ; COM1
-IRQ 5, 37   ; LPT2
-IRQ 6, 38   ; Floppy
-IRQ 7, 39   ; LPT1
-IRQ 8, 40   ; RTC
-IRQ 9, 41   ; Free
-IRQ 10, 42  ; Free
-IRQ 11, 43  ; Free
-IRQ 12, 44  ; PS/2 Mouse
-IRQ 13, 45  ; FPU
-IRQ 14, 46  ; Primary ATA
-IRQ 15, 47  ; Secondary ATA
+; ---------------------------------------------------- CPU exceptions 0..31 ---
+ISR_NOERRCODE 0     ; #DE Divide-by-zero
+ISR_NOERRCODE 1     ; #DB Debug
+ISR_NOERRCODE 2     ;     NMI
+ISR_NOERRCODE 3     ; #BP Breakpoint
+ISR_NOERRCODE 4     ; #OF Overflow
+ISR_NOERRCODE 5     ; #BR Bound range
+ISR_NOERRCODE 6     ; #UD Invalid opcode
+ISR_NOERRCODE 7     ; #NM Device not available
+ISR_ERRCODE   8     ; #DF Double fault
+ISR_NOERRCODE 9     ;     Coprocessor segment overrun
+ISR_ERRCODE   10    ; #TS Invalid TSS
+ISR_ERRCODE   11    ; #NP Segment not present
+ISR_ERRCODE   12    ; #SS Stack fault
+ISR_ERRCODE   13    ; #GP General protection
+ISR_ERRCODE   14    ; #PF Page fault
+ISR_NOERRCODE 15    ;     reserved
+ISR_NOERRCODE 16    ; #MF x87 FP
+ISR_ERRCODE   17    ; #AC Alignment check
+ISR_NOERRCODE 18    ; #MC Machine check
+ISR_NOERRCODE 19    ; #XM SIMD FP
+ISR_NOERRCODE 20    ; #VE Virtualization
+ISR_ERRCODE   21    ; #CP Control protection
+ISR_NOERRCODE 22
+ISR_NOERRCODE 23
+ISR_NOERRCODE 24
+ISR_NOERRCODE 25
+ISR_NOERRCODE 26
+ISR_NOERRCODE 27
+ISR_NOERRCODE 28
+ISR_ERRCODE   29    ; #VC VMM communication
+ISR_ERRCODE   30    ; #SX Security
+ISR_NOERRCODE 31
 
-; ========== Common ISR Handler ==========
-isr_common_stub:
+; -------------------------------------------------- hardware IRQs 32..47 ---
+IRQ 0, 32           ; PIT timer
+IRQ 1, 33           ; keyboard
+IRQ 2, 34           ; cascade
+IRQ 3, 35           ; COM2
+IRQ 4, 36           ; COM1
+IRQ 5, 37           ; LPT2
+IRQ 6, 38           ; floppy
+IRQ 7, 39           ; LPT1 / spurious
+IRQ 8, 40           ; RTC
+IRQ 9, 41
+IRQ 10, 42
+IRQ 11, 43
+IRQ 12, 44          ; PS/2 mouse
+IRQ 13, 45          ; FPU
+IRQ 14, 46          ; primary ATA
+IRQ 15, 47          ; secondary ATA
+
+; ------------------------------------------------------------ common stubs ---
+%macro SAVE_CONTEXT 0
     pusha
-    
     push ds
     push es
     push fs
     push gs
-    
-    mov ax, 0x10
+    mov ax, KERNEL_DS
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
-    
-    push esp
-    call isr_handler
-    add esp, 4
-    
+%endmacro
+
+%macro RESTORE_CONTEXT 0
     pop gs
     pop fs
     pop es
     pop ds
-    
     popa
-    add esp, 8
-    
+    add esp, 8                          ; int_no + err_code
+%endmacro
+
+isr_common_stub:
+    SAVE_CONTEXT
+    push esp                            ; interrupt_frame_t *
+    call isr_handler
+    add esp, 4
+    RESTORE_CONTEXT
     iret
 
-; ========== Common IRQ Handler ==========
 irq_common_stub:
-    pusha
-    
-    push ds
-    push es
-    push fs
-    push gs
-    
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    
+    SAVE_CONTEXT
     push esp
     call irq_handler
     add esp, 4
-    
-    pop gs
-    pop fs
-    pop es
-    pop ds
-    
-    popa
-    add esp, 8
-    
+    RESTORE_CONTEXT
     iret
 
-; ========== System Call Handler (INT 0x80) ==========
+; ------------------------------------------------- INT 0x80 system call -----
+; Convention: EAX = number, EBX, ECX, EDX, ESI, EDI = args, EAX = result.
 global syscall_int
 syscall_int:
-    cli
-    
-    pusha
-    push ds
-    push es
-    push fs
-    push gs
-    
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    
-    ; syscall(num, arg1, arg2, arg3, arg4)
-    push edi
-    push esi
-    push edx
-    push ecx
-    push ebx
-    push eax
-    call syscall_handler
-    add esp, 24
-    
-    mov [esp + 28], eax  ; Return value in EAX
-    
-    pop gs
-    pop fs
-    pop es
-    pop ds
-    popa
-    
+    push dword 0
+    push dword 0x80
+    SAVE_CONTEXT
+    push esp                            ; syscall_handler(frame) reads the
+    call syscall_handler                ; args from the frame and stores the
+    add esp, 4                          ; result into frame->eax
+    RESTORE_CONTEXT
     iret
 
-; ========== Context Switch ==========
+; ------------------------------------------------------ context switching ---
+; void switch_context(cpu_context_t *old, cpu_context_t *new)
+;   cpu_context_t { u32 esp; }  – we only need to save the kernel ESP: all
+;   callee-saved registers and the return address live on the stack.
 global switch_context
 switch_context:
-    ; Parameters: old_regs (ESP+4), new_regs (ESP+8)
-    
-    mov eax, [esp + 4]  ; old_regs
+    mov eax, [esp + 4]                  ; old
+    mov edx, [esp + 8]                  ; new
+    push ebp
+    push ebx
+    push esi
+    push edi
+    pushfd
     test eax, eax
-    jz .load_new
-    
-    ; Save current context
-    mov [eax + 0], ebx
-    mov [eax + 4], ecx
-    mov [eax + 8], edx
-    mov [eax + 12], esi
-    mov [eax + 16], edi
-    mov [eax + 20], ebp
-    mov [eax + 24], esp
-    
-    pushf
-    pop dword [eax + 32]  ; EFLAGS
-    
-    mov ecx, [esp]
-    mov [eax + 28], ecx   ; EIP (return address)
-    
-    mov cx, ds
-    mov [eax + 36], cx
-    mov cx, es
-    mov [eax + 40], cx
-    mov cx, fs
-    mov [eax + 44], cx
-    mov cx, gs
-    mov [eax + 48], cx
-    mov cx, ss
-    mov [eax + 52], cx
-    
-.load_new:
-    mov eax, [esp + 8]  ; new_regs
-    
-    ; Load segment registers
-    mov cx, [eax + 36]
-    mov ds, cx
-    mov cx, [eax + 40]
-    mov es, cx
-    mov cx, [eax + 44]
-    mov fs, cx
-    mov cx, [eax + 48]
-    mov gs, cx
-    
-    ; Load general registers
-    mov ebx, [eax + 0]
-    mov ecx, [eax + 4]
-    mov edx, [eax + 8]
-    mov esi, [eax + 12]
-    mov edi, [eax + 16]
-    mov ebp, [eax + 20]
-    
-    ; Load CR3 if present
-    mov ecx, [eax + 56]
-    test ecx, ecx
-    jz .no_cr3
-    mov cr3, ecx
-.no_cr3:
-    
-    ; Prepare stack for iret
-    mov esp, [eax + 24]
-    
-    push dword [eax + 52]  ; SS
-    push dword [eax + 24]  ; ESP
-    push dword [eax + 32]  ; EFLAGS
-    push dword [eax + 36]  ; CS (use DS for now)
-    push dword [eax + 28]  ; EIP
-    
-    ; Load EAX last
-    mov eax, [eax + 0]
-    
-    iret
+    jz .load
+    mov [eax], esp
+.load:
+    mov esp, [edx]
+    popfd
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret
 
-; ========== Atomic Operations ==========
-global atomic_increment
+; ------------------------------------------------------------ atomics -------
+global atomic_increment                 ; u32 atomic_increment(u32 *p)
 atomic_increment:
-    mov eax, [esp + 4]
-    lock inc dword [eax]
+    mov edx, [esp + 4]
+    mov eax, 1
+    lock xadd [edx], eax
+    inc eax
     ret
 
-global atomic_decrement
+global atomic_decrement                 ; u32 atomic_decrement(u32 *p)
 atomic_decrement:
-    mov eax, [esp + 4]
-    lock dec dword [eax]
+    mov edx, [esp + 4]
+    mov eax, -1
+    lock xadd [edx], eax
+    dec eax
     ret
 
-global atomic_exchange
+global atomic_exchange                  ; u32 atomic_exchange(u32 *p, u32 v)
 atomic_exchange:
     mov ecx, [esp + 4]
     mov eax, [esp + 8]
     xchg [ecx], eax
     ret
 
-global atomic_compare_exchange
+global atomic_compare_exchange          ; bool (u32 *p, u32 expected, u32 desired)
 atomic_compare_exchange:
     mov edx, [esp + 4]
     mov eax, [esp + 8]
@@ -288,7 +208,28 @@ atomic_compare_exchange:
     movzx eax, al
     ret
 
-; ========== CPU Control ==========
+; ------------------------------------------------------------ spinlocks -----
+global spinlock_acquire
+spinlock_acquire:
+    mov edx, [esp + 4]
+.retry:
+    lock bts dword [edx], 0
+    jnc .done
+.spin:
+    pause
+    test dword [edx], 1
+    jnz .spin
+    jmp .retry
+.done:
+    ret
+
+global spinlock_release
+spinlock_release:
+    mov edx, [esp + 4]
+    mov dword [edx], 0
+    ret
+
+; ------------------------------------------------------------ CPU control ---
 global enable_interrupts
 enable_interrupts:
     sti
@@ -306,34 +247,16 @@ halt:
 
 global get_eflags
 get_eflags:
-    pushf
+    pushfd
     pop eax
     ret
 
 global set_eflags
 set_eflags:
-    mov eax, [esp + 4]
-    push eax
-    popf
+    push dword [esp + 4]
+    popfd
     ret
 
-; ========== Memory Barriers ==========
-global memory_barrier
-memory_barrier:
-    mfence
-    ret
-
-global read_barrier
-read_barrier:
-    lfence
-    ret
-
-global write_barrier
-write_barrier:
-    sfence
-    ret
-
-; ========== CPUID ==========
 global cpuid_available
 cpuid_available:
     pushfd
@@ -344,83 +267,66 @@ cpuid_available:
     popfd
     pushfd
     pop eax
+    push ecx
+    popfd
     xor eax, ecx
-    jz .no_cpuid
-    mov eax, 1
-    ret
-.no_cpuid:
-    xor eax, eax
+    setnz al
+    movzx eax, al
     ret
 
-global get_cpuid
+global get_cpuid                        ; void get_cpuid(u32 leaf, u32 out[4])
 get_cpuid:
     push ebx
-    push ecx
-    push edx
     push edi
-    
-    mov eax, [esp + 20]  ; function
-    mov edi, [esp + 24]  ; output pointer
-    
+    mov eax, [esp + 12]
+    mov edi, [esp + 16]
+    xor ecx, ecx
     cpuid
-    
-    mov [edi + 0], eax
+    mov [edi], eax
     mov [edi + 4], ebx
     mov [edi + 8], ecx
     mov [edi + 12], edx
-    
     pop edi
-    pop edx
-    pop ecx
     pop ebx
     ret
 
-; ========== TSC ==========
-global read_tsc
+global read_tsc                         ; u64 read_tsc(void)  -> EDX:EAX
 read_tsc:
     rdtsc
     ret
 
-; ========== CR Registers ==========
 global get_cr0
 get_cr0:
     mov eax, cr0
     ret
-
 global set_cr0
 set_cr0:
     mov eax, [esp + 4]
     mov cr0, eax
     ret
-
 global get_cr2
 get_cr2:
     mov eax, cr2
     ret
-
 global get_cr3
 get_cr3:
     mov eax, cr3
     ret
-
 global set_cr3
 set_cr3:
     mov eax, [esp + 4]
     mov cr3, eax
     ret
-
 global get_cr4
 get_cr4:
     mov eax, cr4
     ret
-
 global set_cr4
 set_cr4:
     mov eax, [esp + 4]
     mov cr4, eax
     ret
 
-; ========== TLB ==========
 global flush_tlb
 flush_tlb:
     mov eax, cr3
@@ -433,11 +339,18 @@ flush_tlb_single:
     invlpg [eax]
     ret
 
-; ========== GDT/IDT ==========
-global load_gdt
+global load_gdt                         ; void load_gdt(gdt_ptr_t *p)
 load_gdt:
     mov eax, [esp + 4]
     lgdt [eax]
+    mov ax, KERNEL_DS
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    jmp 0x08:.flush
+.flush:
     ret
 
 global load_idt
@@ -452,103 +365,40 @@ load_tr:
     ltr ax
     ret
 
-; ========== Port I/O with Barriers ==========
-global io_outb
-io_outb:
-    mov dx, [esp + 4]
-    mov al, [esp + 8]
-    out dx, al
-    ret
-
-global io_inb
-io_inb:
-    mov dx, [esp + 4]
-    in al, dx
-    ret
-
-global io_outw
-io_outw:
-    mov dx, [esp + 4]
-    mov ax, [esp + 8]
-    out dx, ax
-    ret
-
-global io_inw
-io_inw:
-    mov dx, [esp + 4]
-    in ax, dx
-    ret
-
-global io_outl
-io_outl:
-    mov dx, [esp + 4]
-    mov eax, [esp + 8]
-    out dx, eax
-    ret
-
-global io_inl
-io_inl:
-    mov dx, [esp + 4]
-    in eax, dx
-    ret
-
-; ========== Fast Memcpy ==========
-global fast_memcpy
+; ------------------------------------------------------------ memory ops ----
+global fast_memcpy                      ; void fast_memcpy(void *d, const void *s, u32 n)
 fast_memcpy:
     push edi
     push esi
-    
-    mov edi, [esp + 12]  ; dest
-    mov esi, [esp + 16]  ; src
-    mov ecx, [esp + 20]  ; size
-    
+    mov edi, [esp + 12]
+    mov esi, [esp + 16]
+    mov ecx, [esp + 20]
     cld
+    mov edx, ecx
+    shr ecx, 2
+    rep movsd
+    mov ecx, edx
+    and ecx, 3
     rep movsb
-    
     pop esi
     pop edi
     ret
 
-; ========== Fast Memset ==========
-global fast_memset
+global fast_memset                      ; void fast_memset(void *d, u8 v, u32 n)
 fast_memset:
     push edi
-    
-    mov edi, [esp + 8]   ; dest
-    mov al, [esp + 12]   ; value
-    mov ecx, [esp + 16]  ; size
-    
+    mov edi, [esp + 8]
+    movzx eax, byte [esp + 12]
+    mov ecx, [esp + 16]
+    mov edx, ecx
+    imul eax, 0x01010101
     cld
+    shr ecx, 2
+    rep stosd
+    mov ecx, edx
+    and ecx, 3
     rep stosb
-    
     pop edi
     ret
 
-; ========== Spinlock ==========
-global spinlock_acquire
-spinlock_acquire:
-    mov eax, [esp + 4]
-.retry:
-    lock bts dword [eax], 0
-    jc .retry
-    ret
-
-global spinlock_release
-spinlock_release:
-    mov eax, [esp + 4]
-    lock btr dword [eax], 0
-    ret
-
-; ========== Stack Switching ==========
-global switch_to_kernel_stack
-switch_to_kernel_stack:
-    mov eax, [esp + 4]  ; new stack
-    mov esp, eax
-    ret
-
-; ========== Panic Handler ==========
-global kernel_panic
-kernel_panic:
-    cli
-    hlt
-    jmp $
+section .note.GNU-stack noalloc noexec nowrite progbits

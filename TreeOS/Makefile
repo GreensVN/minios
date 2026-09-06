@@ -1,358 +1,161 @@
-# Makefile for MiniOS v4.0 ULTIMATE
-# Complete build system with all features
+# =============================================================================
+#  Makefile - MiniOS v4.1
+#
+#  make            build bootloader + kernel + disk image (output/minios.img)
+#  make run        boot the image in QEMU
+#  make run-serial boot with the console mirrored to your terminal (-nographic)
+#  make iso        GRUB ISO (needs grub-mkrescue + xorriso)
+#  make test       sanity checks on the produced binaries
+#  make debug      QEMU + GDB stub on :1234
+# =============================================================================
 
-# ========== Toolchain ==========
-ASM := nasm
-CC := gcc
-CXX := g++
-LD := ld
-JAVAC := javac
-PYTHON := python3
-CSC := mcs
-QEMU := qemu-system-i386
-GRUB_MKRESCUE := grub-mkrescue
-OBJCOPY := objcopy
-OBJDUMP := objdump
+# ---------------------------------------------------------------- toolchain --
+CROSS    ?=
+ASM      := nasm
+CC       := $(CROSS)gcc
+LD       := $(CROSS)ld
+OBJCOPY  := $(CROSS)objcopy
+OBJDUMP  := $(CROSS)objdump
+QEMU     ?= qemu-system-i386
+GRUB_MKRESCUE ?= grub-mkrescue
 
-# ========== Flags ==========
-ASMFLAGS := -f bin
+# ---------------------------------------------------------------- flags ------
+ASMFLAGS_BIN := -f bin
 ASMFLAGS_ELF := -f elf32
-CFLAGS := -m32 -c -ffreestanding -fno-pie -fno-stack-protector \
-          -O2 -Wall -Wextra -nostdlib -nostdinc -fno-builtin \
-          -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
-          -fno-strict-aliasing -fno-common
-CXXFLAGS := $(CFLAGS) -fno-exceptions -fno-rtti
-LDFLAGS := -m elf_i386 -nostdlib -T linker.ld
-QEMUFLAGS := -m 256M -rtc base=localtime -boot d
+COMMONFLAGS := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
+            -fno-builtin -nostdlib -fno-common -fno-strict-aliasing \
+            -fno-asynchronous-unwind-tables -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
+            -O2 -Wall -Wextra -MMD -MP
+CFLAGS   := $(COMMONFLAGS) -std=gnu11
+CXXFLAGS := $(COMMONFLAGS) -std=gnu++17 -fno-exceptions -fno-rtti -fno-threadsafe-statics \
+            -fno-use-cxa-atexit -Wno-sized-deallocation
+LDFLAGS  := -m elf_i386 -nostdlib -T linker.ld --no-warn-rwx-segments -z noexecstack
+QEMUFLAGS ?= -m 256M -serial stdio -no-reboot
 
-# ========== Directories ==========
-BUILD_DIR := build
-OUTPUT_DIR := output
-ISO_DIR := iso
-ISO_BOOT := $(ISO_DIR)/boot
-ISO_GRUB := $(ISO_BOOT)/grub
-DOCS_DIR := docs
-TESTS_DIR := tests
-SRC_DIR := src
+# ---------------------------------------------------------------- files ------
+BUILD  := build
+OUT    := output
+ISO    := iso
 
-# ========== Source Files ==========
-BOOTLOADER_SRC := bootloader_ultimate.asm
-KERNEL_SRC := kernel_v4_ultimate.c
-INTERRUPTS_SRC := interrupts_complete.asm
-LINKER_SCRIPT := linker.ld
+BOOT_SRC   := Bootloader.asm
+ENTRY_SRC  := entry.asm
+INTR_SRC   := interrupts.asm
+KERNEL_SRC := Kernel.c
+DRIVER_SRC := driver_manager.cpp
 
-# ========== Build Targets ==========
-BOOTLOADER_BIN := $(BUILD_DIR)/bootloader.bin
-KERNEL_OBJ := $(BUILD_DIR)/kernel.o
-INTERRUPTS_OBJ := $(BUILD_DIR)/interrupts.o
-KERNEL_ELF := $(BUILD_DIR)/kernel.elf
-KERNEL_BIN := $(BUILD_DIR)/kernel.bin
-DISK_IMAGE := $(OUTPUT_DIR)/minios.img
-ISO_IMAGE := $(OUTPUT_DIR)/minios.iso
+BOOT_BIN   := $(BUILD)/bootloader.bin
+OBJS       := $(BUILD)/entry.o $(BUILD)/kernel.o $(BUILD)/interrupts.o $(BUILD)/driver_manager.o
+KERNEL_ELF := $(BUILD)/kernel.elf
+KERNEL_BIN := $(BUILD)/kernel.bin
+DISK_IMAGE := $(OUT)/minios.img
+ISO_IMAGE  := $(OUT)/minios.iso
 
-# ========== Colors ==========
-RED := \033[0;31m
+KERNEL_LBA   := 8          # must match KERNEL_LBA in Bootloader.asm
+IMAGE_SECTORS := 16384     # 8 MiB
+
 GREEN := \033[0;32m
-YELLOW := \033[1;33m
-BLUE := \033[0;34m
-CYAN := \033[0;36m
-MAGENTA := \033[0;35m
-NC := \033[0m
+BLUE  := \033[0;34m
+YEL   := \033[1;33m
+RED   := \033[0;31m
+NC    := \033[0m
 
-# ========== Default Target ==========
 .PHONY: all
-all: banner check-deps directories bootloader kernel disk-image success
+all: $(DISK_IMAGE)
+	@printf "$(GREEN)[done]$(NC) %s  (kernel %s bytes)\n" "$(DISK_IMAGE)" "$$(stat -c %s $(KERNEL_BIN))"
 
-# ========== Banner ==========
-.PHONY: banner
-banner:
-	@echo "$(CYAN)"
-	@echo "╔════════════════════════════════════════════════════════════════╗"
-	@echo "║                                                                ║"
-	@echo "║     ███╗   ███╗██╗███╗   ██╗██╗     ██████╗ ███████╗         ║"
-	@echo "║     ████╗ ████║██║████╗  ██║██║    ██╔═══██╗██╔════╝         ║"
-	@echo "║     ██╔████╔██║██║██╔██╗ ██║██║    ██║   ██║███████╗         ║"
-	@echo "║     ██║╚██╔╝██║██║██║╚██╗██║██║    ██║   ██║╚════██║         ║"
-	@echo "║     ██║ ╚═╝ ██║██║██║ ╚████║██║    ╚██████╔╝███████║         ║"
-	@echo "║     ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝     ╚═════╝ ╚══════╝         ║"
-	@echo "║                                                                ║"
-	@echo "║              Build System v4.0 ULTIMATE                        ║"
-	@echo "║                                                                ║"
-	@echo "╚════════════════════════════════════════════════════════════════╝"
-	@echo "$(NC)"
+# ---------------------------------------------------------------- rules ------
+$(BUILD) $(OUT):
+	@mkdir -p $@
 
-# ========== Check Dependencies ==========
-.PHONY: check-deps
-check-deps:
-	@echo "$(BLUE)[*] Checking dependencies...$(NC)"
-	@command -v $(ASM) >/dev/null 2>&1 || { echo "$(RED)[✗] nasm not found$(NC)"; exit 1; }
-	@command -v $(CC) >/dev/null 2>&1 || { echo "$(RED)[✗] gcc not found$(NC)"; exit 1; }
-	@command -v $(LD) >/dev/null 2>&1 || { echo "$(RED)[✗] ld not found$(NC)"; exit 1; }
-	@command -v $(QEMU) >/dev/null 2>&1 || echo "$(YELLOW)[!] qemu not found (optional)$(NC)"
-	@echo "$(GREEN)[✓] All required dependencies found$(NC)"
+$(BOOT_BIN): $(BOOT_SRC) | $(BUILD)
+	@printf "$(BLUE)[asm]$(NC) %s\n" $<
+	@$(ASM) $(ASMFLAGS_BIN) $< -o $@
 
-# ========== Create Directories ==========
-.PHONY: directories
-directories:
-	@mkdir -p $(BUILD_DIR) $(OUTPUT_DIR) $(ISO_DIR) $(ISO_BOOT) $(ISO_GRUB)
-	@mkdir -p $(DOCS_DIR) $(TESTS_DIR)
-
-# ========== Bootloader ==========
-.PHONY: bootloader
-bootloader: $(BOOTLOADER_BIN)
-
-$(BOOTLOADER_BIN): $(BOOTLOADER_SRC) | directories
-	@echo "$(BLUE)[*] Assembling bootloader...$(NC)"
-	@$(ASM) $(ASMFLAGS) $< -o $@
-	@echo "$(GREEN)[✓] Bootloader: $@ ($(shell ls -lh $@ | awk '{print $$5}'))$(NC)"
-
-# ========== Kernel ==========
-.PHONY: kernel
-kernel: $(KERNEL_BIN)
-
-$(INTERRUPTS_OBJ): $(INTERRUPTS_SRC) | directories
-	@echo "$(BLUE)[*] Assembling interrupt handlers...$(NC)"
+$(BUILD)/%.o: %.asm | $(BUILD)
+	@printf "$(BLUE)[asm]$(NC) %s\n" $<
 	@$(ASM) $(ASMFLAGS_ELF) $< -o $@
-	@echo "$(GREEN)[✓] Interrupts: $@$(NC)"
 
-$(KERNEL_OBJ): $(KERNEL_SRC) | directories
-	@echo "$(BLUE)[*] Compiling kernel...$(NC)"
-	@$(CC) $(CFLAGS) $< -o $@
-	@echo "$(GREEN)[✓] Kernel object: $@$(NC)"
+$(BUILD)/kernel.o: $(KERNEL_SRC) kernel.h | $(BUILD)
+	@printf "$(BLUE)[cc ]$(NC) %s\n" $<
+	@$(CC) $(CFLAGS) -c $< -o $@
 
-$(KERNEL_ELF): $(KERNEL_OBJ) $(INTERRUPTS_OBJ) $(LINKER_SCRIPT) | directories
-	@echo "$(BLUE)[*] Linking kernel...$(NC)"
-	@$(LD) $(LDFLAGS) $(KERNEL_OBJ) $(INTERRUPTS_OBJ) -o $@
-	@echo "$(GREEN)[✓] Kernel ELF: $@$(NC)"
+$(BUILD)/driver_manager.o: $(DRIVER_SRC) driver_manager.h kernel.h | $(BUILD)
+	@printf "$(BLUE)[c++]$(NC) %s\n" $<
+	@$(CC) $(CXXFLAGS) -c $< -o $@
+
+$(KERNEL_ELF): $(OBJS) linker.ld
+	@printf "$(BLUE)[ld ]$(NC) %s\n" $@
+	@$(LD) $(LDFLAGS) $(OBJS) -o $@
 
 $(KERNEL_BIN): $(KERNEL_ELF)
-	@echo "$(BLUE)[*] Creating kernel binary...$(NC)"
 	@$(OBJCOPY) -O binary $< $@
-	@echo "$(GREEN)[✓] Kernel binary: $@ ($(shell ls -lh $@ | awk '{print $$5}'))$(NC)"
 
-# ========== Disk Image ==========
-.PHONY: disk-image
-disk-image: $(DISK_IMAGE)
+$(DISK_IMAGE): $(BOOT_BIN) $(KERNEL_BIN) | $(OUT)
+	@printf "$(BLUE)[img]$(NC) %s\n" $@
+	@dd if=/dev/zero of=$@ bs=512 count=$(IMAGE_SECTORS) status=none
+	@dd if=$(BOOT_BIN)   of=$@ conv=notrunc status=none
+	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_LBA) conv=notrunc status=none
 
-$(DISK_IMAGE): $(BOOTLOADER_BIN) $(KERNEL_BIN) | directories
-	@echo "$(BLUE)[*] Creating disk image...$(NC)"
-	@dd if=/dev/zero of=$@ bs=512 count=40960 status=none 2>/dev/null
-	@dd if=$(BOOTLOADER_BIN) of=$@ conv=notrunc bs=512 count=1 status=none 2>/dev/null
-	@dd if=$(KERNEL_BIN) of=$@ seek=2 conv=notrunc bs=512 status=none 2>/dev/null
-	@echo "$(GREEN)[✓] Disk image: $@ (20 MB)$(NC)"
+# ---------------------------------------------------------------- ISO --------
+$(ISO)/boot/grub/grub.cfg:
+	@mkdir -p $(dir $@)
+	@printf 'set timeout=3\nset default=0\nmenuentry "MiniOS v4.1" {\n    multiboot /boot/kernel.elf\n    boot\n}\n' > $@
 
-# ========== ISO Image ==========
 .PHONY: iso
 iso: $(ISO_IMAGE)
+$(ISO_IMAGE): $(KERNEL_ELF) $(ISO)/boot/grub/grub.cfg | $(OUT)
+	@cp $(KERNEL_ELF) $(ISO)/boot/kernel.elf
+	@$(GRUB_MKRESCUE) -o $@ $(ISO) 2>/dev/null || \
+	    { printf "$(RED)[err]$(NC) grub-mkrescue failed (install grub-pc-bin + xorriso)\n"; exit 1; }
+	@printf "$(GREEN)[iso]$(NC) %s\n" $@
 
-$(ISO_GRUB)/grub.cfg: | directories
-	@echo "$(BLUE)[*] Creating GRUB configuration...$(NC)"
-	@echo "set timeout=5" > $@
-	@echo "set default=0" >> $@
-	@echo "" >> $@
-	@echo "menuentry \"MiniOS v4.0 ULTIMATE\" {" >> $@
-	@echo "    multiboot /boot/kernel.bin" >> $@
-	@echo "    boot" >> $@
-	@echo "}" >> $@
-
-$(ISO_IMAGE): $(KERNEL_BIN) $(ISO_GRUB)/grub.cfg | directories
-	@echo "$(BLUE)[*] Creating ISO image...$(NC)"
-	@cp $(KERNEL_BIN) $(ISO_BOOT)/kernel.bin
-	@$(GRUB_MKRESCUE) -o $@ $(ISO_DIR) 2>/dev/null || \
-		echo "$(YELLOW)[!] grub-mkrescue not available$(NC)"
-	@echo "$(GREEN)[✓] ISO image: $@$(NC)"
-
-# ========== Run Targets ==========
-.PHONY: run
+# ---------------------------------------------------------------- run --------
+.PHONY: run run-serial run-iso debug
 run: $(DISK_IMAGE)
-	@echo "$(CYAN)[*] Starting QEMU...$(NC)"
-	@echo "$(YELLOW)[!] Press Ctrl+Alt+G to release mouse$(NC)"
-	@echo "$(YELLOW)[!] Close window to exit$(NC)"
-	@echo ""
-	@$(QEMU) -drive file=$(DISK_IMAGE),format=raw $(QEMUFLAGS)
+	$(QEMU) -drive file=$(DISK_IMAGE),format=raw $(QEMUFLAGS)
 
-.PHONY: run-iso
-run-iso: $(ISO_IMAGE)
-	@echo "$(CYAN)[*] Starting QEMU with ISO...$(NC)"
-	@$(QEMU) -cdrom $(ISO_IMAGE) $(QEMUFLAGS)
-
-.PHONY: run-debug
-run-debug: $(DISK_IMAGE)
-	@echo "$(CYAN)[*] Starting QEMU in debug mode...$(NC)"
-	@echo "$(YELLOW)[!] Connect GDB to localhost:1234$(NC)"
-	@$(QEMU) -drive file=$(DISK_IMAGE),format=raw $(QEMUFLAGS) -s -S
-
-.PHONY: run-serial
 run-serial: $(DISK_IMAGE)
-	@echo "$(CYAN)[*] Starting QEMU with serial output...$(NC)"
-	@$(QEMU) -drive file=$(DISK_IMAGE),format=raw $(QEMUFLAGS) -serial stdio
+	$(QEMU) -drive file=$(DISK_IMAGE),format=raw -m 256M -nographic -no-reboot
 
-.PHONY: run-vnc
-run-vnc: $(DISK_IMAGE)
-	@echo "$(CYAN)[*] Starting QEMU with VNC on :0...$(NC)"
-	@$(QEMU) -drive file=$(DISK_IMAGE),format=raw $(QEMUFLAGS) -vnc :0
+run-iso: $(ISO_IMAGE)
+	$(QEMU) -cdrom $(ISO_IMAGE) $(QEMUFLAGS)
 
-# ========== Debug Targets ==========
-.PHONY: debug
-debug: $(KERNEL_ELF)
-	@echo "$(CYAN)[*] Starting GDB...$(NC)"
-	@gdb -ex "target remote localhost:1234" \
-	     -ex "symbol-file $(KERNEL_ELF)" \
-	     -ex "break kernel_main" \
-	     -ex "layout src"
+debug: $(DISK_IMAGE)
+	@printf "$(YEL)GDB:$(NC) gdb $(KERNEL_ELF) -ex 'target remote :1234'\n"
+	$(QEMU) -drive file=$(DISK_IMAGE),format=raw $(QEMUFLAGS) -s -S
 
-.PHONY: disassemble
-disassemble: $(KERNEL_ELF)
-	@echo "$(CYAN)[*] Disassembling kernel...$(NC)"
-	@$(OBJDUMP) -d $(KERNEL_ELF) > $(BUILD_DIR)/kernel.asm
-	@echo "$(GREEN)[✓] Disassembly: $(BUILD_DIR)/kernel.asm$(NC)"
-
-.PHONY: symbols
-symbols: $(KERNEL_ELF)
-	@echo "$(CYAN)[*] Extracting symbols...$(NC)"
-	@nm $(KERNEL_ELF) > $(BUILD_DIR)/kernel.sym
-	@echo "$(GREEN)[✓] Symbols: $(BUILD_DIR)/kernel.sym$(NC)"
-
-.PHONY: hexdump
-hexdump: $(DISK_IMAGE)
-	@echo "$(CYAN)[*] Hex dump of boot sector:$(NC)"
-	@hexdump -C $(DISK_IMAGE) | head -n 32
-
-# ========== USB Boot ==========
-.PHONY: usb-info
-usb-info:
-	@echo "$(YELLOW)╔════════════════════════════════════════════════════════════════╗$(NC)"
-	@echo "$(YELLOW)║              USB Boot Instructions                            ║$(NC)"
-	@echo "$(YELLOW)╚════════════════════════════════════════════════════════════════╝$(NC)"
-	@echo ""
-	@echo "$(RED)⚠️  WARNING: This will ERASE all data on the USB drive!$(NC)"
-	@echo ""
-	@echo "1. Find your USB device:"
-	@echo "   $(CYAN)lsblk$(NC) or $(CYAN)sudo fdisk -l$(NC)"
-	@echo ""
-	@echo "2. Write image (replace /dev/sdX with your USB device):"
-	@echo "   $(CYAN)sudo dd if=$(DISK_IMAGE) of=/dev/sdX bs=4M status=progress$(NC)"
-	@echo "   $(CYAN)sudo sync$(NC)"
-	@echo ""
-	@echo "3. Boot from USB"
-	@echo ""
-
-.PHONY: usb-write
-usb-write: $(DISK_IMAGE)
-	@echo "$(RED)⚠️  This will write to USB device!$(NC)"
-	@echo -n "Enter USB device (e.g., /dev/sdb): "
-	@read device; \
-	if [ -b "$$device" ]; then \
-		echo "$(YELLOW)Writing to $$device...$(NC)"; \
-		sudo dd if=$(DISK_IMAGE) of=$$device bs=4M status=progress && \
-		sudo sync && \
-		echo "$(GREEN)[✓] USB written successfully$(NC)"; \
-	else \
-		echo "$(RED)[✗] Invalid device: $$device$(NC)"; \
-	fi
-
-# ========== Statistics ==========
-.PHONY: stats
-stats: $(KERNEL_ELF)
-	@echo "$(CYAN)╔════════════════════════════════════════════════════════════════╗$(NC)"
-	@echo "$(CYAN)║                   Build Statistics                             ║$(NC)"
-	@echo "$(CYAN)╚════════════════════════════════════════════════════════════════╝$(NC)"
-	@echo ""
-	@echo "$(YELLOW)Bootloader:$(NC)"
-	@ls -lh $(BOOTLOADER_BIN) 2>/dev/null | awk '{print "  Size: " $$5}'
-	@echo ""
-	@echo "$(YELLOW)Kernel:$(NC)"
-	@size $(KERNEL_ELF) 2>/dev/null || true
-	@ls -lh $(KERNEL_BIN) 2>/dev/null | awk '{print "  Binary size: " $$5}'
-	@echo ""
-	@echo "$(YELLOW)Disk Image:$(NC)"
-	@ls -lh $(DISK_IMAGE) 2>/dev/null | awk '{print "  Size: " $$5}'
-	@echo ""
-	@echo "$(YELLOW)Source Files:$(NC)"
-	@wc -l *.asm *.c *.h 2>/dev/null | tail -n 1 | awk '{print "  Total lines: " $$1}' || true
-	@echo ""
-
-# ========== Test ==========
+# ---------------------------------------------------------------- misc -------
 .PHONY: test
 test: $(DISK_IMAGE)
-	@echo "$(CYAN)[*] Running tests...$(NC)"
-	@echo "$(BLUE)[TEST] Boot signature...$(NC)"
-	@hexdump -n 2 -s 510 -e '/1 "%02x"' $(BOOTLOADER_BIN) | grep -q "55aa" && \
-		echo "$(GREEN)[✓] Boot signature valid$(NC)" || \
-		echo "$(RED)[✗] Boot signature invalid$(NC)"
-	@echo "$(BLUE)[TEST] Kernel magic...$(NC)"
-	@hexdump -n 4 -e '/4 "%08x\n"' $(KERNEL_BIN) | grep -q "deadbeef" && \
-		echo "$(GREEN)[✓] Kernel magic valid$(NC)" || \
-		echo "$(YELLOW)[!] Kernel magic not found$(NC)"
+	@sig=$$(od -An -tx1 -j510 -N2 $(BOOT_BIN) | tr -d ' \n'); \
+	 [ "$$sig" = "55aa" ] && printf "$(GREEN)[ok ]$(NC) boot signature\n" || { printf "$(RED)[!!]$(NC) boot signature $$sig\n"; exit 1; }
+	@sz=$$(stat -c %s $(BOOT_BIN)); [ "$$sz" = 4096 ] && printf "$(GREEN)[ok ]$(NC) bootloader is 4096 bytes\n" || { printf "$(RED)[!!]$(NC) bootloader size $$sz\n"; exit 1; }
+	@magic=$$(od -An -tx4 -j8 -N4 $(KERNEL_BIN) | tr -d ' \n'); \
+	 [ "$$magic" = "deadbeef" ] && printf "$(GREEN)[ok ]$(NC) kernel magic\n" || { printf "$(RED)[!!]$(NC) kernel magic $$magic\n"; exit 1; }
+	@mb=$$(od -An -tx4 -j24 -N4 $(KERNEL_BIN) | tr -d ' \n'); \
+	 [ "$$mb" = "1badb002" ] && printf "$(GREEN)[ok ]$(NC) multiboot header\n" || { printf "$(RED)[!!]$(NC) multiboot header $$mb\n"; exit 1; }
+	@sz=$$(stat -c %s $(KERNEL_BIN)); [ $$sz -le 458752 ] && printf "$(GREEN)[ok ]$(NC) kernel fits the loader window (%s bytes)\n" $$sz || { printf "$(RED)[!!]$(NC) kernel too big\n"; exit 1; }
 
-# ========== Clean ==========
-.PHONY: clean
+.PHONY: disassemble symbols stats
+disassemble: $(KERNEL_ELF)
+	@$(OBJDUMP) -d $< > $(BUILD)/kernel.lst && printf "$(GREEN)[ok ]$(NC) %s\n" $(BUILD)/kernel.lst
+symbols: $(KERNEL_ELF)
+	@nm -n $< > $(BUILD)/kernel.sym && printf "$(GREEN)[ok ]$(NC) %s\n" $(BUILD)/kernel.sym
+stats: $(KERNEL_ELF) $(BOOT_BIN) $(DISK_IMAGE)
+	@size $(KERNEL_ELF)
+	@ls -l $(BOOT_BIN) $(KERNEL_BIN) $(DISK_IMAGE)
+
+.PHONY: usb-info
+usb-info:
+	@printf "$(YEL)WARNING: this erases the target drive!$(NC)\n"
+	@printf "  lsblk\n  sudo dd if=$(DISK_IMAGE) of=/dev/sdX bs=4M status=progress conv=fsync\n"
+
+.PHONY: clean distclean help
 clean:
-	@echo "$(YELLOW)[*] Cleaning build files...$(NC)"
-	@rm -rf $(BUILD_DIR) $(OUTPUT_DIR)
-	@echo "$(GREEN)[✓] Clean complete$(NC)"
-
-.PHONY: distclean
+	@rm -rf $(BUILD) $(OUT)
 distclean: clean
-	@echo "$(YELLOW)[*] Removing all generated files...$(NC)"
-	@rm -rf $(ISO_DIR)
-	@echo "$(GREEN)[✓] Distclean complete$(NC)"
-
-# ========== Success Message ==========
-.PHONY: success
-success:
-	@echo ""
-	@echo "$(GREEN)╔════════════════════════════════════════════════════════════════╗$(NC)"
-	@echo "$(GREEN)║                 BUILD SUCCESSFUL! 🎉                            ║$(NC)"
-	@echo "$(GREEN)╚════════════════════════════════════════════════════════════════╝$(NC)"
-	@echo ""
-	@echo "$(CYAN)Your OS is ready!$(NC)"
-	@echo ""
-	@echo "$(YELLOW)Quick Start:$(NC)"
-	@echo "  $(CYAN)make run$(NC)         - Run in QEMU"
-	@echo "  $(CYAN)make run-debug$(NC)   - Run with GDB"
-	@echo "  $(CYAN)make stats$(NC)       - Show statistics"
-	@echo "  $(CYAN)make usb-info$(NC)    - USB boot instructions"
-	@echo ""
-
-# ========== Help ==========
-.PHONY: help
+	@rm -rf $(ISO)
 help:
-	@echo "$(CYAN)╔════════════════════════════════════════════════════════════════╗$(NC)"
-	@echo "$(CYAN)║                   MiniOS v4.0 ULTIMATE                         ║$(NC)"
-	@echo "$(CYAN)╚════════════════════════════════════════════════════════════════╝$(NC)"
-	@echo ""
-	@echo "$(YELLOW)Build Targets:$(NC)"
-	@echo "  all             - Build everything"
-	@echo "  bootloader      - Build bootloader only"
-	@echo "  kernel          - Build kernel only"
-	@echo "  disk-image      - Create disk image"
-	@echo "  iso             - Create ISO image"
-	@echo ""
-	@echo "$(YELLOW)Run Targets:$(NC)"
-	@echo "  run             - Run in QEMU"
-	@echo "  run-iso         - Run ISO in QEMU"
-	@echo "  run-debug       - Run with GDB support"
-	@echo "  run-serial      - Run with serial output"
-	@echo ""
-	@echo "$(YELLOW)Debug Targets:$(NC)"
-	@echo "  debug           - Start GDB session"
-	@echo "  disassemble     - Disassemble kernel"
-	@echo "  symbols         - Extract symbol table"
-	@echo "  hexdump         - Hex dump of disk image"
-	@echo ""
-	@echo "$(YELLOW)Utility Targets:$(NC)"
-	@echo "  stats           - Show build statistics"
-	@echo "  test            - Run tests"
-	@echo "  usb-info        - USB boot instructions"
-	@echo "  clean           - Remove build files"
-	@echo "  distclean       - Remove all generated files"
-	@echo ""
+	@printf "targets: all run run-serial iso run-iso debug test disassemble symbols stats usb-info clean\n"
 
-.PHONY: info
-info: help
-
-.PHONY: version
-version:
-	@echo "MiniOS Build System v4.0 ULTIMATE"
-	@echo "Copyright (c) 2024 MiniOS Project"
+-include $(OBJS:.o=.d)

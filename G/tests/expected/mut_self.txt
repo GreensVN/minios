@@ -1,0 +1,2 @@
+sum=60 count=3 mean=20
+scaled=160

@@ -6,9 +6,6 @@ Công cụ giám sát và quản lý hệ thống nâng cao cho MiniOS
 
 import sys
 import time
-import json
-import socket
-import struct
 import random
 import threading
 from datetime import datetime
@@ -307,10 +304,57 @@ class FilesystemManager:
         
         return node
     
+    def resolve(self, path):
+        """Chuẩn hoá path (tương đối / tuyệt đối, '.' và '..')"""
+        if not path:
+            return self.current_path
+        base = [] if path.startswith('/') else [p for p in self.current_path.split('/') if p]
+        for part in path.split('/'):
+            if part in ('', '.'):
+                continue
+            if part == '..':
+                if base:
+                    base.pop()
+            else:
+                base.append(part)
+        return '/' + '/'.join(base)
+    
+    def cd(self, path):
+        """Đổi thư mục hiện tại"""
+        target = self.resolve(path)
+        node = self.get_node(target)
+        if node and node['type'] == 'dir':
+            self.current_path = target
+            return True
+        return False
+    
+    def tree(self, path=None, prefix=''):
+        """Trả về các dòng cây thư mục"""
+        node = self.get_node(self.resolve(path))
+        if not node or node['type'] != 'dir':
+            return []
+        lines = []
+        items = sorted(node['children'].items())
+        for i, (name, child) in enumerate(items):
+            last = i == len(items) - 1
+            lines.append(f"{prefix}{'└── ' if last else '├── '}{name}{'/' if child['type'] == 'dir' else ''}")
+            if child['type'] == 'dir':
+                lines.extend(self._tree_node(child, prefix + ('    ' if last else '│   ')))
+        return lines
+    
+    def _tree_node(self, node, prefix):
+        lines = []
+        items = sorted(node['children'].items())
+        for i, (name, child) in enumerate(items):
+            last = i == len(items) - 1
+            lines.append(f"{prefix}{'└── ' if last else '├── '}{name}{'/' if child['type'] == 'dir' else ''}")
+            if child['type'] == 'dir':
+                lines.extend(self._tree_node(child, prefix + ('    ' if last else '│   ')))
+        return lines
+    
     def ls(self, path=None):
         """List directory"""
-        if path is None:
-            path = self.current_path
+        path = self.resolve(path)
         
         node = self.get_node(path)
         if not node or node['type'] != 'dir':
@@ -326,23 +370,18 @@ class FilesystemManager:
     
     def mkdir(self, name, path=None):
         """Create directory"""
-        if path is None:
-            path = self.current_path
-        
-        node = self.get_node(path)
-        if node and node['type'] == 'dir':
+        node = self.get_node(self.resolve(path))
+        if node and node['type'] == 'dir' and name and '/' not in name and name not in node['children']:
             node['children'][name] = {'type': 'dir', 'children': {}}
             return True
         return False
     
     def touch(self, name, path=None):
         """Create file"""
-        if path is None:
-            path = self.current_path
-        
-        node = self.get_node(path)
-        if node and node['type'] == 'dir':
-            node['children'][name] = {'type': 'file', 'size': 0, 'content': ''}
+        node = self.get_node(self.resolve(path))
+        if node and node['type'] == 'dir' and name and '/' not in name:
+            if name not in node['children']:
+                node['children'][name] = {'type': 'file', 'size': 0, 'content': ''}
             return True
         return False
 
@@ -477,7 +516,7 @@ Type {Colors.YELLOW}'help'{Colors.RESET} for available commands or {Colors.YELLO
         disk = self.monitor.get_disk_info()
         
         print(f"\n{Colors.CYAN}{Colors.BOLD}╔═══════════════════════════════════════════════════════════╗")
-        print(f"║           MiniOS System Information v2.0                  ║")
+        print("║           MiniOS System Information v2.0                  ║")
         print(f"╚═══════════════════════════════════════════════════════════╝{Colors.RESET}")
         print(f"\n{Colors.BOLD}OS:{Colors.RESET}           MiniOS v2.0 Enhanced")
         print(f"{Colors.BOLD}Architecture:{Colors.RESET} x86 (32-bit)")
@@ -491,11 +530,14 @@ Type {Colors.YELLOW}'help'{Colors.RESET} for available commands or {Colors.YELLO
     
     def cmd_ls(self, args):
         """List directory"""
-        path = args[0] if args else None
+        paths = [a for a in args if not a.startswith('-')]
+        path = paths[0] if paths else None
+        if self.fs_manager.get_node(self.fs_manager.resolve(path)) is None:
+            print(f"{Colors.RED}ls: no such directory: {path}{Colors.RESET}")
+            return
         entries = self.fs_manager.ls(path)
-        
         if not entries:
-            print(f"{Colors.RED}Directory empty or not found{Colors.RESET}")
+            print("(empty)")
             return
         
         print()
@@ -503,6 +545,136 @@ Type {Colors.YELLOW}'help'{Colors.RESET} for available commands or {Colors.YELLO
             size_str = f"{size:>8}" if isinstance(size, int) else f"{size:>8}"
             print(f"{icon}  {name:<30} {size_str}")
         print()
+    
+    def cmd_about(self, args):
+        """About"""
+        print(f"\n{Colors.CYAN}{Colors.BOLD}MiniOS Shell v2.0{Colors.RESET} - host-side simulator of the MiniOS command shell.")
+        print("The real kernel lives in Kernel.c; build it with 'make' and run 'make run'.\n")
+    
+    def cmd_date(self, args):
+        """Ngày giờ hiện tại"""
+        print(datetime.now().strftime('%a %b %d %H:%M:%S %Y'))
+    
+    def cmd_uname(self, args):
+        """uname"""
+        print("MiniOS 4.1.0 i686 MiniOS-Shell" if args and args[0] == '-a' else "MiniOS")
+    
+    def cmd_kill(self, args):
+        """Kill process"""
+        if not args or not args[0].isdigit():
+            print(f"{Colors.RED}Usage: kill <pid>{Colors.RESET}")
+            return
+        pid = int(args[0])
+        if pid == 1:
+            print(f"{Colors.RED}Cannot kill kernel_idle (pid 1){Colors.RESET}")
+        elif self.process_manager.kill_process(pid):
+            print(f"Process {pid} terminated")
+        else:
+            print(f"{Colors.RED}No such process: {pid}{Colors.RESET}")
+    
+    def cmd_suspend(self, args):
+        """Suspend process"""
+        if not args or not args[0].isdigit() or not self.process_manager.suspend_process(int(args[0])):
+            print(f"{Colors.RED}Usage: suspend <pid>{Colors.RESET}")
+        else:
+            print(f"Process {args[0]} suspended")
+    
+    def cmd_resume(self, args):
+        """Resume process"""
+        if not args or not args[0].isdigit() or not self.process_manager.resume_process(int(args[0])):
+            print(f"{Colors.RED}Usage: resume <pid>{Colors.RESET}")
+        else:
+            print(f"Process {args[0]} resumed")
+    
+    def cmd_start(self, args):
+        """Start process"""
+        if not args:
+            print(f"{Colors.RED}Usage: start <name> [priority]{Colors.RESET}")
+            return
+        pri = int(args[1]) if len(args) > 1 and args[1].isdigit() else 5
+        pid = self.process_manager.create_process(args[0], pri, "user")
+        print(f"Started '{args[0]}' with pid {pid}")
+    
+    def cmd_meminfo(self, args):
+        """Memory info"""
+        mem = self.monitor.get_memory_info()
+        print(f"\nMemTotal: {mem['total']//1024:>10} kB\nMemUsed:  {mem['used']//1024:>10} kB\n"
+              f"MemFree:  {mem['free']//1024:>10} kB\nUsage:    {mem['percent']:>9.1f} %\n")
+    
+    def cmd_diskinfo(self, args):
+        """Disk info"""
+        disk = self.monitor.get_disk_info()
+        gb = 1024 ** 3
+        print(f"\nFilesystem   Size   Used  Avail  Use%\n/dev/hda  {disk['total']/gb:5.1f}G {disk['used']/gb:5.1f}G "
+              f"{disk['free']/gb:5.1f}G {disk['percent']:4.0f}%\n")
+    
+    def cmd_netstat(self, args):
+        """Network stats"""
+        net = self.monitor.get_network_stats()
+        print(f"\neth0  RX bytes: {net['rx']:>12}  TX bytes: {net['tx']:>12}\n")
+    
+    def cmd_cpu(self, args):
+        """CPU info"""
+        print(f"\nCPU usage: {self.monitor.get_cpu_usage()}%   temperature: {self.monitor.get_cpu_temperature()}°C\n")
+    
+    def cmd_pwd(self, args):
+        """Print working directory"""
+        print(self.fs_manager.current_path)
+    
+    def cmd_cd(self, args):
+        """Change directory"""
+        target = args[0] if args else '/'
+        if not self.fs_manager.cd(target):
+            print(f"{Colors.RED}cd: no such directory: {target}{Colors.RESET}")
+    
+    def cmd_mkdir(self, args):
+        """Create directory"""
+        if not args or not self.fs_manager.mkdir(args[0]):
+            print(f"{Colors.RED}mkdir: cannot create directory{Colors.RESET}")
+    
+    def cmd_touch(self, args):
+        """Create file"""
+        if not args or not self.fs_manager.touch(args[0]):
+            print(f"{Colors.RED}touch: cannot create file{Colors.RESET}")
+    
+    def cmd_tree(self, args):
+        """Directory tree"""
+        path = args[0] if args else None
+        print(self.fs_manager.resolve(path))
+        for line in self.fs_manager.tree(path):
+            print(line)
+        print()
+    
+    def cmd_alias(self, args):
+        """Show/set aliases"""
+        if args and '=' in ' '.join(args):
+            name, _, value = ' '.join(args).partition('=')
+            self.aliases[name.strip()] = value.strip().strip('"\'')
+        else:
+            for name, value in self.aliases.items():
+                print(f"alias {name}='{value}'")
+    
+    def cmd_echo(self, args):
+        """Print text"""
+        print(' '.join(args))
+    
+    def cmd_sleep(self, args):
+        """Sleep"""
+        try:
+            time.sleep(float(args[0]) if args else 1)
+        except (ValueError, KeyboardInterrupt):
+            pass
+    
+    def cmd_reboot(self, args):
+        """Reboot (simulated)"""
+        print(f"{Colors.YELLOW}Rebooting...{Colors.RESET}")
+        self.command_history.clear()
+        self.fs_manager.current_path = '/'
+        self.print_banner()
+    
+    def cmd_shutdown(self, args):
+        """Shutdown"""
+        self.cmd_exit(args)
     
     def cmd_clear(self, args):
         """Clear màn hình"""
@@ -534,12 +706,10 @@ Type {Colors.YELLOW}'help'{Colors.RESET} for available commands or {Colors.YELLO
         # Save to history
         self.command_history.append(command_line)
         
-        # Check aliases
-        for alias, cmd in self.aliases.items():
-            if command_line.startswith(alias):
-                command_line = command_line.replace(alias, cmd, 1)
-        
         parts = command_line.strip().split()
+        # Expand aliases (whole first word only)
+        if parts[0] in self.aliases:
+            parts = self.aliases[parts[0]].split() + parts[1:]
         cmd = parts[0].lower()
         args = parts[1:]
         

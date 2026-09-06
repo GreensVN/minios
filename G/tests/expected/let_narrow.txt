@@ -1,0 +1,5 @@
+inferred=44 explicit=44
+typeof=u8
+i16 sum = -5536
+big = 1099511627776
+f=3.5 ok=true

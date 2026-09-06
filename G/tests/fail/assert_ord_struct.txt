@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: assert_lt: hai vế phải cùng kiểu để so sánh, nhận 'P' và 'P' — so sánh thứ tự cần số/char/enum/chuỗi

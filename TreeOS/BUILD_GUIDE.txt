@@ -1,0 +1,91 @@
+================================================================================
+  MiniOS v4.1 - Build & Run Guide / Quick Reference Card
+================================================================================
+
+1. TOOLCHAIN
+--------------------------------------------------------------------------------
+  Required : nasm >= 2.10, gcc + g++ able to emit 32-bit code (gcc-multilib on
+             Debian/Ubuntu, or a cross i686-elf-gcc), GNU binutils (ld, objcopy,
+             objdump), GNU make.
+  To run   : qemu-system-i386 (or qemu-system-x86_64)
+  Optional : grub-mkrescue + xorriso (make iso), gdb (make debug)
+
+  Debian/Ubuntu : sudo apt install build-essential gcc-multilib nasm qemu-system-x86
+  Fedora        : sudo dnf install gcc gcc-c++ glibc-devel.i686 nasm qemu-system-x86
+  Arch          : sudo pacman -S base-devel nasm qemu-system-x86
+  macOS         : brew install nasm qemu i686-elf-gcc  ->  make CROSS=i686-elf-
+
+2. BUILD
+--------------------------------------------------------------------------------
+  cd TreeOS
+  make              build everything
+  make test         verify boot signature, kernel magic, Multiboot header, size
+  make clean        remove build/ and output/
+
+  Outputs:
+    output/minios.img   raw disk image (bootloader + kernel), 8 MiB
+    build/kernel.elf    ELF with symbols; also a valid Multiboot 1 kernel
+    build/kernel.bin    flat binary that the bootloader loads
+
+  Equivalent manual steps (what the Makefile does):
+    nasm -f bin  Bootloader.asm -o build/boot.bin
+    nasm -f elf32 entry.asm      -o build/entry.o
+    nasm -f elf32 interrupts.asm -o build/interrupts.o
+    gcc  -m32 -std=gnu11 -ffreestanding -fno-pie -fno-stack-protector -nostdlib \
+         -fno-builtin -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -O2 -Wall -Wextra \
+         -c Kernel.c -o build/kernel.o
+    g++  (same flags) -std=gnu++17 -fno-exceptions -fno-rtti \
+         -c driver_manager.cpp -o build/driver_manager.o
+    ld   -m elf_i386 -nostdlib -T linker.ld build/entry.o build/kernel.o \
+         build/interrupts.o build/driver_manager.o -o build/kernel.elf
+    objcopy -O binary build/kernel.elf build/kernel.bin
+    dd if=/dev/zero        of=output/minios.img bs=512 count=16384
+    dd if=build/boot.bin   of=output/minios.img conv=notrunc
+    dd if=build/kernel.bin of=output/minios.img bs=512 seek=8 conv=notrunc
+
+  NOTE: the kernel starts at LBA 8 (the bootloader is 8 sectors), not LBA 1/2 as
+        in older versions of this guide.
+
+3. RUN
+--------------------------------------------------------------------------------
+  make run           QEMU window
+  make run-serial    QEMU, console mirrored to your terminal (quit: Ctrl-A, X)
+  make debug         QEMU halted with GDB stub on :1234
+                     gdb build/kernel.elf -ex 'target remote :1234' -ex 'b kernel_main' -ex c
+  make iso           GRUB ISO  ->  make run-iso
+
+  Manual: qemu-system-i386 -drive file=output/minios.img,format=raw,if=ide -m 256 -serial stdio
+
+  Real hardware (legacy BIOS boot only):
+     sudo dd if=output/minios.img of=/dev/sdX bs=1M status=progress && sync
+     (check /dev/sdX with lsblk first - this erases the device)
+
+4. SHELL QUICK REFERENCE
+--------------------------------------------------------------------------------
+  help                 clear                mem              ps
+  uptime / ticks       cpuinfo              date             drivers
+  disk [lba]           echo <text>          color <fg> [bg]  alloc <bytes>
+  heaptest             spawn [n]            kill <pid>       syscall
+  sleep <ms>           bp                   crash            ud
+  reboot               halt
+
+5. TROUBLESHOOTING
+--------------------------------------------------------------------------------
+  "gcc cannot produce 32-bit objects"   -> install gcc-multilib or use CROSS=
+  Stage 1 prints "Disk read error"      -> image must be attached as an IDE/AHCI
+                                           hard disk, not a floppy; BIOS must
+                                           support INT 13h extensions (LBA)
+  Black screen after "Loading kernel"   -> run `make test`; the kernel must be
+                                           < 448 KiB and have magic at offset 8
+  "A20 line: FAILED"                    -> extremely old machine; try QEMU
+  Boots but keyboard does nothing       -> USB keyboard without BIOS legacy
+                                           support; use PS/2 or enable USB legacy
+  GRUB "no multiboot header found"      -> boot build/kernel.elf, not kernel.bin
+
+6. HOST-SIDE SIMULATORS (not part of the kernel image)
+--------------------------------------------------------------------------------
+  python3 minios_shell.py                             shell / monitor simulator
+  javac FileSystemSimulator.java && java FileSystemSimulator
+  dotnet run  (or csc NetworkStackSimulator.cs)       network stack simulator
+  open Terminal.html in a browser                     web terminal + desktop
+================================================================================
