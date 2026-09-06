@@ -10,7 +10,9 @@ from typing import Optional
 # ---------- Kiểu cú pháp (type annotation) ----------
 @dataclass
 class Type:
-    name: str                      # int, f64, str, void, tên struct/enum...; "fn" nếu là kiểu hàm
+    name: str
+    #: Đối số kiểu của một kiểu generic ('Pair<int, str>'). Rỗng = không generic.
+    type_args: Optional[list] = None                      # int, f64, str, void, tên struct/enum...; "fn" nếu là kiểu hàm
     ptr: int = 0                   # số mức con trỏ NGOÀI (*[N]T: con trỏ tới mảng)
     array: Optional[object] = None # mảng 1 chiều: số phần tử (int/biểu thức hằng) / "dyn" cho []T
     dims: Optional[list] = None    # mảng nhiều chiều: [d0, d1, ...] (mỗi d là int/biểu thức/"dyn")
@@ -53,6 +55,8 @@ class Function:
     params: list
     ret: Type
     body: list
+    #: Tham số KIỂU của hàm generic: ['T', 'U']. Rỗng = hàm thường.
+    type_params: list = field(default_factory=list)
     is_comptime: bool = False
     is_extern: bool = False
     recv: Optional[str] = None     # tên struct nếu là method (impl)
@@ -325,6 +329,8 @@ class Call:
     args: list
     line: int = 0
     col: int = 0
+    #: Đối số kiểu tường minh tại nơi gọi: 'f<int>(x)'. None = tự suy.
+    type_args: Optional[list] = None
 
 
 @dataclass

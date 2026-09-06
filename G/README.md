@@ -566,6 +566,35 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.21.0 — 🧬 Generics (`fn f<T>(...)`)
+
+- 🧬 **Hàm generic** với suy kiểu từ đối số, hoặc chỉ định tường minh:
+  ```g
+  fn max2<T>(a: T, b: T) -> T { if a > b { return a } return b }
+  fn first<T>(xs: slice<T>) -> T { return xs[0] }
+  fn pick<A, B>(a: A, b: B) -> B { let _ = a return b }
+
+  max2(3, 7)            // T = int  (suy từ đối số)
+  max2(2.5, 1.5)        // T = f64
+  first(a[..])          // T lấy từ slice<T>
+  id<str>("boo")        // đối số kiểu TƯỜNG MINH
+  ```
+- ⚙️ **Monomorphization trong checker**: mỗi bộ kiểu cụ thể sinh ra một hàm
+  thường (`max2` + `int` → `max2__int`), rồi được kiểm tra như mọi hàm khác.
+  **G-IR và cả hai backend không cần một dòng thay đổi nào** — chúng chỉ thấy
+  hàm thường. Đây là lý do chọn cách này thay vì kiểu-bị-xoá (type erasure):
+  không cần boxing, không mất hiệu năng, không đụng ABI.
+- 🛡️ **Lỗi trong thân generic được bắt tại KIỂU CỤ THỂ** (như C++/Rust):
+  `bad("x")` với `fn bad<T>(a: T) -> T { return a + 1 }` báo
+  *"không thể dùng '+' giữa 'str' và 'int'"*.
+- 🛡️ Suy kiểu thất bại → yêu cầu chỉ định tường minh, kèm cú pháp mẫu. Đệ quy
+  generic vô hạn trên kiểu bị chặn (giới hạn 64 bản nhân / độ sâu 16).
+- 🔍 `f<int>(x)` chỉ được coi là đối số kiểu khi sau `>` là `(` — nên `a < b`
+  vẫn là **so sánh**, không bị nuốt nhầm.
+- 🧪 **Bộ test: 237 ca** + backend-diff 104 + target 21 + panic 4 + IR 100
+  + IR-unit 25 + layout 11 + ASan 95; fuzz 32 000 vòng (có token generic),
+  0 crash.
+
 ## Mới trong 0.20.0 — 🧠 Mô hình bộ nhớ & Allocator thay thế được
 
 Xem [`docs/MEMORY.md`](docs/MEMORY.md) — mô hình bộ nhớ nay được **viết ra thành

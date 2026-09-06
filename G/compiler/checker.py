@@ -11,6 +11,11 @@ import re
 from . import ast_nodes as A
 from . import types as T
 from . import target as _tgt
+
+
+def _copy_targs(ts):
+    import copy as _c
+    return None if ts is None else [_c.deepcopy(x) for x in ts]
 from .target import INTRINSIC_CAPS as TARGET_CAPS, CAP_HINTS as TARGET_HINTS
 
 
@@ -234,6 +239,9 @@ class Checker:
         self.structs = {}          # name -> {field: GType}
         self.struct_order = {}     # name -> [field names]
         self.struct_attrs = {}     # name -> {"packed": bool, "align": int}
+        self.generic_funcs = {}    # tên -> A.Function (KHUÔN generic)
+        self.generic_insts = {}    # (tên, bộ kiểu) -> tên hàm đã nhân bản
+        self._mono_depth = 0
         self._layout_cache = None  # engine bố cục (layout.py), dựng lười
         self._layout_gen = -1
         self.enums = {}            # name -> {variant: value_int}
@@ -843,6 +851,16 @@ class Checker:
                 visit(n, [n])
 
     def collect_funcs(self):
+        # Hàm GENERIC là KHUÔN, không phải hàm thật: tách ra khỏi đường kiểm tra
+        # thường (kiểu 'T' chưa phân giải được). Mỗi lời gọi sẽ NHÂN BẢN khuôn
+        # với kiểu cụ thể — xem _instantiate_generic.
+        for it in list(self.prog.items):
+            if isinstance(it, A.Function) and getattr(it, "type_params", None):
+                if it.name in self.generic_funcs:
+                    self.err(f"hàm generic '{it.name}' được định nghĩa nhiều "
+                             f"lần", it)
+                self.generic_funcs[it.name] = it
+                self.prog.items.remove(it)
         for it in self.prog.items:
             if isinstance(it, A.Function):
                 self.cur_file = getattr(it, "src_file", None)
@@ -1090,6 +1108,212 @@ class Checker:
             for _, v in e.fields:
                 out += self._global_refs(v)
         return out
+
+    # ================= GENERIC (monomorphization) =================
+    #: Số bản nhân tối đa cho MỘT khuôn — chặn đệ quy generic vô hạn
+    #: ('fn f<T>() { f<*T>() }' sinh kiểu mới mãi mãi).
+    _MAX_INSTANCES = 64
+
+    def _mangle_generic(self, name, targs) -> str:
+        """Tên hàm sau khi nhân bản: 'max2' + <int> -> 'max2__int'."""
+        def part(t):
+            return (self.tyname(t).replace("*", "p").replace("[", "a")
+                    .replace("]", "_").replace(" ", "").replace("<", "_")
+                    .replace(">", "").replace(",", "_").replace("-", "n"))
+        return name + "__" + "_".join(part(t) for t in targs)
+
+    def _subst_type(self, ty, mapping):
+        """Bản SAO của node kiểu với tham số kiểu đã thay bằng kiểu cụ thể."""
+        import copy as _copy
+        if ty is None:
+            return None
+        out = _copy.deepcopy(ty)
+        self._subst_type_inplace(out, mapping)
+        return out
+
+    def _subst_type_inplace(self, ty, mapping):
+        if ty is None or not isinstance(ty, A.Type):
+            return
+        rep = mapping.get(ty.name)
+        if rep is not None:
+            # 'T' -> kiểu cụ thể: giữ lại con trỏ/mảng ĐANG BỌC ngoài 'T'
+            # ('*T' với T=int phải thành '*int', không phải 'int').
+            ty.name = rep.name
+            ty.type_args = _copy_targs(rep.type_args)
+            ty.ptr += rep.ptr
+            ty.elem_ptr += getattr(rep, "elem_ptr", 0)
+            if getattr(rep, "dims", None):
+                ty.dims = list(rep.dims) + list(ty.dims or [])
+                ty.array = ty.dims[0]
+            if getattr(rep, "slice_elem", None) is not None:
+                ty.slice_elem = rep.slice_elem
+                ty.slice_mut = rep.slice_mut
+            if getattr(rep, "is_fn", False):
+                ty.is_fn = True
+                ty.fn_params = rep.fn_params
+                ty.fn_ret = rep.fn_ret
+            ty.resolved = None
+            return
+        ty.resolved = None
+        self._subst_type_inplace(getattr(ty, "slice_elem", None), mapping)
+        for p in (getattr(ty, "fn_params", None) or []):
+            self._subst_type_inplace(p, mapping)
+        self._subst_type_inplace(getattr(ty, "fn_ret", None), mapping)
+        for t in (getattr(ty, "type_args", None) or []):
+            self._subst_type_inplace(t, mapping)
+
+    def _subst_body(self, node, mapping):
+        """Thay tham số kiểu trong MỌI node kiểu của một thân hàm đã sao chép."""
+        if isinstance(node, A.Type):
+            self._subst_type_inplace(node, mapping)
+            return
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                self._subst_body(x, mapping)
+            return
+        if not hasattr(node, "__dataclass_fields__"):
+            return
+        # Xoá chú thích của lượt kiểm trước (bản sao phải được suy luận lại).
+        for a in ("gtype", "resolved_type", "c_name", "to_slice"):
+            if hasattr(node, a):
+                try:
+                    setattr(node, a, None if a != "c_name" else "")
+                except Exception:
+                    pass
+        for f in node.__dataclass_fields__:
+            self._subst_body(getattr(node, f, None), mapping)
+
+    def _instantiate_generic(self, name, targs, node):
+        """Nhân bản khuôn generic với bộ kiểu cụ thể; trả về TÊN hàm đã sinh.
+
+        Bản nhân được KIỂM TRA như một hàm thường, nên mọi lỗi bên trong thân
+        generic vẫn được bắt — chỉ là bắt tại kiểu cụ thể, giống C++/Rust."""
+        import copy as _copy
+        key = (name, tuple(self.tyname(t) for t in targs))
+        hit = self.generic_insts.get(key)
+        if hit is not None:
+            return hit
+        tmpl = self.generic_funcs[name]
+        if len(targs) != len(tmpl.type_params):
+            self.err(f"'{name}' cần {len(tmpl.type_params)} đối số kiểu nhưng "
+                     f"nhận {len(targs)}", node)
+            return None
+        if len(self.generic_insts) >= self._MAX_INSTANCES:
+            self.err(f"quá nhiều bản nhân generic (>{self._MAX_INSTANCES}) — "
+                     f"có thể generic đang đệ quy vô hạn trên kiểu", node)
+            return None
+        if self._mono_depth > 16:
+            self.err("generic lồng quá sâu (có thể đệ quy vô hạn trên kiểu)",
+                     node)
+            return None
+
+        new_name = self._mangle_generic(name, targs)
+        self.generic_insts[key] = new_name        # ghi TRƯỚC: cho phép đệ quy
+        mapping = {tp: self._gtype_to_syntax(t)
+                   for tp, t in zip(tmpl.type_params, targs)}
+        inst = _copy.deepcopy(tmpl)
+        inst.name = new_name
+        inst.type_params = []
+        inst.src_file = getattr(tmpl, "src_file", None)
+        for p in inst.params:
+            self._subst_type_inplace(p.type, mapping)
+        self._subst_type_inplace(inst.ret, mapping)
+        self._subst_body(inst.body, mapping)
+
+        self.prog.items.append(inst)
+        self._all_funcs[new_name] = inst
+        self._mono_depth += 1
+        try:
+            self.register_func(inst)
+            saved = (self.cur_fn, getattr(self, "_cur_params", ()),
+                     list(self.scopes), self.cur_ret)
+            self.check_function(inst)
+            (self.cur_fn, self._cur_params, self.scopes, self.cur_ret) = saved
+        finally:
+            self._mono_depth -= 1
+        return new_name
+
+    @staticmethod
+    def _gtype_to_syntax(gt):
+        """GType -> A.Type để thay vào khuôn. Dùng 'resolved' nên không phải
+        dịch ngược tên kiểu (điểm dễ sai)."""
+        t = A.Type(gt.name or gt.kind)
+        t.resolved = gt
+        return t
+
+    def _infer_generic_call(self, e):
+        """'max2(1, 2)' / 'max2<int>(1, 2)' -> nhân bản rồi kiểm như hàm thường."""
+        name = e.func.name
+        tmpl = self.generic_funcs[name]
+        arg_types = [self.infer(a) for a in e.args]
+
+        explicit = getattr(e, "type_args", None)
+        if explicit:
+            targs = [self.resolve(t) for t in explicit]
+        else:
+            # SUY từ đối số: khớp từng tham số hình thức với kiểu thực tế.
+            bind = {}
+            for p, at in zip(tmpl.params, arg_types):
+                self._unify_tparam(p.type, at, tmpl.type_params, bind)
+            missing = [tp for tp in tmpl.type_params if tp not in bind]
+            if missing:
+                self.err(
+                    f"không suy được kiểu cho {', '.join(missing)} của "
+                    f"'{name}' — chỉ định tường minh: "
+                    f"'{name}<{', '.join(missing)}>(...)'", e)
+                return T.UNKNOWN
+            targs = [bind[tp] for tp in tmpl.type_params]
+
+        if len(e.args) != len(tmpl.params):
+            self.err(f"hàm '{name}' cần {len(tmpl.params)} tham số nhưng nhận "
+                     f"{len(e.args)}", e)
+            return T.UNKNOWN
+
+        inst_name = self._instantiate_generic(name, targs, e)
+        if inst_name is None:
+            return T.UNKNOWN
+        # Từ đây coi như một lời gọi hàm THƯỜNG tới bản đã nhân.
+        e.func.name = inst_name
+        e.func.c_name = inst_name
+        fdef = self.funcs.get(inst_name)
+        if fdef is None:
+            return T.UNKNOWN
+        for i, (at, pt) in enumerate(zip(arg_types, fdef.params)):
+            self.coerce(e.args[i], pt, at)
+            if not self.assignable(pt, at):
+                self.err(
+                    f"tham số {i + 1} của '{name}' cần '{self.tyname(pt)}' "
+                    f"nhưng nhận '{self.tyname(at)}'", e)
+        return fdef.ret
+
+    def _unify_tparam(self, formal, actual, tparams, bind):
+        """Khớp kiểu hình thức (có thể chứa 'T') với kiểu THỰC TẾ để suy 'T'.
+
+        Chỉ suy các dạng đơn giản mà G thực sự dùng: 'T', '*T', '[N]T',
+        'slice<T>'. Dạng phức tạp hơn thì người dùng chỉ định tường minh."""
+        if formal is None or actual is None:
+            return
+        nm = formal.name
+        # '*T' / '[N]T': bóc lớp bọc ở CẢ hai bên rồi khớp phần lõi.
+        depth_ptr = formal.ptr
+        dims = list(getattr(formal, "dims", None) or [])
+        core = actual
+        for _ in range(depth_ptr):
+            if core.kind != "ptr" or core.elem is None:
+                return
+            core = core.elem
+        for _ in dims:
+            if core.kind not in ("array", "slice") or core.elem is None:
+                return
+            core = core.elem
+        se = getattr(formal, "slice_elem", None)
+        if se is not None:
+            if core.kind != "slice" or core.elem is None:
+                return
+            self._unify_tparam(se, core.elem, tparams, bind)
+            return
+        if nm in tparams:
+            bind.setdefault(nm, core)
 
     def _sig_text(self, fn: A.Function) -> str:
         params = ", ".join(self.tyname(self.resolve(p.type)) for p in fn.params)
@@ -3341,6 +3565,11 @@ class Checker:
                     f"'{nm}' kiểu '{self.tyname(binding[0])}' không phải hàm "
                     f"để gọi", e)
         # ----- hàm thường -----
+        # ---- gọi hàm GENERIC: suy đối số kiểu rồi nhân bản ----
+        if isinstance(e.func, A.Ident) and e.func.name in self.generic_funcs \
+                and self.lookup(e.func.name) is None:
+            return self._infer_generic_call(e)
+
         ft = self.infer(e.func)
         arg_types = [self.infer(a) for a in e.args]
         if (isinstance(e.func, A.Ident) and e.func.name in self.funcs

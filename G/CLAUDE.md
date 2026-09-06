@@ -269,6 +269,27 @@ element type. Those printers dereference struct fields, so they are spliced in
 **after** struct definitions (`slice_print_at`), while the typedefs go earlier
 (`fnptr_at`) because signatures need them.
 
+### Generics are monomorphized in the checker
+
+`fn f<T>(...)` templates are pulled out of `prog.items` by `collect_funcs` into
+`Checker.generic_funcs` — they are *not* ordinary functions and must never reach
+`check_function` untouched (`T` has no resolution). Each call site infers the
+type arguments (`_unify_tparam`), then `_instantiate_generic` deep-copies the
+template, substitutes the type nodes, appends the clone to `prog.items`, and
+checks it like any other function.
+
+Consequence worth understanding: **G-IR and both backends needed zero changes**
+for generics. They only ever see ordinary functions. Keep it that way — if you
+find yourself adding a "generic" concept to `irgen.py`, the substitution is
+leaking.
+
+Two guards matter: `_MAX_INSTANCES` and `_mono_depth` stop `fn f<T>() { f<*T>() }`
+from generating types forever, and the instance name is recorded *before*
+checking the body so recursive generics terminate.
+
+`f<int>(x)` is only treated as type arguments when `(` follows `>`
+(`_looks_like_call_type_args`); otherwise `a < b` would be swallowed.
+
 ### Allocators are a struct vtable, not a trait
 
 `GAllocator` in `g_runtime.h` is `{ctx, alloc_fn, free_fn, realloc_fn}`.
