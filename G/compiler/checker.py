@@ -1464,6 +1464,14 @@ class Checker:
                 gt = val_t if val_t is not None else T.INT
             st.resolved_type = gt
             st.c_name = self.declare(st.name, gt, st.mutable)
+            # Theo dõi biến BẤT BIẾN khởi tạo bằng 'null' để bắt '.field' trên nó.
+            nc = getattr(self, "_null_consts", None)
+            if nc is None:
+                nc = self._null_consts = set()
+            if not st.mutable and isinstance(st.value, A.NullLit):
+                nc.add(st.name)
+            else:
+                nc.discard(st.name)
 
     def _check_stmt(self, st):
         if isinstance(st, A.Return):
@@ -2422,6 +2430,7 @@ class Checker:
                     "'let' trước rồi lấy '&' của biến đó", e)
             return T.ptr_of(ot)
         if e.op == "*":
+            self._check_null_deref(e.operand, "")
             if ot.kind == "ptr":
                 return ot.elem
             if ot.kind == "str":
@@ -2548,6 +2557,7 @@ class Checker:
                      f"'{e.field}' (truy cập trường cần một GIÁ TRỊ struct)", e)
         bt = self.infer(e.base)
         e.auto_deref = (bt.kind == "ptr")
+        self._check_null_deref(e.base, f".{e.field}")
         sname = None
         if bt.kind == "struct":
             sname = bt.name
@@ -2632,6 +2642,40 @@ class Checker:
                 self.err(f"tham số {i + 1} của 'str.{mname}()' cần "
                          f"'{self.tyname(want)}' nhưng nhận '{self.tyname(at)}'", e)
         return T.PRIMITIVES.get(ret) or T.STR
+
+    def _check_null_deref(self, base, what: str):
+        """Giải tham chiếu một con trỏ mà ta CHỨNG MINH được là null: 'null.f',
+        hoặc biến bất biến khởi tạo bằng 'null' ('let p: *S = null; p.v'). Đây
+        luôn là segfault lúc chạy — bắt tĩnh. Biến 'mut' không xét (có thể đã
+        được gán lại); phân tích luồng đầy đủ nằm ngoài phạm vi."""
+        if isinstance(base, A.NullLit):
+            self.err(f"giải tham chiếu 'null' ('null{what}') — luôn lỗi lúc chạy", base)
+            return
+        if not isinstance(base, A.Ident):
+            return
+        if base.name in getattr(self, "_null_consts", ()):
+            self.err(
+                f"'{base.name}' được khởi tạo bằng 'null' và không thể gán lại "
+                f"(khai báo 'let'), nên '{base.name}{what}' luôn là giải tham "
+                f"chiếu con trỏ null (segfault). Kiểm tra "
+                f"'if {base.name} != null' hoặc dùng 'let mut'", base)
+
+    def _deref_hint(self, arg, want: T.GType, got: T.GType) -> str:
+        """Gợi ý '*x' / '&x' khi lệch đúng MỘT tầng con trỏ. Bên trong method,
+        'self' là con trỏ (*T) nên truyền nó cho tham số kiểu T cần '*self' —
+        lỗi rất hay gặp mà thông điệp trần không nói rõ."""
+        name = arg.name if isinstance(arg, A.Ident) else None
+        if (got.kind == "ptr" and got.elem is not None
+                and self.assignable(want, got.elem)):
+            what = f"'*{name}'" if name else "'*(...)'"
+            extra = (" ('self' trong method là con trỏ tới đối tượng nhận)"
+                     if name == "self" else "")
+            return f" — có phải {what}?{extra}"
+        if want.kind == "ptr" and want.elem is not None \
+                and self.assignable(want.elem, got):
+            what = f"'&{name}'" if name else "'&(...)'"
+            return f" — có phải {what}?"
+        return ""
 
     def infer_struct_lit(self, e: A.StructLit):
         if e.name not in self.structs:
@@ -2762,7 +2806,8 @@ class Checker:
                     if not self.assignable(pt, at):
                         self.err(
                             f"tham số {i + 1} của '{sname}.{mname}' cần "
-                            f"'{self.tyname(pt)}' nhưng nhận '{self.tyname(at)}'", e)
+                            f"'{self.tyname(pt)}' nhưng nhận '{self.tyname(at)}'"
+                            + self._deref_hint(e.args[i], pt, at), e)
                 return self.resolve(m.ret)
         # ----- builtin -----
         if isinstance(e.func, A.Ident) and e.func.name in BUILTINS:
@@ -2793,7 +2838,8 @@ class Checker:
                 if not self.assignable(pt, at):
                     self.err(
                         f"tham số {i + 1} của '{e.func.name}' cần "
-                        f"'{self.tyname(pt)}' nhưng nhận '{self.tyname(at)}'", e)
+                        f"'{self.tyname(pt)}' nhưng nhận '{self.tyname(at)}'"
+                        + self._deref_hint(e.args[i], pt, at), e)
             return fdef.ret
         if ft.kind == "func":
             # Gọi qua một GIÁ TRỊ con trỏ hàm (biến/tham số/trường kiểu fn(...)->R).

@@ -587,8 +587,14 @@ Một nền tảng vững để mở rộng tiếp. 🚀
   `const`, cận trên của `for i in a..b` mang đúng kiểu biến đếm (hết
   *sign-compare*). Toàn bộ bộ test biên dịch **không một cảnh báo** với
   `-Wall -Wextra`.
-- 🧪 **Bộ test: 174 ca** (+13): `if_match_expr`, `str_methods`, `array_repeat`,
-  `fmt_center` và 9 ca "phải lỗi".
+- 🛡️ **Giải tham chiếu `null` chắc chắn** (`let p: *S = null; p.v` — biến bất
+  biến khởi tạo null, hoặc `null.f`) là lỗi biên dịch thay vì segfault. Con trỏ
+  `mut` (có thể đã gán lại) không bị báo nhầm.
+- 🧰 **Chẩn đoán lệch một tầng con trỏ**: truyền `p: *S` cho tham số `S` (hay
+  ngược lại) giờ gợi ý `*p` / `&p`; riêng `self` trong method được nhắc rõ
+  "`self` là con trỏ tới đối tượng nhận" (`self.dot(*self)`).
+- 🧪 **Bộ test: 177 ca** (+16): `if_match_expr`, `str_methods`, `array_repeat`,
+  `fmt_center`, `null_guard` và 11 ca "phải lỗi".
 
 ## Mới trong 0.9.0 — 🔍 Bắt thêm lỗi tĩnh, sửa lỗi sinh mã
 

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'p' được khởi tạo bằng 'null' và không thể gán lại (khai báo 'let'), nên 'p.v' luôn là giải tham chiếu con trỏ null (segfault). Kiểm tra 'if p != null' hoặc dùng 'let mut'
