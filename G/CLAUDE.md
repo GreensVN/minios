@@ -186,6 +186,25 @@ mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
 `repeat` field that the *checker* expands into N copies of the element before
 any inference runs, so everything downstream sees a plain `ArrayLit`.
 
+### `for mut x in arr` binds by reference
+
+Unlike the read-only `for x in arr` (which copies each element), `for mut x`
+lowers `x` to a **pointer** to the element so writes land in the array. The
+checker sets `by_ref` on the `ForEach` node and records the name in
+`_by_ref_vars`, which makes `infer_ident` tag every `A.Ident` with
+`by_ref_elem`; codegen then emits `(*x)` for those. Exception: when the element
+is itself an array (iterating rows of a 2-D array) the row already decays to a
+pointer, so `by_ref_deref` is cleared and no extra `*` is added. Arrays are the
+only writable iterable — `for mut` over a `str` or an array literal is an error.
+
+### Value-typed arrays can't come out of expressions
+
+Functions may not return arrays by value, and for the same reason `match`/`?:`
+in expression position reject array-typed arms: C decays both branches to a
+pointer, so G's copy semantics would silently become sharing (and an array
+literal arm would dangle). Keep these two checks in sync if you add another
+value-producing construct.
+
 ### `str` has built-in methods
 
 `s.len()`, `s.upper()`, `s.sub(a, b)` etc. are pure syntax sugar: `_STR_METHODS`

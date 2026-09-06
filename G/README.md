@@ -593,8 +593,17 @@ Một nền tảng vững để mở rộng tiếp. 🚀
 - 🧰 **Chẩn đoán lệch một tầng con trỏ**: truyền `p: *S` cho tham số `S` (hay
   ngược lại) giờ gợi ý `*p` / `&p`; riêng `self` trong method được nhắc rõ
   "`self` là con trỏ tới đối tượng nhận" (`self.dot(*self)`).
-- 🧪 **Bộ test: 177 ca** (+16): `if_match_expr`, `str_methods`, `array_repeat`,
-  `fmt_center`, `null_guard` và 11 ca "phải lỗi".
+- 🐛 **`for mut x in arr` từng sửa một BẢN SAO** — `for mut x in a { x *= 10 }`
+  không hề đổi `a` (âm thầm vô hiệu). Nay `x` là **tham chiếu** tới phần tử (như
+  `iter_mut` của Rust) và ghi thẳng vào mảng; áp dụng cho cả phần tử struct và
+  hàng của mảng nhiều chiều. `for mut` trên chuỗi/mảng literal (chỉ đọc / giá trị
+  tạm) là lỗi có hướng dẫn.
+- 🐛 **`match`/`?:` cho ra MẢNG theo giá trị** khai kiểu `[3]int` nhưng C phân rã
+  thành con trỏ → `let b = a` chia sẻ bộ nhớ thay vì sao chép (và literal thì trỏ
+  vào giá trị tạm đã hết hạn). Nay bị từ chối, nhất quán với việc cấm hàm trả về
+  mảng theo giá trị.
+- 🧪 **Bộ test: 182 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
+  `fmt_center`, `null_guard`, `foreach_mut` và 15 ca "phải lỗi".
 
 ## Mới trong 0.9.0 — 🔍 Bắt thêm lỗi tĩnh, sửa lỗi sinh mã
 

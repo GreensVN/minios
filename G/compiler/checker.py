@@ -1605,11 +1605,38 @@ class Checker:
             self.err("'for x in <mảng>' cần một biến mảng hoặc mảng literal "
                      "(để biết độ dài)", st)
         st.elem_type = elem or T.INT
+        # 'for mut x in arr': x là THAM CHIẾU tới phần tử (như 'iter_mut' của
+        # Rust) — sửa x ghi thẳng vào mảng. Trước đây x là BẢN SAO nên 'x *= 10'
+        # không có tác dụng gì (âm thầm vô hiệu). Chỉ áp dụng cho mảng có thể ghi:
+        # duyệt chuỗi ('str' chỉ đọc) hay mảng literal tạm thì vô nghĩa.
+        st.by_ref = False
+        if st.mutable:
+            if st.iter_kind != "array" or isinstance(st.iterable, A.ArrayLit):
+                self.err(
+                    "'for mut x in ...' chỉ dùng được khi duyệt một biến MẢNG có "
+                    "thể ghi (chuỗi là chỉ đọc, mảng literal là giá trị tạm) — bỏ "
+                    "'mut' nếu chỉ cần đọc", st)
+            else:
+                self._check_lvalue_mutable(st.iterable, st)
+                st.by_ref = True
+                # Phần tử là mảng (hàng của mảng nhiều chiều): trong C nó đã là
+                # con trỏ tới hàng, ghi 'row[i] = v' xuyên thẳng vào mảng gốc —
+                # không cần (và không được) thêm một tầng deref nữa.
+                if st.elem_type.kind == "array":
+                    st.by_ref_deref = False
         self.loop_depth += 1
         self.push()
         st.c_name = self.declare(st.var, st.elem_type, st.mutable)
+        needs_deref = st.by_ref and getattr(st, "by_ref_deref", True)
+        if needs_deref:
+            rb = getattr(self, "_by_ref_vars", None)
+            if rb is None:
+                rb = self._by_ref_vars = set()
+            rb.add(st.var)
         for s in st.body:
             self.check_stmt(s)
+        if needs_deref:
+            self._by_ref_vars.discard(st.var)
         self.pop()
         self.loop_depth -= 1
         self._check_unreachable(st.body)
@@ -1753,6 +1780,16 @@ class Checker:
         ts = [t for t in e.arm_types if t.kind != "unknown"]
         if not ts:
             return T.UNKNOWN
+        # Mảng theo giá trị: xem chú thích ở nhánh Ternary — C phân rã thành con
+        # trỏ nên ngữ nghĩa sao chép của G bị mất âm thầm.
+        for t in ts:
+            if self._is_static_array(t):
+                self.err(
+                    f"'match' ở vị trí biểu thức không thể cho một MẢNG theo giá "
+                    f"trị ('{self.tyname(t)}') — C sẽ phân rã thành con trỏ và mất "
+                    f"ngữ nghĩa sao chép; dùng 'match' dạng câu lệnh để gán vào "
+                    f"mảng đã khai báo, hoặc bọc mảng trong struct", e)
+                return T.UNKNOWN
         res = ts[0]
         for i, t in enumerate(ts[1:], start=2):
             if res.is_numeric() and t.is_numeric():
@@ -2112,6 +2149,18 @@ class Checker:
             self._check_cond(e.cond, "?:")
             a = self.infer(e.then)
             b = self.infer(e.els)
+            # MẢNG theo giá trị không thể là kết quả của '?:' / 'if' biểu thức: C
+            # cho hai nhánh phân rã thành con trỏ, nên 'let b = a' sau đó CHIA SẺ
+            # bộ nhớ thay vì sao chép (và với mảng literal thì trỏ vào giá trị tạm
+            # đã hết hạn). Cùng lý do với việc cấm hàm trả về mảng theo giá trị.
+            if self._is_static_array(a) or self._is_static_array(b):
+                self.err(
+                    "biểu thức điều kiện không thể cho một MẢNG theo giá trị "
+                    f"('{self.tyname(a if self._is_static_array(a) else b)}') — C "
+                    "sẽ phân rã thành con trỏ và mất ngữ nghĩa sao chép; hãy khai "
+                    "báo mảng rồi gán trong 'if' dạng câu lệnh, hoặc bọc mảng "
+                    "trong struct", e)
+                return T.UNKNOWN
             if a.is_numeric() and b.is_numeric():
                 return T.common_numeric(a, b)
             return a if a.kind != "unknown" else b
@@ -2226,6 +2275,10 @@ class Checker:
         info = self.lookup(e.name)
         if info is not None:
             e.c_name = info[2]
+            # Biến phần tử của 'for mut x in arr' được hạ thành con trỏ trong C
+            # (ghi xuyên vào mảng): codegen phải phát '(*x)' ở mọi lần dùng.
+            if e.name in getattr(self, "_by_ref_vars", ()):
+                e.by_ref_elem = True
             return info[0]
         if e.name in self.enum_of_variant:
             e.is_enum_variant = True

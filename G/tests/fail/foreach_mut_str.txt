@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'for mut x in ...' chỉ dùng được khi duyệt một biến MẢNG có thể ghi (chuỗi là chỉ đọc, mảng literal là giá trị tạm) — bỏ 'mut' nếu chỉ cần đọc

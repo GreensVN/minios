@@ -1138,9 +1138,27 @@ class Codegen:
                 else:
                     bound = f"sizeof({arr}) / sizeof(({arr})[0])"
                 self.w(f"for (size_t {i} = 0; {i} < {bound}; ++{i}) {{")
-                self.gen_scoped_body(st.body, is_loop=True,
-                                     prologue=[self._elem_decl(var, elem_type,
-                                                               f"({arr})[{i}]")])
+                if getattr(st, "by_ref", False) and elem_type.kind == "array":
+                    # Phần tử LẠI là mảng (duyệt hàng của mảng nhiều chiều): hàng
+                    # đã tự phân rã thành con trỏ tới phần tử đầu, nên ghi
+                    # 'row[i] = v' vốn đã xuyên vào mảng gốc — dùng khai báo
+                    # thường (con trỏ tới mảng), KHÔNG bọc thêm một tầng '*'.
+                    self.gen_scoped_body(st.body, is_loop=True,
+                                         prologue=[self._elem_decl(var, elem_type,
+                                                                   f"({arr})[{i}]")])
+                elif getattr(st, "by_ref", False):
+                    # 'for mut x in arr': x là THAM CHIẾU tới phần tử (như
+                    # 'iter_mut' của Rust) — sửa x phải ghi ngược vào mảng. Hạ
+                    # thành con trỏ + macro '#define x (*_p)' sẽ rối; thay vào đó
+                    # dùng biến con trỏ và cho checker đánh dấu mọi truy cập là
+                    # deref (xem 'by_ref' trong gen_expr/Ident).
+                    self.gen_scoped_body(
+                        st.body, is_loop=True,
+                        prologue=[f"{T.c_type(elem_type)}* {var} = &({arr})[{i}];"])
+                else:
+                    self.gen_scoped_body(st.body, is_loop=True,
+                                         prologue=[self._elem_decl(var, elem_type,
+                                                                   f"({arr})[{i}]")])
                 self.w("}")
 
     def gen_match(self, st: A.Match):
@@ -1311,7 +1329,12 @@ class Codegen:
         if isinstance(e, A.NullLit):
             return "NULL"
         if isinstance(e, A.Ident):
-            return getattr(e, "c_name", "") or self.cn(e.name)
+            nm = getattr(e, "c_name", "") or self.cn(e.name)
+            # Biến phần tử của 'for mut x in arr' được hạ thành CON TRỎ tới phần
+            # tử (để ghi xuyên vào mảng) — mọi lần dùng 'x' phải là '(*x)'.
+            if getattr(e, "by_ref_elem", False):
+                return f"(*{nm})"
+            return nm
         if isinstance(e, A.Binary):
             lc = self.gen_expr(e.left)
             rc = self.gen_expr(e.right)

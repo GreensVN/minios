@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'match' ở vị trí biểu thức không thể cho một MẢNG theo giá trị ('[3]int') — C sẽ phân rã thành con trỏ và mất ngữ nghĩa sao chép; dùng 'match' dạng câu lệnh để gán vào mảng đã khai báo, hoặc bọc mảng trong struct
