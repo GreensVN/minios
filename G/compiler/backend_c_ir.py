@@ -56,6 +56,8 @@ class CIRBackend(IRBackend):
         self.mod = None
         self.slice_typedefs = {}
         self.slice_decls = []
+        self.slice_print_fns = {}
+        self.slice_print_decls = []
         self._tmp_types = {}
 
     # ------------------------------------------------------------------
@@ -65,20 +67,26 @@ class CIRBackend(IRBackend):
     def emit(self, mod: I.Module) -> str:
         self.mod = mod
         self.out = []
+        # Hàm do NGƯỜI DÙNG định nghĩa (có thân, không phải main/extern) là
+        # những hàm duy nhất được đổi tên; mọi callee khác là ký hiệu runtime
+        # hoặc extern và phải giữ nguyên.
+        self._user_fns = {f.name for f in mod.funcs
+                          if not f.is_extern and f.blocks and f.name != "main"}
         self.w("// === Sinh tự động bởi trình biên dịch G (backend c-ir) ===")
         self.w('#include "g_runtime.h"')
         self.w("")
 
         # 1) enum
         for en in mod.enums:
-            vs = ", ".join(f"{n} = {v}" for n, v in en.variants)
-            self.w(f"typedef enum {{ {vs} }} {en.name};")
+            vs = ", ".join(f"{self.cn(n)} = {v}" for n, v in en.variants)
+            self.w(f"typedef enum {{ {vs} }} {self.cn(en.name)};")
         if mod.enums:
             self.w("")
 
         # 1b) hàm tra TÊN biến thể cho mỗi enum (để in '{}' ra 'Red', không phải 0)
         for en in mod.enums:
-            self.w(f"static const char* _g_enum_{en.name}_name({en.name} v) {{")
+            self.w(f"static const char* _g_enum_{self.cn(en.name)}_name"
+                   f"({self.cn(en.name)} v) {{")
             self.indent += 1
             self.w("switch ((long long)v) {")
             self.indent += 1
@@ -98,7 +106,7 @@ class CIRBackend(IRBackend):
 
         # 2) forward-decl struct + typedef slice (chữ ký cần)
         for st in mod.structs:
-            self.w(f"typedef struct {st.name} {st.name};")
+            self.w(f"typedef struct {self.cn(st.name)} {self.cn(st.name)};")
         slice_at = len(self.out)
         if mod.structs:
             self.w("")
@@ -113,10 +121,10 @@ class CIRBackend(IRBackend):
                 bits.append(f"aligned({st.align})")
             if bits:
                 attr = f" __attribute__(({', '.join(bits)})) "
-            self.w(f"struct {st.name}{attr} {{")
+            self.w(f"struct {self.cn(st.name)}{attr} {{")
             self.indent += 1
             for fname, fty in st.fields:
-                self.w(self.c_decl(fty, fname) + ";")
+                self.w(self.c_decl(fty, self.cn(fname)) + ";")
             self.indent -= 1
             self.w("};")
         if mod.structs:
@@ -126,12 +134,14 @@ class CIRBackend(IRBackend):
         #     Sinh theo đúng thứ tự khai báo trong module: struct lồng đã được
         #     irgen đặt trước struct chứa nó.
         for st in mod.structs:
-            self.w(f"static bool _g_eq_{st.name}({st.name} _a, {st.name} _b) {{")
+            self.w(f"static bool _g_eq_{self.cn(st.name)}"
+                   f"({self.cn(st.name)} _a, {self.cn(st.name)} _b) {{")
             self.indent += 1
             if not st.fields:
                 self.w("(void)_a; (void)_b; return true;")
             else:
-                conds = [self._field_eq(fty, f"_a.{fn}", f"_b.{fn}")
+                conds = [self._field_eq(fty, f"_a.{self.cn(fn)}",
+                                        f"_b.{self.cn(fn)}")
                          for fn, fty in st.fields]
                 self.w("return " + " && ".join(conds) + ";")
             self.indent -= 1
@@ -139,14 +149,20 @@ class CIRBackend(IRBackend):
         if mod.structs:
             self.w("")
 
+        slice_print_at = len(self.out)
+
         # 4) global
         for g in mod.globals:
             self.gen_global(g)
         if mod.globals:
             self.w("")
 
-        # 5) nguyên mẫu hàm
+        # 5) nguyên mẫu hàm. BỎ QUA 'extern fn' trùng tên hàm mà runtime/libc đã
+        #    khai báo (strlen/memcpy/...): phát lại nguyên mẫu với chữ ký "gần
+        #    đúng" của G gây 'conflicting types' ở C.
         for f in mod.funcs:
+            if f.is_extern and self._runtime_provides(f.name):
+                continue
             self.w(self.signature(f) + ";")
         self.w("")
 
@@ -157,6 +173,10 @@ class CIRBackend(IRBackend):
             self.gen_func(f)
             self.w("")
 
+        if self.slice_print_decls:
+            block = ["// In slice — độ dài biết lúc chạy nên cần hàm riêng."]
+            block += self.slice_print_decls + [""]
+            self.out[slice_print_at:slice_print_at] = block
         if self.slice_decls:
             block = ["// Slice: con trỏ béo { T* ptr; size_t len; }."]
             block += self.slice_decls + [""]
@@ -187,6 +207,8 @@ class CIRBackend(IRBackend):
             return self.c_type(ty.elem) + "*"
         if ty.kind == "func":
             return "void*"
+        if ty.kind in ("struct", "enum"):
+            return self.cn(ty.name)
         return T.c_type(ty)
 
     def c_decl(self, ty, name: str) -> str:
@@ -221,11 +243,53 @@ class CIRBackend(IRBackend):
         return f"{self.c_type(cur)} (*{name}){suffix}"
 
     def signature(self, f: I.Func) -> str:
-        ps = ", ".join(self.c_decl(p.type, p.name) for p in f.params) or "void"
+        ps = ", ".join(self.c_decl(p.type, self.cn(p.name))
+                       for p in f.params) or "void"
         q = "extern " if f.is_extern else ""
-        return f"{q}{self.c_type(f.ret)} {f.name}({ps})"
+        return f"{q}{self.c_type(f.ret)} {self.fn_name(f)}({ps})"
 
     # ------------------------------------------------------------------
+    _PRINT_ARRAY_MAX = 8
+
+    def _slice_print_fn(self, gt) -> str:
+        """Hàm in cho 'slice<T>' — một hàm cho mỗi kiểu phần tử (độ dài chỉ biết
+        lúc chạy nên không dựng được chuỗi định dạng tĩnh)."""
+        sn = self.slice_typedef(gt.elem)
+        fn = self.slice_print_fns.get(sn)
+        if fn is not None:
+            return fn
+        fn = f"_gslprint_{sn}"
+        self.slice_print_fns[sn] = fn
+        el = gt.elem
+        if el is not None and el.kind == "enum":
+            frag, arg = "%s", f"_g_enum_{self.cn(el.name)}_name(s.ptr[i])"
+        elif el is not None and el.kind == "bool":
+            frag, arg = "%s", '(s.ptr[i] ? "true" : "false")'
+        elif el is not None and el.kind == "struct":
+            raise BackendError("in slice<struct> chưa hỗ trợ")
+        else:
+            spec, _ = T.printf_spec(el) if el is not None else ("%d", False)
+            frag, arg = spec, "s.ptr[i]"
+        cap = self._PRINT_ARRAY_MAX
+        self.slice_print_decls += [
+            f"static const char* {fn}({sn} s) {{",
+            "    static char bufs[4][512]; static unsigned bi = 0;",
+            "    char* b = bufs[bi++ & 3]; size_t off = 0;",
+            '    off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, "[");',
+            f"    size_t shown = s.len < {cap} ? s.len : {cap};",
+            "    for (size_t i = 0; i < shown; i++) {",
+            '        if (i) off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, ", ");',
+            f'        off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, "{frag}", {arg});',
+            "    }",
+            "    if (shown < s.len)",
+            "        off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off,",
+            '                                ", ... (%zu phần tử)", s.len);',
+            '    snprintf(b + off, sizeof(bufs[0]) - off, "]");',
+            "    return b;",
+            "}",
+        ]
+        return fn
+
     def _field_eq(self, ty, l, r) -> str:
         """So sánh bằng MỘT trường (theo GType)."""
         if ty is None:
@@ -235,7 +299,7 @@ class CIRBackend(IRBackend):
         if ty.kind == "slice":
             return f"(({l}).ptr == ({r}).ptr && ({l}).len == ({r}).len)"
         if ty.kind == "struct":
-            return f"_g_eq_{ty.name}({l}, {r})"
+            return f"_g_eq_{self.cn(ty.name)}({l}, {r})"
         if ty.kind == "str" or (ty.kind == "ptr" and ty.elem is not None
                                 and ty.elem.kind == "char"):
             return f"g_str_eq({l}, {r})"
@@ -243,25 +307,72 @@ class CIRBackend(IRBackend):
 
     def gen_global(self, g: I.Global):
         if g.is_extern:
-            self.w(f"extern {self.c_decl(g.type, g.name)};")
+            self.w(f"extern {self.c_decl(g.type, self.cn(g.name))};")
             return
         init = ""
         if isinstance(g.init, list):
             init = " = { " + ", ".join(self.val(v) for v in g.init) + " }"
         elif g.init is not None:
             init = f" = {self.val(g.init)}"
-        self.w(f"static {self.c_decl(g.type, g.name)}{init};")
+        self.w(f"static {self.c_decl(g.type, self.cn(g.name))}{init};")
 
     # ------------------------------------------------------------------
     # giá trị
     # ------------------------------------------------------------------
+    _runtime_syms = None
+
+    @classmethod
+    def _runtime_provides(cls, name: str) -> bool:
+        """Runtime C ('g_runtime.h') hay libc đã khai báo ký hiệu này chưa?
+
+        Nếu rồi thì KHÔNG phát lại nguyên mẫu: chữ ký 'extern fn' của G chỉ gần
+        đúng ('str' vs 'const char*', 'usize' vs 'size_t') nên phát lại sẽ gây
+        'conflicting types'. Quét trực tiếp header runtime để danh sách không
+        bao giờ lệch khỏi thực tế."""
+        if cls._runtime_syms is None:
+            import os
+            import re as _re
+            from .codegen import _RUNTIME_DEFINED
+            syms = set(_RUNTIME_DEFINED)
+            hdr = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "runtime", "g_runtime.h")
+            try:
+                with open(hdr, encoding="utf-8") as fh:
+                    src = fh.read()
+                syms |= set(_re.findall(
+                    r"^\s*(?:_Noreturn\s+)?static\s+inline\s+[^\n(]*?"
+                    r"\b([A-Za-z_][A-Za-z_0-9]*)\s*\(", src, _re.M))
+                syms |= set(_re.findall(r"^#define\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(",
+                                        src, _re.M))
+            except OSError:
+                pass
+            cls._runtime_syms = syms
+        return name in cls._runtime_syms
+
+    def fn_name(self, f: I.Func) -> str:
+        """Tên C của một hàm. 'main' và ký hiệu 'extern' GIỮ NGUYÊN tên (điểm
+        vào của chương trình / ký hiệu do nơi khác định nghĩa) — đổi tên chúng
+        sẽ làm hỏng liên kết."""
+        if f.name == "main" or f.is_extern:
+            return f.name
+        return self.cn(f.name)
+
+    @staticmethod
+    def cn(name: str) -> str:
+        """Tên C an toàn: từ khoá C / ký hiệu libc-libm được đổi tên.
+
+        Dùng CHÍNH hàm của checker để hai backend đặt tên giống hệt nhau —
+        nếu không, 'fn strlen()' của người dùng sẽ va vào <string.h>."""
+        from .checker import Checker
+        return Checker.safe_c_name(name)
+
     def val(self, v: I.Value) -> str:
         if not isinstance(v, I.Value):
             raise BackendError(f"toán hạng không phải Value: {v!r}")
         if v.kind == "temp":
             return v.name
         if v.kind in ("global", "func"):
-            return v.name
+            return self.cn(v.name)
         if v.kind == "strlit":
             return self.c_string(v.const)
         if v.kind == "undef":
@@ -443,9 +554,17 @@ class CIRBackend(IRBackend):
             if ins.extra.get("on") == "slice":
                 self.w(f"{d} = &(({a[0]}).ptr[{a[1]}]);")
             else:
-                self.w(f"{d} = &((*({a[0]}))[{a[1]}]);")
+                bt = ins.args[0].type
+                # Cơ sở là CON TRỎ TỚI MẢNG ('*[N]T') -> phải deref trước rồi
+                # mới index. Cơ sở là con trỏ THƯỜNG ('*T', mảng động từ
+                # g_alloc) -> index thẳng; deref sẽ cho ra T (không index được).
+                if (bt is not None and bt.kind == "ptr" and bt.elem is not None
+                        and bt.elem.kind == "array"):
+                    self.w(f"{d} = &((*({a[0]}))[{a[1]}]);")
+                else:
+                    self.w(f"{d} = &(({a[0]})[{a[1]}]);")
         elif op == "fieldaddr":
-            fld = ins.extra.get("field") or ins.args[1].const
+            fld = self.cn(ins.extra.get("field") or ins.args[1].const)
             self.w(f"{d} = &((*({a[0]})).{fld});")
         elif op == "ptradd":
             self.w(f"{d} = ({a[0]}) + ({a[1]});")
@@ -457,6 +576,8 @@ class CIRBackend(IRBackend):
             self.w(f"memcpy(&{d}, &({a[0]}), sizeof({d}));")
         elif op == "call":
             callee = ins.extra.get("callee")
+            if callee and callee in self._user_fns:
+                callee = self.cn(callee)
             if ins.extra.get("is_print"):
                 # print đã được hạ thành (chuỗi_định_dạng, đối số...) trong
                 # irgen; ở đây chỉ chọn luồng ra và ÉP KIỂU cho đúng quy tắc
@@ -589,6 +710,9 @@ class CIRBackend(IRBackend):
             return
         if name == "len":
             self.w(f"{d} = ({a[0]}).len;")
+            return
+        if name == "print_slice":
+            self.w(f"{d} = {self._slice_print_fn(ins.args[0].type)}({a[0]});")
             return
         if name == "test_summary":
             self.w(f"{d} = g_test_summary();")

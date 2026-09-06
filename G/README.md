@@ -566,6 +566,34 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.17.0 — 🔁 Giai đoạn B tiến triển: 39 ca khớp hai backend
+
+- 🔁 **`--backend=c-ir` khớp 39 ca** (từ 20) so với backend mặc định, **0 khác**.
+  Toàn bộ phần hạ mã thêm nằm trong `irgen.py`, **không phải** trong backend —
+  nhờ vậy LLVM/WASM sau này thừa hưởng luôn:
+  - `abs/min/max/clamp` → `cmp` + `select` (macro C cũ còn đánh giá đối số nhiều
+    lần; bản IR vật hoá nên `min(f(), g())` chỉ gọi mỗi hàm một lần);
+  - `g_alloc/g_realloc` → cỡ phần tử tính sẵn bằng engine bố cục, backend không
+    cần hiểu cú pháp kiểu của G;
+  - `assert` → nhánh + panic; `swap` → load/store; `typeof` → hằng chuỗi;
+  - `assert_*`/`check_*` + khung test, khớp **từng byte** kể cả màu ANSI;
+  - cờ định dạng (`{:5}`, `{:<5}`, `{:05}`, `{:+}`, `{:.2}`, `{:^7}`, `{:b}`,
+    `{ld}`…) dùng lại `SPEC_MAP`/`_apply_fmt_flags` của backend C thay vì viết
+    lại — hai đường không thể trôi lệch;
+  - in enum (tên biến thể), struct (đệ quy), mảng, bool, slice.
+- 🐛 **Lỗi thật do so khớp hai backend phát hiện** (đều là lỗi *hạ mã IR*, tức sẽ
+  ảnh hưởng mọi backend tương lai):
+  - `for c in "chuỗi"` **không lặp lần nào** (foreach chỉ xử lý mảng);
+  - `p[i]` trên con trỏ thường sinh `(*p)[i]` — chỉ đúng với `*[N]T`;
+  - hằng số thực bị phát thành **chuỗi C**;
+  - toán tử một ngôi không nới bề rộng: `-w` với `w: u32` in `4294967295`
+    thay vì `-1`;
+  - `extern fn` trùng ký hiệu runtime (`strlen`, `g_substr`…) phát lại nguyên
+    mẫu → `conflicting types`. Nay quét thẳng `g_runtime.h` để biết ký hiệu nào
+    đã có, danh sách không bao giờ lệch.
+- 🧪 **Bộ test: 225 ca** + backend-diff 39 + target 21 + panic 4 + IR 97
+  + IR-unit 25 + layout 11 + ASan 93; fuzz 18 000 vòng, 0 crash.
+
 ## Mới trong 0.16.0 — 🔁 Backend C đọc từ G-IR (Giai đoạn B)
 
 - 🔁 **`--backend=c-ir`**: backend C thứ hai sinh mã **từ G-IR** thay vì từ AST,

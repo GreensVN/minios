@@ -75,6 +75,36 @@ class _EnumName:
         self.enum = enum
 
 
+class _BinStr:
+    """Đánh dấu: in giá trị này ở dạng NHỊ PHÂN (g_bin_str)."""
+    __slots__ = ("node", "gt", "flags")
+
+    def __init__(self, node, gt, flags):
+        self.node = node
+        self.gt = gt
+        self.flags = flags
+
+
+class _Center:
+    """Đánh dấu: kết xuất rồi CĂN GIỮA trong bề rộng cho trước (g_center)."""
+    __slots__ = ("node", "gt", "flags", "kbase")
+
+    def __init__(self, node, gt, flags, kbase):
+        self.node = node
+        self.gt = gt
+        self.flags = flags
+        self.kbase = kbase
+
+
+class _SlicePrint:
+    """Đánh dấu: in slice qua hàm in riêng cho kiểu phần tử."""
+    __slots__ = ("node", "gt")
+
+    def __init__(self, node, gt):
+        self.node = node
+        self.gt = gt
+
+
 class _BoolStr:
     """Đánh dấu: in đối số bool này dưới dạng chuỗi "true"/"false"."""
     __slots__ = ("node",)
@@ -683,11 +713,25 @@ class IRGen:
         ity = T.I32
         pity = T.GType("ptr", elem=ity)
         aty = self.gtype(st.iterable)
-        elem = aty.elem if aty.kind == "array" and aty.elem is not None else T.UNKNOWN
+        is_str = aty.kind == "str" or (aty.kind == "ptr" and aty.elem is not None
+                                       and aty.elem.kind == "char")
+        if is_str:
+            # Duyệt CHUỖI: số lần lặp = strlen (biết lúc chạy), phần tử là char.
+            elem = T.CHAR
+        else:
+            elem = (aty.elem if aty.kind == "array" and aty.elem is not None
+                    else T.UNKNOWN)
         n = aty.n if aty.kind == "array" and isinstance(aty.n, int) else 0
 
         self.push_scope()
         base, _ = self.gen_addr_or_value(st.iterable)
+        limv = None
+        if is_str:
+            limv = self.emit_val("alloca", [], ty=pity, node=st, hint="sn",
+                                 name="__len")
+            ln = self.emit_val("call", [base], ty=T.I64, node=st, hint="sl",
+                               callee="g_str_len_i")
+            self.emit("store", [limv, ln], node=st)
         idx = self.emit_val("alloca", [], ty=pity, node=st, hint="i", name="__idx")
         self.emit("store", [idx, I.const_int(0)], node=st)
 
@@ -696,7 +740,9 @@ class IRGen:
         self.term(I.Term("jump", labels=[Lc]))
         self.start(self.block(Lc))
         cur = self.emit_val("load", [idx], ty=ity, node=st, hint="ld")
-        cond = self.emit_val("lt", [cur, I.const_int(n)], ty=T.BOOL, node=st, hint="c")
+        lim = (self.emit_val("load", [limv], ty=ity, node=st, hint="ll")
+               if limv is not None else I.const_int(n))
+        cond = self.emit_val("lt", [cur, lim], ty=T.BOOL, node=st, hint="c")
         self.term(I.Term("branch", [cond], [Lb, Le], line=st.line, col=st.col))
 
         self.start(self.block(Lb))
@@ -1278,24 +1324,7 @@ class IRGen:
         fmt, argexprs = self._resolve_format(template, value_args, newline)
         vals = [I.const_str(fmt)]
         for a in argexprs:
-            if isinstance(a, _Cast):
-                v = self.gen_expr(a.node)
-                vals.append(self.emit_val("cast", [v], ty=self.gtype(a.node),
-                                          node=e, hint="fc", to_c=a.ctype))
-                continue
-            if isinstance(a, _EnumName):
-                v = self.gen_expr(a.node)
-                vals.append(self.emit_val(
-                    "call", [v], ty=T.STR, node=e, hint="en",
-                    callee=f"_g_enum_{a.enum}_name"))
-                continue
-            if isinstance(a, _BoolStr):
-                c = self.gen_expr(a.node)
-                vals.append(self.emit_val(
-                    "select", [c, I.const_str("true"), I.const_str("false")],
-                    ty=T.STR, node=e, hint="bs"))
-            else:
-                vals.append(self.gen_expr(a))
+            vals.append(self._fmt_arg_value(a, e))
         return self.emit_val("call", vals, ty=T.VOID, node=e, hint="pr",
                              callee="printf", stream=stream, is_print=True)
 
@@ -1355,6 +1384,37 @@ class IRGen:
 
     def _fmt_arg_value(self, x, e):
         """Vật hoá một đối số của chuỗi định dạng (kể cả _BoolStr/_EnumName)."""
+        if isinstance(x, _SlicePrint):
+            v = self.gen_expr(x.node)
+            return self.emit_val("intrinsic", [v], ty=T.STR, node=e,
+                                 hint="sp", name="print_slice")
+        if isinstance(x, _BinStr):
+            v = self.gen_expr(x.node)
+            # bits <= 0 nghĩa là "bề rộng tối thiểu, bỏ số 0 dẫn đầu" — đó là
+            # mặc định của '{:b}'. Chỉ '{:0Nb}' mới cố định N bit.
+            import re as _re
+            m = _re.match(r"^[<>^]?0(\d+)$", x.flags or "")
+            bits = int(m.group(1)) if m else 0
+            return self.emit_val("call", [v, I.const_int(bits, T.I32)],
+                                 ty=T.STR, node=e, hint="bn",
+                                 callee="g_bin_str")
+        if isinstance(x, _Center):
+            import re as _re
+            v = self.gen_expr(x.node)
+            mw = _re.match(r"^[+ ]?#?0?(\d+)(\.\d+)?$", x.flags or "")
+            width = int(mw.group(1)) if mw else 0
+            spec, is_bool = T.printf_spec(x.gt)
+            if is_bool:
+                v = self.emit_val("select",
+                                  [v, I.const_str("true"), I.const_str("false")],
+                                  ty=T.STR, node=e, hint="bs")
+                spec = "%s"
+            inner = _apply_flags(spec, x.flags.replace(str(width), "", 1)) \
+                if mw else spec
+            one = self.emit_val("call", [I.const_str(inner), v], ty=T.STR,
+                                node=e, hint="f1", callee="g_fmt1", variadic=True)
+            return self.emit_val("call", [one, I.const_int(width, T.I32)],
+                                 ty=T.STR, node=e, hint="ct", callee="g_center")
         if isinstance(x, _EnumName):
             return self.emit_val("call", [self.gen_expr(x.node)], ty=T.STR,
                                  node=e, hint="en",
@@ -1495,10 +1555,18 @@ class IRGen:
             kbase, sep, flags = key.partition(":")
             if sep and kbase in ("", "v") and flags and flags[-1] in simple:
                 kbase, flags = flags[-1], flags[:-1]
-            if flags and (flags[0] == "^" or "b" in flags):
-                # căn giữa / nhị phân cần hàm hỗ trợ của runtime C -> chưa hạ.
-                raise IRGenError(
-                    f"placeholder '{{{key}}}' chưa hạ được sang IR")
+            # '{b}' / '{:08b}' — chuỗi NHỊ PHÂN qua hàm runtime g_bin_str.
+            if kbase == "b" or (flags and flags.endswith("b")):
+                bflags = flags[:-1] if flags.endswith("b") else flags
+                out.append(_apply_flags("%s", bflags) if bflags else "%s")
+                args.append(_BinStr(arg, gt, bflags))
+                continue
+            if flags and flags[0] == "^":
+                # CĂN GIỮA: printf không có — kết xuất giá trị ra chuỗi rồi đệm
+                # hai bên bằng g_center (giống backend C).
+                out.append("%s")
+                args.append(_Center(arg, gt, flags[1:], kbase))
+                continue
             if kbase in simple:
                 spec, cast = simple[kbase]
                 if cast:
@@ -1518,6 +1586,13 @@ class IRGen:
                     continue
                 if gt.kind == "array" and isinstance(gt.n, int) and not flags:
                     self._expand_array(gt, arg, out, args)
+                    continue
+                if gt.kind == "slice" and not flags:
+                    # Độ dài chỉ biết LÚC CHẠY nên không bung thành chuỗi định
+                    # dạng tĩnh được: gọi hàm in do backend phát cho mỗi kiểu
+                    # phần tử (giống backend C).
+                    out.append("%s")
+                    args.append(_SlicePrint(arg, gt))
                     continue
                 if gt.kind in ("struct", "array", "slice"):
                     raise IRGenError(

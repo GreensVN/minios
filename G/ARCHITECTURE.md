@@ -203,13 +203,16 @@ Còn lại của Phase 5: chọn toolchain chéo tự động, layout/ABI theo t
 
 ## 7. Giai đoạn B đang chạy: backend C đọc từ IR
 
-`--backend=c-ir` đã tồn tại và **khớp 100% trên 20 ca** so với backend mặc định
-(`tests/run_backend_diff.sh`). Còn 73 ca chưa hỗ trợ, gần như toàn bộ vì các
-built-in in ấn/format phức tạp (`{:^7}`, `{b}`, bung struct/slice) vẫn ở dạng
-`intrinsic` cấp cao trong IR.
+`--backend=c-ir` khớp **39 ca, 0 khác** so với backend mặc định
+(`tests/run_backend_diff.sh`); 87/93 ca đã SINH ĐƯỢC mã C.
 
-Bước tiếp theo để hoàn tất Giai đoạn B: hạ nốt các intrinsic đó trong `irgen.py`
-(không phải trong backend — nếu hạ trong backend thì LLVM/WASM lại phải làm lại).
+Nguyên tắc đã theo suốt quá trình: mọi thứ còn thiếu đều được hạ trong
+`irgen.py`, **không phải** trong backend. Hạ trong backend thì LLVM/WASM phải
+làm lại từ đầu — và mỗi lần làm lại là một cơ hội sai khác.
+
+Còn lại (~54 ca) tập trung ở vài nhóm nhỏ: `format()` (cấp phát chuỗi), `dbg`,
+và một số ca dùng con trỏ hàm/mảng nhiều chiều phức tạp. Không có ca nào KHÁC
+đầu ra — chỉ là chưa sinh mã được, và luôn báo lỗi rõ ràng thay vì sinh mã sai.
 
 ## 8. CHƯA làm (nói rõ để không gây hiểu nhầm)
 
