@@ -274,6 +274,15 @@ class Parser:
         if not is_const:
             self.expect("kw", "let")
         mutable = bool(self.accept("kw", "mut"))
+        # Destructuring chỉ dùng được trong THÂN HÀM (nó khử đường thành nhiều
+        # câu lệnh, mà cấp cao nhất chỉ nhận khai báo). Báo rõ thay vì để lỗi
+        # "cần khai báo cấp cao (gặp op '{')".
+        if (self.cur().kind == "id" and self.at(1).value == "{"
+                and self._looks_like_destructure()):
+            self.error(
+                f"'let {self.cur().value}{{...}}' (destructuring) chỉ dùng được "
+                f"bên trong hàm — ở cấp cao nhất hãy khai báo từng global một",
+                show_token=False)
         name = self.expect("id").value
         typ = None
         if self.accept("op", ":"):

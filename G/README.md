@@ -350,8 +350,14 @@ import "helpers.g"    // nạp file cùng thư mục
 - **Đầu vào (stdin):** `read_line read_int read_float at_eof`
 - **Ngẫu nhiên (xorshift64):** `rng_seed rng_seed_time rand_u64 rand_range rand_int rand_float coin_flip shuffle`
 
-> Các hàm chuỗi trả chuỗi mới (vd `str_concat`, `substr`, `int_to_str`) cấp phát
-> trên heap — nhớ `g_free` khi dùng xong.
+> **Quản lý bộ nhớ chuỗi.** Mọi thứ tạo ra chuỗi *mới* đều cấp phát trên heap:
+> hàm stdlib (`str_concat`, `substr`, `int_to_str`…), `format(...)`, lát cắt
+> `s[a..b]`, và các method `str` biến đổi (`upper`, `lower`, `trim`, `sub`,
+> `rev`, `repeat`, `concat`). G **không** có bộ thu gom rác — hãy `g_free` khi
+> dùng xong, nếu không sẽ rò rỉ (chương trình ngắn thì vô hại; vòng lặp dài thì
+> không). Các method *chỉ đọc* (`len`, `at`, `eq`, `contains`, `starts_with`,
+> `ends_with`, `index_of`, `count`, `is_empty`, `to_int`, `to_float`) không cấp
+> phát. Kiểm bằng `gcc -fsanitize=address` trên mã C sinh ra.
 
 ---
 
@@ -583,6 +589,10 @@ Một nền tảng vững để mở rộng tiếp. 🚀
 - 🛡️ **Runner nghiêm ngặt hơn**: mọi ca test giờ phải **không có cảnh báo** nào
   (G lẫn `gcc -Wall -Wextra`), và có hạng mục `tests/warn/` khoá lại nội dung
   cảnh báo *và* số lượng (bắt dương tính giả).
+- 🧼 **Kiểm bằng sanitizer**: `bash tests/run_asan.sh` biên dịch lại mọi ví dụ
+  và ca test bằng `-fsanitize=address,undefined` rồi chạy — **87/87 sạch**
+  (không đọc/ghi ngoài biên, không use-after-free, không UB). `LEAKS=1` để bật
+  kiểm rò rỉ.
 - 🧪 **Bộ test: 205 ca** (+8): `destructure`, `str_slice`, `array_value_copy`,
   `unused_vars` và 4 ca "phải lỗi".
 

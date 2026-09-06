@@ -186,6 +186,14 @@ mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
 `repeat` field that the *checker* expands into N copies of the element before
 any inference runs, so everything downstream sees a plain `ArrayLit`.
 
+### Sanitizer runs are a separate suite
+
+`tests/run_asan.sh` rebuilds every example/case with
+`-fsanitize=address,undefined` and runs it — this is what proves the runtime's
+bounds clamping is real. Leaks are off by default (`LEAKS=1` enables them)
+because heap strings need a manual `g_free` and many examples skip it for
+brevity; the memory-ownership rules are documented in README.
+
 ### Warnings
 
 `Checker.warnings` collects non-fatal diagnostics; `driver` prints them in
