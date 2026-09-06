@@ -421,6 +421,10 @@ class Parser:
         # for i in a..b | a..=b [step N]   (vòng lặp theo khoảng)
         inclusive = self.accept("op", "..=")
         if inclusive or self.accept("op", ".."):
+            if mutable:
+                raise ParseError("biến đếm của 'for i in a..b' luôn bất biến (là biến "
+                                 "đếm của vòng lặp) — bỏ 'mut'; cần sửa thì 'let mut "
+                                 "j = i' trong thân vòng lặp", t.line, t.col)
             end = self.parse_expr()
             step = self.parse_expr() if self.accept("id", "step") else None
             self.no_struct_lit = saved

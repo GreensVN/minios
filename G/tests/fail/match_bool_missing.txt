@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: match trên bool chưa vét cạn — thiếu: false (thêm nhánh hoặc '_')

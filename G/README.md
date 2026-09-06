@@ -44,6 +44,7 @@ cd G
 | `--ast` | In cây cú pháp AST (debug parser) |
 | `--cc <cc>` | Chọn trình biên dịch C |
 | `-O <0..3>` | Mức tối ưu (mặc định 2) |
+| `--no-checks` | Tắt kiểm tra lúc chạy (biên mảng tĩnh, chia 0) — nhanh hơn nhưng lỗi thành UB |
 
 ---
 
@@ -228,7 +229,7 @@ comptime fn square(n: int) -> int { return n * n }
 | `{f}` | số thực |
 | `{s}` `{c}` | chuỗi / ký tự |
 | `{x}` `{X}` `{o}` | hex / HEX / bát phân |
-| `{b}` | bool → true/false |
+| `{b}` | bool → true/false; **số nguyên → nhị phân** (`{:08b}` đệm 0) |
 | `{{` `}}` | dấu `{` `}` literal |
 
 **Width / precision / căn lề** (kiểu Zig/Rust) qua `{key:flags}`:
@@ -557,6 +558,68 @@ let x = a +
   x86 chúng biên dịch thành no-op an toàn.
 
 Một nền tảng vững để mở rộng tiếp. 🚀
+
+## Mới trong 0.9.0 — 🔍 Bắt thêm lỗi tĩnh, sửa lỗi sinh mã
+
+- 🐛 **Mảng literal ở vị trí biểu thức** (`sum([1, 2, 3], 3)`, `[7, 8, 9][1]`,
+  `len([1, 2])`) từng rò `{ ... }` trần xuống C → lỗi backend. Nay là compound
+  literal C99, chạy đúng.
+- 🐛 **`extern fn memcpy/strlen/...`** với chữ ký G "gần đúng" (`*u8` thay vì
+  `void*`) từng gây `conflicting types` vì runtime đã định nghĩa chúng → nay
+  không phát lại nguyên mẫu. Khai báo lại một hàm với **chữ ký khác** (`extern fn
+  puts(x: int)` sau `puts(s: str)`) là lỗi G; lệch với header libc được giải
+  thích rõ thay vì "lỗi nội bộ".
+- 🐛 **Thứ tự khởi tạo global:** `const A = B + 1; const B = A + 1` (chu trình /
+  tham chiếu tiến) từng âm thầm đọc 0 → nay lỗi "dùng global khai báo SAU nó".
+- 🛡️ **`match` trên `bool`** phải vét cạn (`true`/`false` hoặc `_`) và khi đủ hai
+  nhánh được coi là vét cạn (không cần `return` thừa). Pattern hằng **nằm trong
+  khoảng** của nhánh trước (`1..=10 => …; 5 => …`), khoảng lồng khoảng và khoảng
+  **rỗng** (`9..=8`) là lỗi "nhánh không bao giờ chạy".
+- 🛡️ **Trả về địa chỉ biến cục bộ** (`return &x`, `return &s.v`, `return &a[1]`)
+  — con trỏ treo kinh điển — nay bị bắt lúc biên dịch.
+- 🛡️ **Ghi vào `str`** (`s[0] = 'x'` — chuỗi chỉ đọc) và chỉ số hằng vượt biên
+  chuỗi literal (`"abc"[4]`) là lỗi G thay vì lỗi C/segfault.
+- 🛡️ **Chuỗi định dạng:** khoá lạ (`{name}`, `{0}`, `{q}`), cờ sai (`{:-5}`,
+  `{:z}`), `{p}` trên số → lỗi rõ ràng (trước đây âm thầm in thập phân).
+- 🛡️ **`bool` chỉ so sánh với `bool`** (`b == 1`, `x == true`, `e == true` bị
+  từ chối — nhất quán với việc `let b: bool = 1` đã bị cấm).
+- 🛡️ **Builtin chặt hơn:** `min/max/clamp/abs` đòi đối số số; `abs` trên kiểu
+  không dấu, `clamp(x, 10, 1)` (lo > hi) là lỗi; `panic()` cần đúng 1 chuỗi,
+  `panic(5)` gợi ý `format(...)`; `assert("x")` báo điều kiện sai kiểu.
+- 🧰 **Thuộc tính & asm (OS-dev):** thuộc tính lặp (`@packed @packed`),
+  `@align` + `@aligned`, `@naked` + `@inline` là lỗi; hàm `@naked` chỉ được chứa
+  `asm { }` và không khai báo kiểu trả về; `main` không thể `@naked`; `asm { }`
+  rỗng, ràng buộc output thiếu `=`/`+`, input có `=` được bắt sớm. Lỗi thuộc
+  tính giờ báo hết một lượt.
+- 🧪 **Bộ test: 161 ca** (+29): `array_lit_expr`, `match_bool_exhaustive`,
+  `extern_libc_sig`, `global_init_order` và 25 ca "phải lỗi".
+
+## Mới trong 0.8.0 — 🛡️ An toàn lúc chạy & suy luận kiểu chặt hơn
+
+- 🛡️ **Kiểm tra lúc chạy (kiểu Rust):** chỉ số **động** trên mảng tĩnh
+  (`a[i]` với `a: [4]int`) và chia/lấy dư số nguyên cho mẫu **không hằng**
+  (`x / d`, `x %= d`) được kiểm — sai thì `G panic: chỉ số 5 vượt biên mảng cỡ 3
+  tại file.g:12:7` / `chia cho 0 tại ...` thay vì đọc rác hoặc SIGFPE. Chi phí
+  gần bằng 0 ở `-O2` (gcc hoisting); tắt bằng `gc --no-checks`. Hoạt động cả
+  freestanding (panic = dừng CPU). Con trỏ/`[]T` không có độ dài nên không kiểm.
+- 🐛 **`{:b}` trên số in ra `true`** (bị hiểu là bool) → nay in **nhị phân**
+  (`{:08b}` đệm 0, số âm bù hai theo bề rộng kiểu); bool vẫn `true/false`.
+- 🐛 **Kiểu của toán tử một ngôi:** `-a` với `a: u8` từng cho `4294967291`
+  (in theo u8 nhưng C đã thăng cấp); nay `-`/`~` trên kiểu hẹp cho `int`, `-u32`
+  cho `i64` (giá trị `-1` đúng). `'z' - 'a'` cho `int` 25 thay vì ký tự `\x19`.
+- 🐛 **Mảng literal:** `[1, "x"]` từng lọt xuống C; `[]`/`[null, null]` sinh kiểu
+  C không tồn tại. Nay báo lỗi rõ; số hỗn hợp lấy kiểu chung (`[1, 2.5]` → `[2]f64`,
+  `[1, 5000000000]` → `[2]i64`); `let c: [2]*int = [null, null]` hợp lệ.
+- 🐛 **Gán vào biến đếm `for i in a..b`** làm hỏng vòng lặp âm thầm → nay là lỗi
+  (biến đếm bất biến như Rust; `for mut i in a..b` bị từ chối với hướng dẫn).
+- 🛡️ **`match` trên enum với tên viết hoa lạ** (`C =>` khi enum chỉ có `A, B`) từng
+  bị hiểu là *binding bắt tất cả* và nuốt các nhánh sau → nay báo lỗi + gợi ý.
+- 🛡️ **`int → enum` ngầm** (`let e: E = 5`, `f(1)` với `f(e: E)`) bị từ chối —
+  dùng `5 as E`; chiều `enum → int` vẫn tự do.
+- 🛡️ `-`/`~`/`!` trên chuỗi/struct/mảng, `~` trên số thực, `{b}` trên số thực:
+  lỗi G thay vì lỗi C.
+- 🧪 **Bộ test: 132 ca** (+13): `runtime_checks`, `unary_types`, `fmt_binary`,
+  `array_lit_infer` và 9 ca "phải lỗi".
 
 ## Mới trong 0.7.0 — 🔧 Đợt sửa lỗi & nâng cấp trình biên dịch
 

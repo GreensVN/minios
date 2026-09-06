@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể so sánh 'bool' với 'int'

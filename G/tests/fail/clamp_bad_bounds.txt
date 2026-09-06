@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: clamp(x, lo, hi): lo = 10 lớn hơn hi = 1 — thứ tự tham số là clamp(x, lo, hi)

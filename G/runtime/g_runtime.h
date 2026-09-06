@@ -328,6 +328,26 @@ static inline const char* g_int_to_str(int64_t v) {
     return g_str_dup(buf);
 }
 
+/* Biểu diễn NHỊ PHÂN của một số nguyên (cho placeholder '{b}' trên số, kiểu
+ * Rust '{:b}'). Trả về con trỏ vào bộ đệm xoay vòng tĩnh (đủ cho một lời gọi
+ * printf có tới 8 placeholder nhị phân) — không cần g_free. 'bits' = bề rộng
+ * kiểu để số âm in dạng bù hai đúng bề rộng (như Rust), 0 = tối giản. */
+static inline const char* g_bin_str(uint64_t v, int bits) {
+    static char bufs[8][72];
+    static unsigned idx = 0;
+    char* buf = bufs[idx++ & 7];
+    int n = bits > 0 ? bits : 64;
+    if (bits > 0 && bits < 64) v &= (((uint64_t)1 << bits) - 1);
+    int i = 0;
+    if (bits <= 0) {                     /* bỏ số 0 dẫn đầu (không âm) */
+        if (v == 0) { buf[0] = '0'; buf[1] = 0; return buf; }
+        while (n > 1 && !((v >> (n - 1)) & 1)) n--;
+    }
+    for (int b = n - 1; b >= 0; b--) buf[i++] = ((v >> b) & 1) ? '1' : '0';
+    buf[i] = 0;
+    return buf;
+}
+
 /* Đảo ngược chuỗi -> chuỗi mới (heap). */
 static inline const char* g_str_rev(const char* s) {
     if (!s) s = "";
@@ -480,5 +500,42 @@ static inline double g_clock_secs(void) {
 #define G_U64_MAX  18446744073709551615ULL
 
 #endif /* G_FREESTANDING */
+
+/* ---- Kiểm tra biên & chia 0 lúc chạy (kiểu Rust) ----
+ * Codegen bọc 'a[i]' trên MẢNG TĨNH (cỡ biết lúc biên dịch) và '/', '%' số
+ * nguyên bằng các macro này; -DG_NO_CHECKS (gc --no-checks) tắt hoàn toàn.
+ * Freestanding: g_panic = dừng CPU (định nghĩa bên trên). */
+_Noreturn static inline void g_bounds_fail(long long i, long long n, const char* where) {
+#ifndef G_FREESTANDING
+    fprintf(stderr, "\033[1;31mG panic:\033[0m chỉ số %lld vượt biên mảng cỡ %lld tại %s\n",
+            i, n, where);
+    exit(101);
+#else
+    (void)i; (void)n; (void)where; g_cli(); for (;;) g_hlt();
+#endif
+}
+_Noreturn static inline void g_div_zero_fail(const char* where) {
+#ifndef G_FREESTANDING
+    fprintf(stderr, "\033[1;31mG panic:\033[0m chia cho 0 tại %s\n", where);
+    exit(101);
+#else
+    (void)where; g_cli(); for (;;) g_hlt();
+#endif
+}
+#ifdef G_NO_CHECKS
+#define g_idx(i, n, where)      (i)
+#define g_chk_div(a, op, b, where) ((a) op (b))
+#else
+#define g_idx(i, n, where) \
+    ({ __auto_type _gi = (i); \
+       if (__builtin_expect((unsigned long long)_gi >= (unsigned long long)(n), 0)) \
+           g_bounds_fail((long long)_gi, (long long)(n), where); \
+       _gi; })
+#define g_chk_div(a, op, b, where) \
+    ({ __auto_type _gb = (b); \
+       if (__builtin_expect(_gb == 0, 0)) g_div_zero_fail(where); \
+       (a) op _gb; })
+#endif
+
 
 #endif /* G_RUNTIME_H */

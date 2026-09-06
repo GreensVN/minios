@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể ghi vào phần tử của 'str' (chuỗi chỉ đọc) — sao chép sang bộ đệm '[N]char' hoặc dùng '*char' cấp phát riêng rồi ghi

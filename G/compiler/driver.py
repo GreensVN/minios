@@ -4,6 +4,7 @@ G Language - Driver: điều phối toàn bộ pipeline biên dịch.
 """
 
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.7.0"
+VERSION = "0.9.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -196,6 +197,8 @@ def find_cc(preferred=None):
 def _cc_common_flags(args):
     """Cờ cc dùng chung cho mọi chế độ biên dịch native (exe/obj/asm)."""
     flags = [f"-O{args.O}", "-I", RUNTIME_DIR, "-std=gnu11", "-w"]
+    if args.no_checks:
+        flags.append("-DG_NO_CHECKS")   # tắt kiểm tra biên mảng/chia 0 lúc chạy
     if args.freestanding:
         # Không phụ thuộc libc/môi trường lưu trữ — dùng cho kernel/firmware.
         # Tắt bảo vệ stack & PIC vì kernel tự quản lý mọi thứ; bật runtime
@@ -254,8 +257,19 @@ def build_native(args, extra, result):
             os.unlink(c_path)
 
     if proc.returncode != 0:
-        print("gc: lỗi biên dịch C backend (đây thường là lỗi nội bộ của G):",
-              file=sys.stderr)
+        # 'extern fn' khai báo hàm libc với chữ ký lệch header (vd 'srand(int)'
+        # thay vì 'u32', 'puts(*char)' thay vì 'str') -> gcc 'conflicting types'.
+        # Đây là lỗi của mã G, không phải lỗi nội bộ — giải thích cho rõ.
+        m = re.search(r"conflicting types for [‘'](\w+)[’']", proc.stderr)
+        if m:
+            print(f"gc: \033[31mlỗi\033[0m: 'extern fn {m.group(1)}' có chữ ký khác "
+                  f"với khai báo trong header thư viện C — sửa kiểu tham số/kiểu "
+                  f"trả về cho khớp (xem 'note: previous declaration' bên dưới; "
+                  f"'str' = const char*, 'u32' = unsigned int, 'usize' = size_t):",
+                  file=sys.stderr)
+        else:
+            print("gc: lỗi biên dịch C backend (đây thường là lỗi nội bộ của G):",
+                  file=sys.stderr)
         print(proc.stderr, file=sys.stderr)
         return 1
 
@@ -294,6 +308,9 @@ def main(argv):
     ap.add_argument("-S", "--emit-asm", action="store_true",
                     help="xuất mã assembly .s của chương trình")
     ap.add_argument("-O", default="2", help="mức tối ưu (0,1,2,3,s,g), mặc định 2")
+    ap.add_argument("--no-checks", action="store_true",
+                    help="tắt kiểm tra lúc chạy (biên mảng tĩnh, chia cho 0) — "
+                         "nhanh hơn, nhưng lỗi trở thành hành vi không xác định")
     ap.add_argument("--debug", action="store_true",
                     help="in traceback đầy đủ khi gặp lỗi nội bộ")
     ap.add_argument("--version", action="version", version=f"gc (ngôn ngữ G) {VERSION}")

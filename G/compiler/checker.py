@@ -7,6 +7,7 @@ G Language - Semantic Analyzer / Type Checker.
 - Chẩn đoán thông minh: gợi ý "có phải ... ?" (khoảng cách sửa Levenshtein).
 """
 
+import re
 from . import ast_nodes as A
 from . import types as T
 
@@ -129,6 +130,9 @@ _INT_SPECS = {"d", "ld", "u", "lu", "x", "X", "o", "lx", "lX", "lo"}
 _FLOAT_SPECS = {"f", "lf", "g", "e", "lg", "le"}
 # Chữ kiểu đơn được phép đặt SAU dấu ':' (kiểu Rust: '{:x}', '{:08x}', '{:.2f}').
 _FMT_TYPE_CHARS = set("duxXofgescb")
+# Mọi khoá placeholder hợp lệ ('' và 'v' = tự suy luận).
+_FMT_KEYS = {"", "v", "b", "p"} | _INT_SPECS | _FLOAT_SPECS | {"s", "c"}
+_FMT_FLAGS_RE = re.compile(r"[<>^]?[+ ]?#?0?\d*(\.\d*)?")
 
 
 def edit_distance(a: str, b: str) -> int:
@@ -208,19 +212,20 @@ class Checker:
         self.prog.enum_tables = self.enums
         self.collect_funcs()
         self.collect_globals()
-        # Kiểm tra thuộc tính @ (đích hợp lệ, số/kiểu đối số) trước khi sinh mã.
+        self._errors = []
+        # Kiểm tra thuộc tính @ (đích hợp lệ, số/kiểu đối số) trước khi sinh mã
+        # (phục hồi theo từng mục để báo hết một lượt).
         for it in self.prog.items:
             self.cur_file = getattr(it, "src_file", None)
             if isinstance(it, A.Function):
-                self.validate_attrs(getattr(it, "attrs", []), "fn", it)
+                self._recover(self.validate_attrs, getattr(it, "attrs", []), "fn", it)
             elif isinstance(it, A.StructDef):
-                self.validate_attrs(getattr(it, "attrs", []), "struct", it)
+                self._recover(self.validate_attrs, getattr(it, "attrs", []), "struct", it)
             elif isinstance(it, A.GlobalVar):
-                self.validate_attrs(getattr(it, "attrs", []), "global", it)
+                self._recover(self.validate_attrs, getattr(it, "attrs", []), "global", it)
             elif isinstance(it, A.Impl):
                 for m in it.methods:
-                    self.validate_attrs(getattr(m, "attrs", []), "fn", m)
-        self._errors = []
+                    self._recover(self.validate_attrs, getattr(m, "attrs", []), "fn", m)
         for it in self.prog.items:
             self.cur_file = getattr(it, "src_file", None)
             if isinstance(it, A.Function) and it.body is not None:
@@ -269,7 +274,11 @@ class Checker:
     }
 
     def validate_attrs(self, attrs, kind, node):
+        seen = {}
         for a in attrs:
+            if a.name in seen:
+                self.err(f"thuộc tính '@{a.name}' bị lặp lại", a)
+            seen[a.name] = a
             spec = self._ATTR_TABLE.get(a.name)
             if spec is None:
                 sug = suggest(a.name, set(self._ATTR_TABLE))
@@ -295,6 +304,35 @@ class Checker:
                 if not isinstance(a.args[0], A.StrLit):
                     self.err(f"'@{a.name}' cần một chuỗi literal "
                              f"(vd '@{a.name}(\".text.boot\")')", a)
+        if "align" in seen and "aligned" in seen:
+            self.err("'@align' và '@aligned' là một — chỉ dùng một trong hai",
+                     seen["aligned"])
+        if "naked" in seen and "inline" in seen:
+            self.err("'@naked' không kết hợp được với '@inline' (hàm naked không "
+                     "có prologue/epilogue để inline)", seen["inline"])
+        if kind == "fn" and "naked" in seen:
+            self._check_naked_fn(node, seen["naked"])
+
+    def _check_naked_fn(self, fn: A.Function, attr):
+        """Hàm @naked KHÔNG có prologue/epilogue: C chỉ cho phép thân là asm
+        thuần (gcc: 'basic asm' only) — biến cục bộ, biểu thức hay 'return' sẽ
+        sinh mã dùng stack/thanh ghi chưa thiết lập (UB / lỗi gcc khó hiểu)."""
+        if fn.name == "main":
+            self.err("'main' không thể là @naked (điểm vào hosted cần "
+                     "prologue/epilogue chuẩn)", attr)
+            return
+        if fn.is_extern or fn.body is None:
+            return
+        if fn.ret is not None and self.resolve(fn.ret).kind != "void":
+            self.err(f"hàm @naked '{fn.name}' không thể khai báo kiểu trả về — "
+                     f"không có epilogue C để trả giá trị; đặt kết quả vào "
+                     f"thanh ghi bằng asm và bỏ '-> T'", attr)
+        for st in fn.body:
+            if not isinstance(st, A.Asm):
+                self.err(f"thân hàm @naked '{fn.name}' chỉ được chứa khối "
+                         f"'asm {{ ... }}' (gcc không cho phép mã C khác trong "
+                         f"hàm naked)", st)
+                break
 
     # ---------- thu thập hằng nguyên (cho cỡ mảng tượng trưng) ----------
     def collect_const_values(self):
@@ -708,6 +746,16 @@ class Checker:
                 if (prev is not None and prev.body is not None
                         and it.body is not None):
                     self.err(f"hàm '{it.name}' được định nghĩa nhiều lần", it)
+                elif prev is not None and (prev.is_extern or it.is_extern):
+                    # Hai khai báo cùng tên (extern + extern / extern + định
+                    # nghĩa) phải CÙNG chữ ký — C báo 'conflicting types'.
+                    sig_prev = self._sig_text(prev)
+                    sig_new = self._sig_text(it)
+                    if sig_prev != sig_new:
+                        self.err(
+                            f"'{it.name}' được khai báo lại với chữ ký khác: "
+                            f"trước là 'fn {it.name}{sig_prev}', nay là "
+                            f"'fn {it.name}{sig_new}'", it)
                 self.register_func(it)
             elif isinstance(it, A.Impl):
                 self.cur_file = getattr(it, "src_file", None)
@@ -878,6 +926,61 @@ class Checker:
                     gt = T.INT
                 it.resolved_type = gt
                 self.globals[it.name] = (gt, it.mutable and not it.is_const)
+        self._check_global_init_order()
+
+    def _check_global_init_order(self):
+        """Initializer của global chỉ được tham chiếu global khai báo TRƯỚC nó.
+        Global không-hằng được khởi tạo lúc chạy theo thứ tự khai báo (constructor),
+        nên tham chiếu tiến/chu trình ('const A = B + 1; const B = A + 1') đọc giá
+        trị 0 chưa khởi tạo một cách âm thầm. Qua lời gọi hàm thì không truy vết
+        (hàm có thể đọc global — chấp nhận, như C)."""
+        seen = set()
+        for it in self.prog.items:
+            if not isinstance(it, A.GlobalVar):
+                continue
+            self.cur_file = getattr(it, "src_file", None)
+            if it.value is not None:
+                for ref in self._global_refs(it.value):
+                    if ref == it.name:
+                        self.err(f"global '{it.name}' tự tham chiếu trong giá trị "
+                                 f"khởi tạo của chính nó", it)
+                    if ref not in seen:
+                        self.err(
+                            f"giá trị khởi tạo của '{it.name}' dùng global '{ref}' "
+                            f"khai báo SAU nó — lúc đó '{ref}' chưa được khởi tạo "
+                            f"(đọc 0). Đổi thứ tự khai báo", it)
+            seen.add(it.name)
+
+    def _global_refs(self, e):
+        """Tên các global được đọc trực tiếp trong biểu thức (không đi vào lời gọi)."""
+        out = []
+        if isinstance(e, A.Ident):
+            if e.name in self.globals:
+                out.append(e.name)
+        elif isinstance(e, A.Binary):
+            out += self._global_refs(e.left) + self._global_refs(e.right)
+        elif isinstance(e, A.Unary):
+            out += self._global_refs(e.operand)
+        elif isinstance(e, A.Ternary):
+            out += self._global_refs(e.cond) + self._global_refs(e.then) + self._global_refs(e.els)
+        elif isinstance(e, A.Cast):
+            out += self._global_refs(e.expr)
+        elif isinstance(e, A.Index):
+            out += self._global_refs(e.base) + self._global_refs(e.index)
+        elif isinstance(e, A.FieldAccess):
+            out += self._global_refs(e.base)
+        elif isinstance(e, A.ArrayLit):
+            for x in e.elements:
+                out += self._global_refs(x)
+        elif isinstance(e, A.StructLit):
+            for _, v in e.fields:
+                out += self._global_refs(v)
+        return out
+
+    def _sig_text(self, fn: A.Function) -> str:
+        params = ", ".join(self.tyname(self.resolve(p.type)) for p in fn.params)
+        ret = self.resolve(fn.ret)
+        return f"({params})" + ("" if ret.kind == "void" else f" -> {self.tyname(ret)}")
 
     def register_func(self, fn: A.Function):
         params = tuple(self.resolve(p.type) for p in fn.params)
@@ -1056,7 +1159,10 @@ class Checker:
         numeric = ("int", "float", "char", "bool")
         if dst.kind in numeric and src.kind in numeric:
             return True
-        if {dst.kind, src.kind} <= {"int", "char", "enum"}:
+        # enum -> số: cho phép ngầm (giá trị enum là số nguyên). Số -> enum thì
+        # KHÔNG (có thể tạo giá trị không thuộc biến thể nào; 'match' rơi qua âm
+        # thầm) — yêu cầu 'x as E' tường minh.
+        if src.kind == "enum" and dst.kind in ("int", "char"):
             return True
         return False
 
@@ -1194,9 +1300,60 @@ class Checker:
             return all(self._always_returns(b) for _, _, b in st.arms)
         return False
 
+    def _check_return_local_addr(self, v, st):
+        """'return &x' / 'return &arr[i]' / 'return arr' với x/arr là BIẾN CỤC BỘ
+        (không phải tham số con trỏ/global): trả về con trỏ tới stack frame đã bị
+        huỷ -> segfault/rác âm thầm. Bắt tĩnh trường hợp trực tiếp."""
+        root = None
+        if isinstance(v, A.Unary) and v.op == "&":
+            root = v.operand
+            # đi về biến gốc qua .field / [i] (không đi qua con trỏ)
+            while True:
+                if isinstance(root, A.FieldAccess):
+                    bt = getattr(root.base, "gtype", None)
+                    if bt is not None and bt.kind == "ptr":
+                        return
+                    root = root.base
+                elif isinstance(root, A.Index):
+                    bt = getattr(root.base, "gtype", None)
+                    if bt is None or bt.kind != "array" or bt.n == "dyn":
+                        return
+                    root = root.base
+                else:
+                    break
+        elif isinstance(v, A.Ident):
+            vt = getattr(v, "gtype", None)
+            if vt is not None and self._is_static_array(vt):
+                root = v          # mảng tĩnh cục bộ phân rã thành con trỏ
+        if not isinstance(root, A.Ident):
+            return
+        name = root.name
+        # cục bộ (trong scopes, KHÔNG phải global)?
+        local = any(name in sc for sc in self.scopes)
+        if not local:
+            return
+        info = self.lookup(name)
+        if info is None:
+            return
+        # tham số/biến kiểu con trỏ hoặc []T trỏ ra ngoài frame -> 'return &p[i]'
+        # đã bị loại ở trên (bt.kind != array). Còn lại: ô nhớ trong frame.
+        self.err(f"trả về địa chỉ của biến cục bộ '{name}' — bộ nhớ này bị huỷ "
+                 f"khi hàm kết thúc (con trỏ treo). Cấp phát heap (g_alloc) hoặc "
+                 f"nhận con trỏ tới bộ đệm đầu ra làm tham số", st)
+
     def _match_covers_enum(self, st: A.Match) -> bool:
         """match trên enum có liệt kê HẾT mọi variant không (vét cạn không cần '_')."""
         subj_t = getattr(st, "subject_type", None)
+        if subj_t is not None and subj_t.kind == "bool":
+            # bool: 'true' và 'false' (không guard) là vét cạn.
+            covered = set()
+            for pats, guard, _ in st.arms:
+                if pats is None or guard is not None:
+                    continue
+                for p in pats:
+                    if isinstance(p, A.BoolLit):
+                        covered.add(bool(p.value))
+            return covered == {True, False}
         if subj_t is None or subj_t.kind != "enum":
             return False
         all_variants = set(self.enums.get(subj_t.name, {}))
@@ -1260,6 +1417,13 @@ class Checker:
 
     def _check_let(self, st: A.Let):
         if True:
+            # Mảng literal có chú thích kiểu: cho phép phần tử 'null' (kiểu đích
+            # là mảng con trỏ) — gắn kiểu mong đợi trước khi suy luận.
+            if isinstance(st.value, A.ArrayLit) and st.type is not None:
+                try:
+                    st.value.expected = self.resolve(st.type)
+                except CheckError:
+                    pass
             val_t = self.infer(st.value) if st.value is not None else None
             # Gán kết quả của hàm void cho biến là vô nghĩa (C: 'declared void').
             if val_t is not None and val_t.kind == "void":
@@ -1297,6 +1461,7 @@ class Checker:
                         st)
                 self._check_int_range(st.value, self.cur_ret, st)
                 self._check_int_div_to_float(st.value, self.cur_ret, st)
+                self._check_return_local_addr(st.value, st)
             elif self.cur_ret.kind != "void":
                 self.err(
                     f"hàm '{self.cur_fn}' cần trả về '{self.tyname(self.cur_ret)}'", st)
@@ -1336,6 +1501,20 @@ class Checker:
         elif isinstance(st, A.ExprStmt):
             self.infer(st.expr)
         elif isinstance(st, A.Asm):
+            if not st.code.strip() and not st.outputs and not st.inputs:
+                self.err("khối 'asm { }' rỗng — cần ít nhất một chuỗi lệnh "
+                         "(vd asm { \"cli\" })", st)
+            # Ràng buộc toán hạng phải hợp lệ: output bắt đầu bằng '=' hoặc '+',
+            # input KHÔNG được có '=' (gcc báo 'invalid lvalue'/'output operand
+            # constraint lacks =' khó hiểu).
+            for cons, ex in getattr(st, "outputs", []):
+                if not cons or cons[0] not in "=+":
+                    self.err(f"ràng buộc output asm \"{cons}\" phải bắt đầu bằng "
+                             f"'=' (ghi) hoặc '+' (đọc-ghi)", st)
+            for cons, ex in getattr(st, "inputs", []):
+                if cons and cons[0] in "=+":
+                    self.err(f"ràng buộc input asm \"{cons}\" không được có '='/'+' "
+                             f"(chỉ output mới ghi)", st)
             # asm mở rộng: phân giải các toán hạng (gắn gtype/c_name, bắt biến chưa
             # khai báo). Toán hạng output phải là ô nhớ (lvalue) khả biến.
             for cons, ex in getattr(st, "outputs", []):
@@ -1365,9 +1544,16 @@ class Checker:
         st.var_type = vt
         self.loop_depth += 1
         self.push()
-        st.c_name = self.declare(st.var, vt, True)
+        # Biến đếm của 'for i in a..b' là BẤT BIẾN (như Rust): gán vào nó sẽ làm
+        # hỏng chính vòng lặp (nó là biến đếm C). Muốn sửa thì 'let mut j = i'.
+        st.c_name = self.declare(st.var, vt, False)
+        rv = getattr(self, "_range_vars", None)
+        if rv is None:
+            rv = self._range_vars = set()
+        rv.add(st.var)
         for s in st.body:
-            self.check_stmt(s)
+            self._recover(self.check_stmt, s)
+        rv.discard(st.var)
         self.pop()
         self.loop_depth -= 1
         self._check_unreachable(st.body)
@@ -1441,6 +1627,16 @@ class Checker:
         st.bindings = []
         for pats, guard, body in st.arms:
             bind = self._binding_name(pats)
+            # Subject là enum mà nhánh là một tên VIẾT HOA chưa biết ('C' khi enum
+            # chỉ có A, B): gần như chắc chắn là gõ sai tên biến thể — nếu coi là
+            # binding thì nó bắt-tất cả và nuốt luôn các nhánh sau (bẫy Rust).
+            if (bind is not None and subj_t.kind == "enum" and bind[:1].isupper()):
+                sug = suggest(bind, set(self.enums.get(subj_t.name, {})))
+                msg = (f"'{bind}' không phải biến thể của enum '{subj_t.name}' "
+                       f"(sẽ bị hiểu là binding bắt mọi giá trị)")
+                if sug:
+                    msg += f" — có phải '{sug}'?"
+                self.err(msg, pats[0])
             self.push()
             bind_cname = None
             if bind is not None:
@@ -1511,7 +1707,9 @@ class Checker:
         ('_' hoặc binding trần, không guard); (2) pattern hằng lặp lại một
         pattern đã có ở nhánh trước (không guard) — nhánh đầu luôn thắng."""
         seen = {}          # khoá pattern -> chỉ số nhánh
+        ranges = []        # [(lo, hi, idx)] các khoảng số nguyên đã gặp (không guard)
         catch_all_at = None
+        bools_seen = set()
         for idx, (pats, guard, _body) in enumerate(st.arms):
             if catch_all_at is not None:
                 self.err(
@@ -1524,6 +1722,25 @@ class Checker:
             if pats is None or bind is not None:
                 continue
             for p in pats:
+                if isinstance(p, A.RangePat):
+                    lo = self._fold_const_int(p.lo)
+                    hi = self._fold_const_int(p.hi)
+                    if lo is None or hi is None:
+                        continue
+                    if not p.inclusive:
+                        hi -= 1
+                    if lo > hi:
+                        self.err(f"khoảng pattern rỗng ({lo}..{'=' if p.inclusive else ''}"
+                                 f"{self._fold_const_int(p.hi)}) — không giá trị nào khớp", p)
+                    if guard is None:
+                        for (plo, phi, pidx) in ranges:
+                            if plo <= lo and hi <= phi:
+                                self.err(f"khoảng pattern này nằm trọn trong khoảng ở "
+                                         f"nhánh {pidx + 1} — nhánh này không bao giờ "
+                                         f"chạy", p)
+                                break
+                        ranges.append((lo, hi, idx))
+                    continue
                 key = self._pat_key(p, subj_t)
                 if key is None:
                     continue
@@ -1531,7 +1748,23 @@ class Checker:
                     self.err(
                         f"pattern '{key[1]}' lặp lại (đã có ở nhánh {seen[key] + 1}) "
                         f"— nhánh này không bao giờ chạy", p)
+                if key[0] in ("int", "char") and guard is None:
+                    v = key[1] if key[0] == "int" else (
+                        ord(key[1]) if isinstance(key[1], str) and len(key[1]) == 1 else None)
+                    for (plo, phi, pidx) in ranges:
+                        if v is not None and plo <= v <= phi:
+                            self.err(f"pattern '{key[1]}' đã nằm trong khoảng ở nhánh "
+                                     f"{pidx + 1} — nhánh này không bao giờ chạy", p)
+                            break
+                if key[0] == "bool":
+                    bools_seen.add(key[1])
                 seen.setdefault(key, idx)
+        # match trên bool phải vét cạn (true & false hoặc '_'), như enum.
+        if (subj_t.kind == "bool" and catch_all_at is None
+                and bools_seen != {True, False}):
+            missing = ", ".join(str(b).lower() for b in ({True, False} - bools_seen))
+            self.err(f"match trên bool chưa vét cạn — thiếu: {missing} "
+                     f"(thêm nhánh hoặc '_')", st)
 
     def _pat_key(self, p, subj_t: T.GType):
         """Khoá so trùng cho pattern hằng: ('int', giá trị) / ('str', chuỗi) /
@@ -1545,6 +1778,8 @@ class Checker:
             return ("str", p.value)
         if isinstance(p, A.CharLit):
             return ("char", p.value)
+        if isinstance(p, A.BoolLit):
+            return ("bool", bool(p.value))
         v = self._fold_const_int(p)
         if v is not None and not isinstance(p, A.Ident):
             return ("int", v)
@@ -1573,6 +1808,9 @@ class Checker:
             self._check_int_range(st.value, tt, st)
             self._check_int_div_to_float(st.value, tt, st)
 
+    def _is_range_loop_var(self, name) -> bool:
+        return name in getattr(self, "_range_vars", set())
+
     def _check_lvalue_mutable(self, tgt, stmt):
         """Đi từ ô nhớ đích về biến gốc để kiểm tra tính bất biến.
         Ghi qua con trỏ (deref/index trên ptr) luôn được phép."""
@@ -1591,7 +1829,10 @@ class Checker:
                 e.c_name = info[2]
                 if not mutable:
                     self.err(
-                        f"không thể gán cho '{e.name}' (bất biến — dùng 'let mut')",
+                        f"không thể gán cho '{e.name}' (bất biến — dùng 'let mut'"
+                        + ("; biến đếm 'for i in a..b' không sửa được — sao chép ra "
+                           "'let mut j = i'" if self._is_range_loop_var(e.name) else "")
+                        + ")",
                         stmt)
                 return
             if isinstance(e, A.FieldAccess):
@@ -1602,8 +1843,14 @@ class Checker:
                 continue
             if isinstance(e, A.Index):
                 bt = getattr(e.base, "gtype", None)
-                # index qua con trỏ / chuỗi / mảng động (đều là con trỏ heap) -> cho phép
-                if bt is not None and (bt.kind in ("ptr", "str")
+                if bt is not None and bt.kind == "str":
+                    # 'str' là 'const char*' (literal nằm trong vùng chỉ đọc):
+                    # ghi 's[i] = c' là lỗi C / segfault. Cần bộ đệm char riêng.
+                    self.err("không thể ghi vào phần tử của 'str' (chuỗi chỉ đọc) "
+                             "— sao chép sang bộ đệm '[N]char' hoặc dùng "
+                             "'*char' cấp phát riêng rồi ghi", stmt)
+                # index qua con trỏ / mảng động (đều là con trỏ heap) -> cho phép
+                if bt is not None and (bt.kind == "ptr"
                                        or self._is_dyn_array(bt)):
                     return
                 e = e.base
@@ -1855,9 +2102,36 @@ class Checker:
             self.infer(e.expr)
             return T.USIZE
         if isinstance(e, A.ArrayLit):
-            elem = self.infer(e.elements[0]) if e.elements else T.INT
-            for el in e.elements[1:]:
-                self.infer(el)
+            if not e.elements:
+                self.err("mảng literal rỗng '[]' không suy luận được kiểu/cỡ — khai "
+                         "báo kiểu tường minh và điền phần tử (vd 'let a: [4]int = "
+                         "[0, 0, 0, 0]') hoặc dùng g_alloc cho mảng động", e)
+                return T.array_of(T.INT, 0)
+            elem = self.infer(e.elements[0])
+            for i, el in enumerate(e.elements[1:], start=2):
+                et = self.infer(el)
+                # Mọi phần tử phải CÙNG kiểu (số với số thì được — C thăng cấp;
+                # mảng lồng so theo phần tử). '[1, "x"]' từng lọt xuống C.
+                if elem.kind == "unknown" or et.kind == "unknown":
+                    continue
+                if not (self.assignable(elem, et) or self.assignable(et, elem)):
+                    self.err(
+                        f"mảng literal có phần tử không cùng kiểu: phần tử 1 là "
+                        f"'{self.tyname(elem)}' nhưng phần tử {i} là "
+                        f"'{self.tyname(et)}'", el)
+                # Kiểu chung cho số: 'int' + 'f64' -> mảng f64; 'int' + 'i64' -> i64.
+                if elem.is_numeric() and et.is_numeric() and elem.kind != "char" \
+                        and et.kind != "char":
+                    elem = T.common_numeric(elem, et)
+            exp = getattr(e, "expected", None)
+            if elem.kind == "null" and exp is not None and exp.kind == "array" \
+                    and exp.elem is not None and self._ptrlike(exp.elem):
+                elem = exp.elem
+            if elem.kind in ("null", "void"):
+                self.err(
+                    "không suy luận được kiểu phần tử của mảng literal "
+                    f"('{self.tyname(elem)}') — khai báo kiểu tường minh, vd "
+                    "'let a: [2]*int = [null, null]'", e)
             return T.array_of(elem, len(e.elements))
         if isinstance(e, A.StructLit):
             return self.infer_struct_lit(e)
@@ -1998,6 +2272,11 @@ class Checker:
                 return T.ISIZE   # hiệu hai con trỏ
         if lt.is_numeric() and rt.is_numeric():
             res = T.common_numeric(lt, rt)
+            # char ⊕ char (vd 'z' - 'a') là KHOẢNG CÁCH/số, không phải ký tự —
+            # trả 'int' như C thăng cấp (trước đây trả 'char' và in ra ký tự điều
+            # khiển \x19). char ⊕ int đã cho int qua common_numeric.
+            if lt.kind == "char" and rt.kind == "char":
+                res = T.INT
             # Biểu thức HẰNG toàn số nguyên mà giá trị vượt 'int' 32-bit (vd
             # '100000 * 100000', 'CAP * CAP'): nâng lên i64/u64 như với literal
             # lớn — nếu không, C tính trong int và tràn âm thầm (1410065408).
@@ -2036,9 +2315,11 @@ class Checker:
         # dưới để không lọt 'EnumA == EnumB'.
         if a.kind == "enum" and b.kind == "enum":
             return a.name == b.name
-        if {a.kind, b.kind} <= {"int", "char", "enum", "bool"}:
-            return True
-        if a.kind == "bool" and b.kind == "bool":
+        # bool CHỈ so với bool ('b == 1' / 'x == true' gần như luôn là lỗi logic;
+        # 'let b: bool = 1' cũng đã bị từ chối — nhất quán).
+        if a.kind == "bool" or b.kind == "bool":
+            return a.kind == "bool" and b.kind == "bool"
+        if {a.kind, b.kind} <= {"int", "char", "enum"}:
             return True
         # con trỏ so với con trỏ / null (con trỏ hàm cũng là con trỏ)
         ap = a.kind in ("ptr", "str", "null", "func") or self._is_dyn_array(a)
@@ -2050,6 +2331,9 @@ class Checker:
     def infer_unary(self, e: A.Unary):
         ot = self.infer(e.operand)
         if e.op == "!":
+            if ot.kind in ("str", "struct", "void") or self._is_static_array(ot):
+                self.err(f"toán tử '!' không áp dụng cho giá trị kiểu "
+                         f"'{self.tyname(ot)}'", e)
             return T.BOOL
         if e.op == "&":
             # '&' chỉ lấy được địa chỉ của một Ô NHỚ (lvalue). '&(a+b)', '&f()',
@@ -2072,7 +2356,30 @@ class Checker:
             self.err(
                 f"không thể giải tham chiếu ('*') giá trị kiểu '{self.tyname(ot)}' "
                 f"(chỉ áp dụng cho con trỏ)", e)
-        return ot  # - , ~
+        if e.op in ("-", "~") and ot.kind != "unknown" and not ot.is_numeric():
+            self.err(f"toán tử '{e.op}' cần một số, nhận '{self.tyname(ot)}'", e)
+        if e.op == "~" and ot.kind == "float":
+            self.err("toán tử '~' (đảo bit) chỉ áp dụng cho số nguyên, nhận "
+                     f"'{self.tyname(ot)}'", e)
+        if e.op == "-":
+            # Phủ định số KHÔNG DẤU / hẹp: C thăng cấp lên int rồi in theo kiểu
+            # cũ ('-a' với a: u8 in ra 4294967291). Kết quả của '-' là kiểu CÓ DẤU
+            # ít nhất 32 bit (như C thực sự tính) — 'u64' giữ nguyên (không có
+            # kiểu có dấu rộng hơn; người dùng chủ ý làm số học modulo).
+            if ot.kind == "char":
+                return T.INT
+            if ot.kind == "int":
+                if ot.bits < 32:
+                    return T.INT
+                if not ot.signed and ot.bits == 32:
+                    e.widen_signed = True     # codegen: '-(int64_t)w'
+                    return T.I64
+            return ot
+        if e.op == "~":
+            if ot.kind == "char" or (ot.kind == "int" and ot.bits < 32):
+                return T.INT
+            return ot
+        return ot
 
     @staticmethod
     def _is_lvalue(e) -> bool:
@@ -2081,6 +2388,12 @@ class Checker:
         if isinstance(e, (A.Ident, A.FieldAccess, A.Index)):
             return True
         return isinstance(e, A.Unary) and e.op == "*"
+
+    def _require_numeric_args(self, name, types, node):
+        for i, t in enumerate(types, start=1):
+            if t.kind != "unknown" and not t.is_numeric():
+                self.err(f"{name}(): tham số {i} phải là số, nhận '{self.tyname(t)}'",
+                         node)
 
     def _check_cond(self, cond, where: str) -> T.GType:
         """Điều kiện của if/while/?: phải là bool (hoặc số/con trỏ — kiểu C, so
@@ -2114,6 +2427,13 @@ class Checker:
                         f"(hợp lệ: 0..{bt.n - 1})", e)
             return bt.elem
         if bt.kind == "str":
+            # Chuỗi LITERAL + chỉ số hằng: kiểm biên ngay (kể cả '\0' cuối).
+            if isinstance(e.base, A.StrLit):
+                iv = self._fold_const_int(e.index)
+                n = len(e.base.value.encode("utf-8"))
+                if iv is not None and (iv < 0 or iv > n):
+                    self.err(f"chỉ số {iv} vượt biên chuỗi literal dài {n} "
+                             f"(hợp lệ: 0..{n}, {n} là ký tự kết thúc '\\0')", e)
             return T.CHAR
         if bt.kind == "unknown":
             return T.UNKNOWN
@@ -2365,10 +2685,33 @@ class Checker:
         if (sep and base in ("", "v") and flags
                 and flags[-1] in _FMT_TYPE_CHARS):
             base = flags[-1]
+            flags = flags[:-1]
+        # Khoá phải là một specifier đã biết: '{name}' (nội suy biến kiểu Rust)
+        # hay '{0}' (chỉ số) KHÔNG được hỗ trợ — trước đây âm thầm in thập phân.
+        if base not in _FMT_KEYS:
+            hint = ""
+            if base.isdigit():
+                hint = " — G không hỗ trợ placeholder đánh số; dùng '{}' theo thứ tự"
+            elif base.isidentifier():
+                hint = (" — G không nội suy tên biến trong chuỗi; viết '{}' và "
+                        f"truyền '{base}' làm đối số")
+            self.err(f"placeholder '{{{key}}}' không hợp lệ: khoá '{base}' không "
+                     f"phải specifier (hợp lệ: {{}}, {{d}}, {{x}}, {{f}}, {{s}}, "
+                     f"{{c}}, {{b}}, {{p}}... hoặc '{{:cờ}}'){hint}", node)
+        if sep and not _FMT_FLAGS_RE.fullmatch(flags):
+            self.err(f"cờ định dạng ':{flags}' trong '{{{key}}}' không hợp lệ "
+                     f"(dạng: [<|>|^][+| ][#][0][độ_rộng][.độ_chính_xác][chữ_kiểu], "
+                     f"vd '{{:>8}}', '{{:08.3f}}', '{{:#x}}')", node)
         key = base
         if at.kind == "unknown":
             return
-        if key in ("", "v", "b"):
+        if key in ("", "v"):
+            return
+        if key == "b":
+            if not (at.kind in ("bool", "char", "enum") or at.is_integer()):
+                self.err(
+                    f"placeholder '{{b}}' cần bool (in true/false) hoặc số nguyên "
+                    f"(in nhị phân) nhưng đối số kiểu '{self.tyname(at)}'", node)
             return
         if key in _INT_SPECS:
             if not (at.is_integer() or at.kind == "enum"):
@@ -2394,7 +2737,13 @@ class Checker:
                 self.err(
                     f"placeholder '{{c}}' cần ký tự/số nguyên nhưng đối số kiểu "
                     f"'{self.tyname(at)}'", node)
-        # 'p' và key lạ: bỏ qua (linh hoạt)
+        elif key == "p":
+            if not (at.is_pointerish() or self._is_dyn_array(at)
+                    or at.kind == "func"):
+                self.err(
+                    f"placeholder '{{p}}' (địa chỉ) cần con trỏ/chuỗi nhưng đối số "
+                    f"kiểu '{self.tyname(at)}' — dùng '{{x}}' để in số ở dạng hex",
+                    node)
 
     def _type_arg_to_gtype(self, arg):
         """Phân giải đối số-là-kiểu của g_alloc/g_realloc. Chấp nhận tên kiểu trần
@@ -2492,16 +2841,43 @@ class Checker:
                 self.err(f"{name}(a, b) cần đúng 2 tham số", e)
             a = self.infer(e.args[0]) if e.args else T.INT
             b = self.infer(e.args[1]) if len(e.args) > 1 else T.INT
+            self._require_numeric_args(name, [a, b], e)
             return T.common_numeric(a, b) if a.is_numeric() and b.is_numeric() else a
         if name == "clamp":
             if len(e.args) != 3:
                 self.err("clamp(x, lo, hi) cần đúng 3 tham số", e)
             ts = [self.infer(a) for a in e.args]
+            self._require_numeric_args(name, ts, e)
+            # clamp(x, lo, hi) với lo > hi (hằng): kết quả vô nghĩa.
+            if len(ts) == 3:
+                lo = self._fold_const_int(e.args[1])
+                hi = self._fold_const_int(e.args[2])
+                if lo is not None and hi is not None and lo > hi:
+                    self.err(f"clamp(x, lo, hi): lo = {lo} lớn hơn hi = {hi} — "
+                             f"thứ tự tham số là clamp(x, lo, hi)", e)
             return ts[0] if ts else T.INT
         if name == "abs":
             if len(e.args) != 1:
                 self.err("abs(x) cần đúng 1 tham số", e)
-            return self.infer(e.args[0]) if e.args else T.INT
+            at = self.infer(e.args[0]) if e.args else T.INT
+            self._require_numeric_args(name, [at], e)
+            if at.kind == "int" and not at.signed:
+                self.err(f"abs() trên số KHÔNG DẤU '{self.tyname(at)}' là vô nghĩa "
+                         f"(luôn trả chính nó)", e)
+            return at
+        if name in ("panic", "unreachable", "todo"):
+            # panic(msg) bắt buộc 1 chuỗi; unreachable()/todo() nhận 0-1 chuỗi.
+            if name == "panic" and len(e.args) != 1:
+                self.err("panic(msg) cần đúng 1 tham số là chuỗi thông điệp", e)
+            if name != "panic" and len(e.args) > 1:
+                self.err(f"{name}([msg]) nhận tối đa 1 tham số", e)
+            for a in e.args:
+                at = self.infer(a)
+                if at.kind not in ("str", "unknown") and not (
+                        at.kind == "ptr" and at.elem is not None and at.elem.kind == "char"):
+                    self.err(f"{name}: thông điệp phải là chuỗi (str), nhận "
+                             f"'{self.tyname(at)}' — dùng format(...) để ghép giá trị", a)
+            return T.VOID
         if name == "len":
             if len(e.args) != 1:
                 self.err("len(x) cần đúng 1 tham số", e)
@@ -2587,9 +2963,16 @@ class Checker:
                     self._check_fmt_spec(key, at, e)
             return T.STR if name == "format" else T.VOID
         if name == "assert":
-            if not e.args:
-                self.err("assert(cond[, msg]) cần ít nhất 1 tham số", e)
-            for a in e.args:
+            if not e.args or len(e.args) > 2:
+                self.err("assert(cond[, msg]) cần 1 hoặc 2 tham số", e)
+            if e.args:
+                self._check_cond(e.args[0], "assert")
+            if len(e.args) > 1:
+                mt = self.infer(e.args[1])
+                if mt.kind not in ("str", "unknown"):
+                    self.err(f"assert(cond, msg): thông điệp phải là chuỗi, nhận "
+                             f"'{self.tyname(mt)}'", e.args[1])
+            for a in e.args[2:]:
                 self.infer(a)
             return T.VOID
         if name in self._CMP_BUILTINS:

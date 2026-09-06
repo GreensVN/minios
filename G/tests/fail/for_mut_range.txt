@@ -1,0 +1,1 @@
+lỗi cú pháp: biến đếm của 'for i in a..b' luôn bất biến (là biến đếm của vòng lặp) — bỏ 'mut'; cần sửa thì 'let mut j = i' trong thân vòng lặp

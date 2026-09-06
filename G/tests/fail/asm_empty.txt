@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: khối 'asm { }' rỗng — cần ít nhất một chuỗi lệnh (vd asm { "cli" })

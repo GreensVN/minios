@@ -1,0 +1,7 @@
+-5 int
+-1 i64
+25 int
+98 int
+b
+-4 int
+false

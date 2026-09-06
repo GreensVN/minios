@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không suy luận được kiểu phần tử của mảng literal ('null') — khai báo kiểu tường minh, vd 'let a: [2]*int = [null, null]'

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: hàm @naked 'f' không thể khai báo kiểu trả về — không có epilogue C để trả giá trị; đặt kết quả vào thanh ghi bằng asm và bỏ '-> T'

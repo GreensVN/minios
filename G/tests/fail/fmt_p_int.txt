@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: placeholder '{p}' (địa chỉ) cần con trỏ/chuỗi nhưng đối số kiểu 'int' — dùng '{x}' để in số ở dạng hex

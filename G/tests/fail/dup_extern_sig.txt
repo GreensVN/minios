@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'puts' được khai báo lại với chữ ký khác: trước là 'fn puts(str) -> int', nay là 'fn puts(int)'

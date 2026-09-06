@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: thân hàm @naked 'g' chỉ được chứa khối 'asm { ... }' (gcc không cho phép mã C khác trong hàm naked)

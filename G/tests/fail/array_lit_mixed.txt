@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: mảng literal có phần tử không cùng kiểu: phần tử 1 là 'int' nhưng phần tử 2 là 'str'

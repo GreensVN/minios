@@ -149,6 +149,31 @@ subset (let/assign/if/while/for/return + arithmetic, with a step budget). It fol
 sizes (`[CAP*2+1]int`), enum values, and `sizeof`/`alignof` of types into compile-time
 constants. Anything outside the supported subset returns `None` (treated as non-constant).
 
+### Runtime checks
+
+Codegen wraps dynamic indexing of **static arrays** in `g_idx(i, n, "file:line:col")` and
+integer `/`, `%`, `/=`, `%=` with a non-constant divisor in `g_chk_div(...)` (both macros in
+`runtime/g_runtime.h`; they panic with a location). Constant indices/divisors are checked
+statically by the checker instead (`_is_const_expr` in codegen decides). `--no-checks` defines
+`G_NO_CHECKS` which turns both macros into identity. Pointers/`[]T` carry no length and are
+never checked. In freestanding mode the failure path halts the CPU.
+
+### Static checks that guard the C backend
+
+The checker deliberately rejects things C would accept (or only warn about) because the
+generated C would be wrong or produce confusing gcc errors. Notable ones, so you don't
+"fix" them as false positives: global initializers may only reference globals declared
+*earlier* (`_check_global_init_order` — runtime ctor runs in declaration order); duplicate
+`extern`/definition with a differing signature (`_sig_text` compare in `collect_funcs`);
+`extern fn` names in `_RUNTIME_DEFINED` (codegen) get **no** prototype because
+`g_runtime.h`/libc already defines them; writing through `str` (`const char*`);
+`return &local` / `return &local.field` / `return &local_arr[i]` (`_check_return_local_addr`);
+`bool` only compares with `bool`; format keys must be in `_FMT_KEYS` and flags must match
+`_FMT_FLAGS_RE`; `match` on `bool` must be exhaustive and constant patterns covered by an
+earlier range arm are errors; `@naked` bodies must be pure `asm { }` with no return type.
+Array literals in expression position (call args, `[1,2][i]`) lower to C99 compound
+literals; inside struct literals / `let` / globals they stay as bare `{ ... }` initializers.
+
 ### C backend is GCC/Clang-specific, not portable C
 
 Generated code is compiled with `-std=gnu11` and uses extensions deliberately:

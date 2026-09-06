@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: panic: thông điệp phải là chuỗi (str), nhận 'int' — dùng format(...) để ghép giá trị

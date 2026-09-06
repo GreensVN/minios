@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: panic(msg) cần đúng 1 tham số là chuỗi thông điệp

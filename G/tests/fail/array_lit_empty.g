@@ -1,0 +1,1 @@
+fn main() -> int { let a = []; return 0 }
