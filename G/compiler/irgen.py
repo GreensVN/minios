@@ -1302,6 +1302,74 @@ class IRGen:
     #: Số phần tử tối đa in ra cho mảng (khớp Codegen._PRINT_ARRAY_MAX).
     _PRINT_ARRAY_MAX = 8
 
+    _CMP_BUILTINS = {
+        "assert_eq", "assert_ne", "assert_lt", "assert_le", "assert_gt",
+        "assert_ge", "check_eq", "check_ne", "check_lt", "check_le",
+        "check_gt", "check_ge",
+    }
+    _CMP_OPS = {"eq": "eq", "ne": "ne", "lt": "lt", "le": "le",
+                "gt": "gt", "ge": "ge"}
+
+    def _gen_cmp_builtin(self, e, fname, ty):
+        """assert_*/check_* -> so sánh + rẽ nhánh + báo lỗi qua hàm runtime.
+
+        Phần ĐỊNH DẠNG giá trị hai vế dùng chính bộ bung của print (đệ quy cho
+        struct/enum/mảng), nên không cần hàm hỗ trợ riêng nào cho từng kiểu."""
+        suffix = fname.rsplit("_", 1)[1]
+        is_check = fname.startswith("check")
+        a, b = e.args[0], e.args[1]
+        gt = self.gtype(a)
+        if gt.kind == "slice":
+            raise IRGenError("so sánh slice trong assert_* chưa hạ được")
+        va = self.gen_expr(a)
+        vb = self.gen_expr(b)
+        # điều kiện ĐẠT
+        if gt.kind == "str" and suffix in ("eq", "ne"):
+            same = self.emit_val("call", [va, vb], ty=T.BOOL, node=e,
+                                 hint="se", callee="g_str_eq")
+            ok = (same if suffix == "eq"
+                  else self.emit_val("lnot", [same], ty=T.BOOL, node=e, hint="nn"))
+        elif gt.kind == "struct":
+            same = self.emit_val("call", [va, vb], ty=T.BOOL, node=e,
+                                 hint="se", callee=f"_g_eq_{gt.name}")
+            ok = (same if suffix == "eq"
+                  else self.emit_val("lnot", [same], ty=T.BOOL, node=e, hint="nn"))
+        else:
+            ok = self.emit_val(self._CMP_OPS[suffix], [va, vb], ty=T.BOOL,
+                               node=e, hint="ac")
+        # chuỗi mô tả hai vế (dựng bằng chính bộ bung của print)
+        lout, largs = [], []
+        rout, rargs = [], []
+        self._expand_value(gt, a, lout, largs, 0)
+        self._expand_value(gt, b, rout, rargs, 0)
+        name = (self.gen_expr(e.args[2]) if len(e.args) > 2
+                else I.const_str(fname))
+        fmt = ("".join(lout), "".join(rout))
+        vals = [ok, name, I.const_str(fmt[0]), I.const_str(fmt[1])]
+        vals += [self._fmt_arg_value(x, e) for x in largs]
+        vals += [self._fmt_arg_value(x, e) for x in rargs]
+        return self.emit_val(
+            "intrinsic", vals, ty=T.BOOL if is_check else T.VOID, node=e,
+            hint="cb", name=fname, is_check=is_check, line=e.line,
+            nleft=len(largs), nright=len(rargs))
+
+    def _fmt_arg_value(self, x, e):
+        """Vật hoá một đối số của chuỗi định dạng (kể cả _BoolStr/_EnumName)."""
+        if isinstance(x, _EnumName):
+            return self.emit_val("call", [self.gen_expr(x.node)], ty=T.STR,
+                                 node=e, hint="en",
+                                 callee=f"_g_enum_{x.enum}_name")
+        if isinstance(x, _BoolStr):
+            c = self.gen_expr(x.node)
+            return self.emit_val("select",
+                                 [c, I.const_str("true"), I.const_str("false")],
+                                 ty=T.STR, node=e, hint="bs")
+        if isinstance(x, _Cast):
+            v = self.gen_expr(x.node)
+            return self.emit_val("cast", [v], ty=self.gtype(x.node), node=e,
+                                 hint="fc", to_c=x.ctype)
+        return self.gen_expr(x)
+
     def _expand_struct(self, gt, arg, out, args, depth=0):
         """Bung 'Tên { f: v, ... }' vào chuỗi định dạng (đệ quy)."""
         if depth > 4:
@@ -1546,6 +1614,8 @@ class IRGen:
             self.term(I.Term("unreach"))
             self.start(self.block(Lok))
             return I.undef(T.VOID)
+        if fname in self._CMP_BUILTINS and len(e.args) >= 2:
+            return self._gen_cmp_builtin(e, fname, ty)
         if fname == "swap" and len(e.args) == 2:
             # 'swap(a, b)' -> ba lệnh load/store qua địa chỉ.
             aa, ta = self.gen_addr(e.args[0])

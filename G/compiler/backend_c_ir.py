@@ -38,6 +38,12 @@ from . import ir as I
 from . import types as T
 from .backend import IRBackend, BackendError, register
 
+_CMP_BUILTINS = {
+    "assert_eq", "assert_ne", "assert_lt", "assert_le", "assert_gt",
+    "assert_ge", "check_eq", "check_ne", "check_lt", "check_le",
+    "check_gt", "check_ge",
+}
+
 
 class CIRBackend(IRBackend):
     name = "c-ir"
@@ -113,6 +119,23 @@ class CIRBackend(IRBackend):
                 self.w(self.c_decl(fty, fname) + ";")
             self.indent -= 1
             self.w("};")
+        if mod.structs:
+            self.w("")
+
+        # 3b) So sánh BẰNG theo từng trường cho mỗi struct (assert_eq/check_eq).
+        #     Sinh theo đúng thứ tự khai báo trong module: struct lồng đã được
+        #     irgen đặt trước struct chứa nó.
+        for st in mod.structs:
+            self.w(f"static bool _g_eq_{st.name}({st.name} _a, {st.name} _b) {{")
+            self.indent += 1
+            if not st.fields:
+                self.w("(void)_a; (void)_b; return true;")
+            else:
+                conds = [self._field_eq(fty, f"_a.{fn}", f"_b.{fn}")
+                         for fn, fty in st.fields]
+                self.w("return " + " && ".join(conds) + ";")
+            self.indent -= 1
+            self.w("}")
         if mod.structs:
             self.w("")
 
@@ -203,6 +226,21 @@ class CIRBackend(IRBackend):
         return f"{q}{self.c_type(f.ret)} {f.name}({ps})"
 
     # ------------------------------------------------------------------
+    def _field_eq(self, ty, l, r) -> str:
+        """So sánh bằng MỘT trường (theo GType)."""
+        if ty is None:
+            return f"(({l}) == ({r}))"
+        if ty.kind == "array":
+            return f"(memcmp(&({l}), &({r}), sizeof({l})) == 0)"
+        if ty.kind == "slice":
+            return f"(({l}).ptr == ({r}).ptr && ({l}).len == ({r}).len)"
+        if ty.kind == "struct":
+            return f"_g_eq_{ty.name}({l}, {r})"
+        if ty.kind == "str" or (ty.kind == "ptr" and ty.elem is not None
+                                and ty.elem.kind == "char"):
+            return f"g_str_eq({l}, {r})"
+        return f"(({l}) == ({r}))"
+
     def gen_global(self, g: I.Global):
         if g.is_extern:
             self.w(f"extern {self.c_decl(g.type, g.name)};")
@@ -468,6 +506,41 @@ class CIRBackend(IRBackend):
             return f"(int)({c})"
         return c
 
+    def gen_cmp_builtin(self, ins: I.Instr, a, d, name):
+        """assert_*/check_* — irgen đã tính sẵn: [ok, tên, fmt_trái, fmt_phải,
+        <đối số trái...>, <đối số phải...>]."""
+        is_check = bool(ins.extra.get("is_check"))
+        line = ins.extra.get("line", 0)
+        nl = ins.extra.get("nleft", 0)
+        ok, nm = a[0], a[1]
+        lfmt_v, rfmt_v = ins.args[2].const, ins.args[3].const
+        largs = a[4:4 + nl]
+        rargs = a[4 + nl:]
+        lt = (", " + ", ".join(largs)) if largs else ""
+        rt = (", " + ", ".join(rargs)) if rargs else ""
+        red = 'g_tcolor("\033[1;31m")'
+        grn = 'g_tcolor("\033[32m")'
+        rst = 'g_tcolor("\033[0m")'
+        # Thụt lề 4 dấu cách — KHỚP CHÍNH XÁC backend cũ (xem Codegen.gen_assert_cmp);
+        # so khớp đầu ra hai backend là theo từng byte.
+        fail_fmt = self.c_string(
+            "%s\u2717 %s (dòng " + str(line) + ")%s\n    trái:  "
+            + lfmt_v + "\n    phải:  " + rfmt_v + "\n")
+        if is_check:
+            ok_fmt = self.c_string("%s\u2713 %s%s\n")
+            self.w(f"{d} = {ok};")
+            self.w(f"g_test_record({d});")
+            self.w(f"if ({d}) fprintf(stderr, {ok_fmt}, {grn}, {nm}, {rst});")
+            self.w(f"else fprintf(stderr, {fail_fmt}, {red}, {nm}, {rst}"
+                   f"{lt}{rt});")
+        else:
+            self.w(f"if (!({ok})) {{")
+            self.indent += 1
+            self.w(f"fprintf(stderr, {fail_fmt}, {red}, {nm}, {rst}{lt}{rt});")
+            self.w("exit(101);")
+            self.indent -= 1
+            self.w("}")
+
     def gen_check(self, ins: I.Instr, a):
         kind = ins.extra.get("kind")
         where = self.c_string(f"{ins.line}:{ins.col}")
@@ -516,6 +589,16 @@ class CIRBackend(IRBackend):
             return
         if name == "len":
             self.w(f"{d} = ({a[0]}).len;")
+            return
+        if name == "test_summary":
+            self.w(f"{d} = g_test_summary();")
+            return
+        if name in ("panic", "unreachable", "todo"):
+            msg = a[0] if a else '"' + name + '"'
+            self.w(f"g_{name}({msg});")
+            return
+        if name in _CMP_BUILTINS:
+            self.gen_cmp_builtin(ins, a, d, name)
             return
         if name in ("sizeof", "alignof"):
             raise BackendError(
