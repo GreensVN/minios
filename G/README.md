@@ -566,6 +566,38 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.20.0 — 🧠 Mô hình bộ nhớ & Allocator thay thế được
+
+Xem [`docs/MEMORY.md`](docs/MEMORY.md) — mô hình bộ nhớ nay được **viết ra thành
+văn**: hạng bộ nhớ, ai sở hữu/ai mượn, G bảo đảm gì lúc biên dịch, gì lúc chạy,
+và **những gì G KHÔNG bảo đảm** (use-after-free, double-free, rò rỉ, aliasing).
+
+- 🧠 **Bốn hạng bộ nhớ** được định nghĩa rõ: *giá trị* (stack, ngữ nghĩa sao
+  chép), *tĩnh*, *sở hữu* (bạn phải `free`), *mượn* (`&x`, `slice<T>` — **không
+  bao giờ** `free`).
+- ✨ **Allocator thay thế được**: `alloc(T, n)` / `free(p)` / `realloc(p, T, n)`
+  dùng allocator mặc định; `alloc_in(a, T, n)` / `free_in(a, p)` /
+  `realloc_in(a, p, T, n)` nhận allocator tường minh.
+  ```g
+  let mut backing: [4096]u8 = [0; 4096]
+  let mut a = arena_allocator(backing)   // KHÔNG cần libc
+  let p = alloc_in(a, Node, 16)
+  ```
+- 🧩 **`arena_allocator(buf)` chạy ở freestanding/kernel** — bộ đệm do bạn cấp,
+  không malloc. `free` của arena là **no-op có chủ ý**: cả vùng chết cùng bộ
+  đệm. Đây chính là lý do phải có allocator thay thế được: trước đây `g_alloc`
+  là macro `calloc` nên **không dùng được** trong kernel.
+- 🛡️ **Kiểm lúc biên dịch**: bộ đệm arena phải khả biến (`let mut`) và phải là
+  byte (`[N]u8` / `mut slice<u8>`); `alloc_in` phải nhận `Allocator`; `free`
+  phải nhận con trỏ. Ở `--freestanding`, `alloc`/`free` **không allocator** bị
+  từ chối kèm gợi ý dùng `alloc_in`.
+- 🛡️ Arena kiểm **tràn khi nhân** `n * sizeof(T)` trước khi cấp — tránh cấp
+  thiếu rồi ghi đè.
+- ♻️ `g_alloc`/`g_free`/`g_realloc` vẫn hoạt động (tương thích ngược).
+- 🧪 **Bộ test: 232 ca** + backend-diff 103 + target 21 + panic 4 + IR 99
+  + IR-unit 25 + layout 11 + ASan 94; fuzz 32 000 vòng (có token allocator),
+  0 crash. ASan với `detect_leaks=1` trên ca `allocator`: **0 rò rỉ**.
+
 ## Mới trong 0.19.0 — ✅ Giai đoạn B HOÀN TẤT: hai backend khớp 101/101
 
 - ✅ **`--backend=c-ir` khớp 101/101, 0 khác, 0 chưa hỗ trợ** — gồm cả

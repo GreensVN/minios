@@ -1979,6 +1979,35 @@ class IRGen:
         # IR nhìn thấy được phép toán thay vì một lời gọi mờ đục.
         if fname in ("abs", "min", "max", "clamp") and e.args:
             return self._gen_arith_builtin(e, fname, ty)
+        # ---- allocator (0.20.0) ----
+        if fname in ("alloc", "alloc_in", "realloc", "realloc_in"):
+            in_form = fname.endswith("_in")
+            b = 1 if in_form else 0
+            is_re = fname.startswith("realloc")
+            vals = []
+            if in_form:
+                vals.append(self.gen_expr(e.args[0]))
+            if is_re:
+                vals.append(self.gen_expr(e.args[b]))
+                b += 1
+            elem = self._type_arg_gtype(e.args[b])
+            vals.append(self.gen_expr(e.args[b + 1]))
+            esz = self._layout_of(elem) if elem is not None else None
+            return self.emit_val("intrinsic", vals, ty=ty, node=e, hint="al",
+                                 name="realloc" if is_re else "alloc",
+                                 with_alloc=in_form, elem_size=esz or 1)
+        if fname in ("free", "free_in"):
+            in_form = fname == "free_in"
+            vals = [self.gen_expr(a) for a in e.args]
+            return self.emit_val("intrinsic", vals, ty=T.VOID, node=e,
+                                 hint="fr", name="free", with_alloc=in_form)
+        if fname == "heap_allocator":
+            return self.emit_val("intrinsic", [], ty=ty, node=e, hint="ha",
+                                 name="heap_allocator")
+        if fname == "arena_allocator":
+            return self.emit_val("intrinsic", [self.gen_expr(e.args[0])],
+                                 ty=ty, node=e, hint="aa",
+                                 name="arena_allocator")
         if fname in ("g_alloc", "g_realloc"):
             # Đối số KIỂU (g_alloc(T, n)) không phải giá trị: mang sang IR dưới
             # dạng cỡ byte đã tính, để backend không phải hiểu cú pháp kiểu của G.

@@ -46,6 +46,10 @@ class CheckErrors(Exception):
 BUILTINS = {"print", "println", "eprint", "eprintln", "printf", "format",
             "len", "assert", "panic", "min", "max", "abs", "clamp",
             "g_alloc", "g_free", "g_realloc", "unreachable", "todo",
+            # cấp phát qua ALLOCATOR (0.20.0). 'g_alloc' là bí danh cũ của 'alloc'.
+            "alloc", "free", "realloc",
+            "alloc_in", "free_in", "realloc_in",
+            "heap_allocator", "arena_allocator",
             "typeof", "swap", "dbg",
             "assert_eq", "assert_ne", "check_eq", "check_ne", "test_summary",
             # so sánh THỨ TỰ (số/char/enum/chuỗi): dừng (assert_*) / ghi nhận (check_*)
@@ -189,6 +193,13 @@ _HOSTED_ONLY = {
     "printf": "in ấn cần stdio", "format": "cấp phát chuỗi cần heap",
     "g_alloc": "cấp phát động cần heap", "g_free": "cấp phát động cần heap",
     "g_realloc": "cấp phát động cần heap",
+    # 'alloc/free/realloc' KHÔNG có allocator tường minh -> dùng heap mặc định.
+    # Bản '_in' nhận allocator nên dùng được ở freestanding (vd arena).
+    "alloc": "cấp phát mặc định dùng heap — dùng 'alloc_in(a, T, n)' với một "
+             "allocator tự cấp (vd arena_allocator)",
+    "free": "cấp phát mặc định dùng heap — dùng 'free_in(a, p)'",
+    "realloc": "cấp phát mặc định dùng heap — dùng 'realloc_in(a, p, T, n)'",
+    "heap_allocator": "allocator heap cần libc — dùng arena_allocator(buf)",
     "dbg": "in ấn cần stdio",
     "assert_eq": "báo lỗi cần stdio", "assert_ne": "báo lỗi cần stdio",
     "check_eq": "báo lỗi cần stdio", "check_ne": "báo lỗi cần stdio",
@@ -722,6 +733,13 @@ class Checker:
                 self.struct_order.setdefault(it.name, [])
             elif isinstance(it, A.EnumDef):
                 self.enums.setdefault(it.name, {})
+        # 'Allocator' là struct DỰNG SẴN (bảng hàm trong g_runtime.h). Khai báo
+        # ở đây để người dùng viết được 'fn f(a: Allocator)' mà không cần import,
+        # nhưng KHÔNG cho phép định nghĩa lại (đã bị chặn ở vòng kiểm trùng tên).
+        if "Allocator" not in self.structs:
+            self.structs["Allocator"] = {"ctx": T.ptr_of(T.U8)}
+            self.struct_order["Allocator"] = ["ctx"]
+            self._builtin_structs = {"Allocator"}
         self.type_names = (set(T.PRIMITIVES) | set(self.structs) | set(self.enums))
         # Lượt 2: điền nội dung (giờ resolve thấy mọi tên kiểu).
         for it in self.prog.items:
@@ -3297,11 +3315,17 @@ class Checker:
         # ----- builtin -----
         if isinstance(e.func, A.Ident) and e.func.name in BUILTINS:
             if self.freestanding and e.func.name in _HOSTED_ONLY:
+                why = _HOSTED_ONLY[e.func.name]
+                # Gợi ý phải HỢP với thứ đang thiếu: built-in in ấn thì nhắc
+                # MMIO/UART, còn cấp phát thì nhắc allocator — dán chung một
+                # câu cho mọi trường hợp chỉ gây nhiễu.
+                hint = ("" if "allocator" in why else
+                        " — hãy tự viết hàm xuất ra thiết bị "
+                        "(vd VGA/UART qua 'outb'/'vol_write')")
                 self.err(
                     f"'{e.func.name}' không dùng được ở chế độ "
-                    f"'--freestanding' ({_HOSTED_ONLY[e.func.name]}, mà "
-                    f"kernel/firmware không có libc) — hãy tự viết hàm xuất ra "
-                    f"thiết bị (vd VGA/UART qua 'outb'/'vol_write')", e)
+                    f"'--freestanding' ({why}, mà kernel/firmware không có "
+                    f"libc){hint}", e)
                 return T.UNKNOWN
             return self.infer_builtin(e)
         # ----- gọi qua một định danh: biến/tham số CHE (shadow) hàm cùng tên -----
@@ -3460,6 +3484,97 @@ class Checker:
         return False
     def infer_builtin(self, e: A.Call):
         name = e.func.name
+        # ---- allocator (0.20.0) ----
+        if name in ("alloc_in", "free_in", "realloc_in") and e.args:
+            # Allocator bị SỬA TRẠNG THÁI khi cấp phát (arena tăng offset), nên
+            # tính là "đã ghi" — nếu không sẽ cảnh báo nhầm "'mut' thừa".
+            self._mark_written(e.args[0])
+        if name in ("alloc", "alloc_in"):
+            in_form = name == "alloc_in"
+            base = 1 if in_form else 0          # vị trí đối số KIỂU
+            want = 3 if in_form else 2
+            if in_form and e.args:
+                at = self.infer(e.args[0])
+                if at.kind != "struct" or at.name != "Allocator":
+                    if at.kind != "unknown":
+                        self.err(f"alloc_in(a, T, n): tham số đầu phải là "
+                                 f"'Allocator', nhận '{self.tyname(at)}'", e)
+            if len(e.args) != want:
+                self.err(f"{name}(...) cần đúng {want} tham số "
+                         f"({'allocator, ' if in_form else ''}kiểu, số lượng), "
+                         f"nhận {len(e.args)}", e)
+                return T.ptr_of(T.VOID)
+            elem = self._type_arg_to_gtype(e.args[base])
+            if elem is None:
+                self.err(f"{name}(...): tham số kiểu phải là tên kiểu "
+                         f"(hoặc con trỏ *T)", e)
+                elem = T.INT
+            nt = self.infer(e.args[base + 1])
+            if not nt.is_integer() and nt.kind != "unknown":
+                self.err(f"{name}(...): số lượng phải là số nguyên, nhận "
+                         f"'{self.tyname(nt)}'", e)
+            return T.ptr_of(elem)
+        if name in ("free", "free_in"):
+            want = 2 if name == "free_in" else 1
+            if len(e.args) != want:
+                self.err(f"{name}(...) cần đúng {want} tham số", e)
+                return T.VOID
+            if name == "free_in":
+                at = self.infer(e.args[0])
+                if at.kind == "struct" and at.name != "Allocator":
+                    self.err(f"free_in(a, p): tham số đầu phải là 'Allocator'", e)
+            pt = self.infer(e.args[want - 1])
+            if not (pt.is_pointerish() or self._is_dyn_array(pt)
+                    or pt.kind == "unknown"):
+                self.err(f"{name}(...): cần một con trỏ, nhận "
+                         f"'{self.tyname(pt)}'", e)
+            return T.VOID
+        if name in ("realloc", "realloc_in"):
+            in_form = name == "realloc_in"
+            base = 1 if in_form else 0
+            want = 4 if in_form else 3
+            if len(e.args) != want:
+                self.err(f"{name}(...) cần đúng {want} tham số", e)
+                return T.ptr_of(T.VOID)
+            pt = self.infer(e.args[base])
+            elem = self._type_arg_to_gtype(e.args[base + 1])
+            if elem is None:
+                self.err(f"{name}(...): tham số kiểu phải là tên kiểu", e)
+                return pt
+            nt = self.infer(e.args[base + 2])
+            if not nt.is_integer() and nt.kind != "unknown":
+                self.err(f"{name}(...): số lượng phải là số nguyên", e)
+            return T.ptr_of(elem)
+        if name == "heap_allocator":
+            if e.args:
+                self.err("heap_allocator() không nhận tham số", e)
+            return T.GType("struct", name="Allocator")
+        if name == "arena_allocator":
+            if len(e.args) != 1:
+                self.err("arena_allocator(buf) cần đúng 1 tham số: một "
+                         "'mut slice<u8>' hoặc mảng '[N]u8' khả biến", e)
+                return T.GType("struct", name="Allocator")
+            bt = self.infer(e.args[0])
+            ok = False
+            if bt.kind == "slice" and bt.elem is not None \
+                    and bt.elem.kind == "int" and bt.elem.bits == 8:
+                ok = bt.mutable_slice
+                if not ok:
+                    self.err("arena_allocator(buf): cần 'mut slice<u8>' (arena "
+                             "GHI vào bộ đệm) — khai báo 'let mut'", e)
+            elif bt.kind == "array" and bt.elem is not None \
+                    and bt.elem.kind == "int" and bt.elem.bits == 8:
+                if not self._array_is_mutable(e.args[0]):
+                    self.err("arena_allocator(buf): bộ đệm phải khả biến "
+                             "('let mut') — arena ghi vào nó", e)
+                else:
+                    self.coerce(e.args[0], T.slice_of(bt.elem, True), bt)
+                ok = True
+            elif bt.kind != "unknown":
+                self.err(f"arena_allocator(buf): cần bộ đệm byte "
+                         f"('mut slice<u8>' hoặc '[N]u8'), nhận "
+                         f"'{self.tyname(bt)}'", e)
+            return T.GType("struct", name="Allocator")
         if name == "g_alloc":
             # g_alloc(T, n): tham số đầu là KIỂU (tên trần hoặc con trỏ *T).
             if e.args:

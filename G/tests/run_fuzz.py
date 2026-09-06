@@ -54,6 +54,8 @@ TOKENS = [
     "%", "&", "|", "^", "~", "!", "&&", "||", "<<", ">>", "+=", "-=", "?",
     "main", "x", "y", "foo", "T", "P", "int", "i64", "u8", "f64", "bool",
     "str", "char", "void", "slice", "len", "<", ">",
+    "alloc", "free", "realloc", "alloc_in", "free_in",
+    "arena_allocator", "heap_allocator", "Allocator",
     "0", "1", "42", "0xFF", "0b101", "1.5", '"s"', "'c'", "{}", '"{}"',
 ]
 
@@ -111,6 +113,10 @@ def mutate(src, rng):
             "fn _h() -> int { let a: [3]int = [1,2,3] return len(a[0..2]) }",
             "fn _i(xs: slice<slice<int>>) -> int { return 0 }",
             "fn _j() -> int { let a: [2]int = [1,2] let s = a[..] return s[9] }",
+            "fn _k() -> int { let p = alloc(int, 4) free(p) return 0 }",
+            "fn _l() -> int { let mut b: [64]u8 = [0; 64] "
+            "let a = arena_allocator(b) let p = alloc_in(a, int, 2) return p[0] }",
+            "fn _m(a: Allocator) -> *int { return alloc_in(a, int, 1) }",
         ])
         return src + "\n" + frag + "\n"
     lines = src.splitlines()                        # trộn thứ tự dòng

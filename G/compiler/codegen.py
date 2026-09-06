@@ -47,6 +47,7 @@ class Codegen:
         self._tmp = 0
         self.slice_print_fns = {}    # tên typedef slice -> tên hàm in
         self.slice_print_decls = []  # thân các hàm in slice
+        self.arena_decls = []        # biến GArena cần khai báo trong hàm
         self.slice_typedefs = {}     # kiểu phần tử C -> tên typedef slice
         self.slice_decls = []        # các dòng 'G_SLICE_DEF(T, GSlice_T);'
         self.fnptr_typedefs = {}     # khoá chữ ký C -> tên typedef con trỏ hàm
@@ -80,7 +81,8 @@ class Codegen:
         elif getattr(t, "is_fn", False):
             base = self._fnptr_typedef(t)
         else:
-            base = TYPE_MAP.get(t.name) or self.cn(t.name)
+            base = (TYPE_MAP.get(t.name) or T.BUILTIN_STRUCT_C.get(t.name)
+                    or self.cn(t.name))
         return base + "*" * getattr(t, "elem_ptr", 0)
 
     def _slice_typedef_ast(self, t: A.Type) -> str:
@@ -815,7 +817,12 @@ class Codegen:
             pname = getattr(prm, "c_name", "") or self.cn(prm.name)
             prologue.append(self.c_decl(pname, prm.type, None, const=False) + ";")
             prologue.append(f"memcpy({pname}, {src}, sizeof({pname}));")
+        # Vùng trạng thái cho mỗi 'arena_allocator(...)' trong hàm này.
+        at = len(self.out)
+        self.arena_decls = []
         self.gen_scoped_body(fn.body, is_loop=False, prologue=prologue)
+        if self.arena_decls:
+            self.out[at:at] = [f"    GArena {v};" for v in self.arena_decls]
         # Hàm non-void mà checker đã chứng minh luôn-trả-về nhưng câu lệnh cuối
         # không phải 'return' tường minh (vd match enum vét cạn / if-else-diverge):
         # chèn __builtin_unreachable() để C không cảnh báo "control reaches end".
@@ -1801,6 +1808,38 @@ class Codegen:
                             f"{tx} < {tl} ? {tl} : ({tx} > {th} ? {th} : {tx}); }})")
                 return (f"(({cx}) < ({cl}) ? ({cl}) : "
                         f"(({cx}) > ({ch}) ? ({ch}) : ({cx})))")
+            # ---- allocator (0.20.0) ----
+            if name in ("alloc", "alloc_in"):
+                in_form = name == "alloc_in"
+                b = 1 if in_form else 0
+                a = self.gen_expr(e.args[0]) if in_form else "g_heap_allocator()"
+                ct = self._type_expr_to_c(e.args[b])
+                n = self.gen_expr(e.args[b + 1])
+                return (f"(({ct}*)g_a_alloc({a}, (size_t)({n}), sizeof({ct})))")
+            if name in ("free", "free_in"):
+                in_form = name == "free_in"
+                a = self.gen_expr(e.args[0]) if in_form else "g_heap_allocator()"
+                p = self.gen_expr(e.args[1 if in_form else 0])
+                return f"g_a_free({a}, (void*)({p}))"
+            if name in ("realloc", "realloc_in"):
+                in_form = name == "realloc_in"
+                b = 1 if in_form else 0
+                a = self.gen_expr(e.args[0]) if in_form else "g_heap_allocator()"
+                p = self.gen_expr(e.args[b])
+                ct = self._type_expr_to_c(e.args[b + 1])
+                n = self.gen_expr(e.args[b + 2])
+                return (f"(({ct}*)g_a_realloc({a}, (void*)({p}), "
+                        f"(size_t)({n}), sizeof({ct})))")
+            if name == "heap_allocator":
+                return "g_heap_allocator()"
+            if name == "arena_allocator":
+                # Arena giữ TRẠNG THÁI (offset) nên cần một GArena sống cùng
+                # scope; dùng biến tạm ở phạm vi hàm.
+                buf = self.gen_expr(e.args[0])
+                av = self.tmp("_gar")
+                self.arena_decls.append(av)
+                return (f"({av} = (GArena){{ (unsigned char*)({buf}).ptr, "
+                        f"({buf}).len, 0 }}, g_arena_allocator(&{av}))")
             if name in ("g_alloc", "g_realloc"):
                 # Vị trí đối-số-kiểu: g_alloc(T, n) -> 0; g_realloc(p, T, n) -> 1.
                 type_idx = 0 if name == "g_alloc" else 1

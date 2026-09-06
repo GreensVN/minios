@@ -155,9 +155,16 @@ def slice_c_name(elem: GType) -> str:
     return f"GSlice_{ident}"
 
 
+#: Struct DỰNG SẴN của G -> tên C tương ứng trong runtime. Chúng không có
+#: A.StructDef nên backend phải biết ánh xạ này.
+BUILTIN_STRUCT_C = {"Allocator": "GAllocator"}
+
+
 def c_type(t: GType) -> str:
     if t.kind == "slice":
         return slice_c_name(t.elem)
+    if t.kind == "struct" and t.name in BUILTIN_STRUCT_C:
+        return BUILTIN_STRUCT_C[t.name]
     if t.kind == "ptr":
         return c_type(t.elem) + "*"
     if t.kind == "array":

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: alloc_in(a, T, n): tham số đầu phải là 'Allocator', nhận 'int'

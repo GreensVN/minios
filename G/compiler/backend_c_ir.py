@@ -228,6 +228,8 @@ class CIRBackend(IRBackend):
         if ty.kind == "func":
             return self._fnptr_typedef(ty)
         if ty.kind in ("struct", "enum"):
+            if ty.name in T.BUILTIN_STRUCT_C:
+                return T.BUILTIN_STRUCT_C[ty.name]
             return self.cn(ty.name)
         if ty.kind == "ptr":
             # Đệ quy để tên struct/enum bên trong CŨNG được đổi tên; T.c_type
@@ -505,6 +507,7 @@ class CIRBackend(IRBackend):
         src = f.src_file or getattr(self, "_cur_src", None)
         if src:
             self._cur_src = src
+        self._arena_decls = []
         self.w(self.signature(f) + " {")
         self.indent += 1
 
@@ -531,6 +534,7 @@ class CIRBackend(IRBackend):
                                      f"{ins.dst.name} = &{slot};")
                 else:
                     decls.append(self.decl_of(ins.type, ins.dst.name) + ";")
+        arena_at = len(self.out)
         for d in decls:
             self.w(d)
         if decls:
@@ -545,6 +549,9 @@ class CIRBackend(IRBackend):
                     continue                  # đã xử lý ở phần khai báo
                 self.gen_instr(ins)
             self.gen_term(b.term, f)
+        if self._arena_decls:
+            self.out[arena_at:arena_at] = [f"    GArena {v};"
+                                           for v in self._arena_decls]
         self.indent -= 1
         self.w("}")
 
@@ -755,6 +762,33 @@ class CIRBackend(IRBackend):
         f = f.replace("\\", "/").split("/")[-1]
         return self.c_string(f"{f}:{ins.line}:{ins.col}")
 
+    def gen_alloc_intrinsic(self, ins: I.Instr, a, d, name):
+        """alloc/free/realloc qua bảng hàm allocator (xem GAllocator)."""
+        if name == "heap_allocator":
+            self.w(f"{d} = g_heap_allocator();")
+            return
+        if name == "arena_allocator":
+            # Arena giữ TRẠNG THÁI (offset) nên cần một GArena sống trong hàm.
+            av = self.tmp("_gar")
+            self._arena_decls.append(av)
+            self.w(f"{av} = (GArena){{ (unsigned char*)({a[0]}).ptr, "
+                   f"({a[0]}).len, 0 }};")
+            self.w(f"{d} = g_arena_allocator(&{av});")
+            return
+        with_alloc = bool(ins.extra.get("with_alloc"))
+        al = a[0] if with_alloc else "g_heap_allocator()"
+        rest = a[1:] if with_alloc else a
+        if name == "free":
+            self.w(f"g_a_free({al}, (void*)({rest[0]}));")
+            return
+        esz = ins.extra.get("elem_size", 1)
+        ct = self.c_type(ins.type)
+        if name == "alloc":
+            self.w(f"{d} = ({ct})g_a_alloc({al}, (size_t)({rest[0]}), {esz});")
+        else:
+            self.w(f"{d} = ({ct})g_a_realloc({al}, (void*)({rest[0]}), "
+                   f"(size_t)({rest[1]}), {esz});")
+
     def gen_check(self, ins: I.Instr, a):
         kind = ins.extra.get("kind")
         where = self._where(ins)
@@ -803,6 +837,10 @@ class CIRBackend(IRBackend):
             self.w(f"if ({hi_v} < {lo_v}) {hi_v} = {lo_v};")
             self.w(f"{d} = ({sn}){{ ({base}) + {lo_v}, "
                    f"(size_t)({hi_v} - {lo_v}) }};")
+            return
+        if name in ("alloc", "realloc", "free", "heap_allocator",
+                    "arena_allocator"):
+            self.gen_alloc_intrinsic(ins, a, d, name)
             return
         if name in ("g_alloc", "g_realloc"):
             # Cỡ phần tử đã được tính trong IR (theo target), nên ở đây chỉ cần

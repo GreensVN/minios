@@ -269,6 +269,26 @@ element type. Those printers dereference struct fields, so they are spliced in
 **after** struct definitions (`slice_print_at`), while the typedefs go earlier
 (`fnptr_at`) because signatures need them.
 
+### Allocators are a struct vtable, not a trait
+
+`GAllocator` in `g_runtime.h` is `{ctx, alloc_fn, free_fn, realloc_fn}`.
+`alloc/free/realloc` route through it; the `_in` variants take one explicitly.
+This is a struct rather than a trait because G has no traits yet (roadmap #4) —
+the struct gives the capability now, works freestanding, and can be wrapped in a
+trait later without changing the ABI.
+
+`Allocator` is a *builtin* struct: it has no `A.StructDef`, so backends map it
+via `types.BUILTIN_STRUCT_C`. If you add another builtin struct, add it there or
+the C backend will emit an unknown type name.
+
+`arena_allocator(buf)` needs per-call state (the bump offset), so both backends
+hoist a `GArena` temp to function scope. Its `free` is deliberately a no-op —
+that is the point of an arena, not an oversight.
+
+The memory model itself is written down in `docs/MEMORY.md`, including what G
+does **not** guarantee (use-after-free, double-free, leaks, aliasing). Keep that
+list honest: it is what stops users assuming Rust-level safety.
+
 ### Two C backends, on purpose
 
 **Status: they now agree on 101/101 cases (0 differing, 0 unsupported),

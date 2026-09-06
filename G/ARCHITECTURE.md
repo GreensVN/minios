@@ -228,7 +228,9 @@ Các mục sau **chưa được triển khai**, mới chỉ có chỗ đứng tr
 
 - backend LLVM / WASM / native;
 - generics, traits, `Result<T,E>`;
-- allocator abstraction; memory model hình thức (owned/borrowed);
+- ownership/borrow CHECKING tự động (mô hình đã hình thức hoá trong
+  docs/MEMORY.md và allocator đã thay thế được, nhưng compiler CHƯA theo dõi
+  vòng đời heap: use-after-free/double-free vẫn là UB);
 - incremental compilation, IR cache, package manager, LSP.
 
 Roadmap chi tiết cho từng mục: xem §2 (xếp hạng) và §3 (thứ tự).

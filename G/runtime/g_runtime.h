@@ -591,6 +591,93 @@ static inline double g_clock_secs(void) {
 
 #endif /* G_FREESTANDING */
 
+/* ================= ALLOCATOR — bảng hàm thay thế được ==============
+ * 'alloc/free/realloc' của G đi qua struct này thay vì gọi thẳng malloc, nên
+ * cùng một đoạn mã chạy được ở hosted (libc), kernel (arena tự cấp), và
+ * embedded (vùng nhớ cố định).
+ *
+ * Vì sao struct-vtable chứ không phải trait: G chưa có trait. Struct cho đúng
+ * khả năng cần ngay, hoạt động ở freestanding, và bọc lại bằng trait sau này
+ * mà không đổi bố cục. */
+typedef struct GAllocator {
+    void* ctx;
+    void* (*alloc_fn)(void* ctx, size_t n, size_t sz);
+    void  (*free_fn)(void* ctx, void* p);
+    void* (*realloc_fn)(void* ctx, void* p, size_t n, size_t sz);
+} GAllocator;
+
+static inline void* g_a_alloc(GAllocator a, size_t n, size_t sz) {
+    return a.alloc_fn ? a.alloc_fn(a.ctx, n, sz) : NULL;
+}
+static inline void g_a_free(GAllocator a, void* p) {
+    if (a.free_fn) a.free_fn(a.ctx, p);
+}
+static inline void* g_a_realloc(GAllocator a, void* p, size_t n, size_t sz) {
+    return a.realloc_fn ? a.realloc_fn(a.ctx, p, n, sz) : NULL;
+}
+
+/* ---- Arena: cấp phát dồn, giải phóng MỘT LƯỢT ----
+ * 'free' của arena là no-op có chủ ý: arena chết cùng bộ đệm nền. Đây là mô
+ * hình cấp phát chuẩn cho kernel/trình biên dịch — không cần theo dõi từng ô. */
+typedef struct GArena {
+    unsigned char* buf;
+    size_t cap;
+    size_t off;
+} GArena;
+
+static inline void* g_arena_alloc(void* ctx, size_t n, size_t sz) {
+    GArena* a = (GArena*)ctx;
+    if (!a || !a->buf) return NULL;
+    /* Tràn khi nhân: n*sz có thể wrap -> kiểm trước, đừng cấp phát thiếu. */
+    if (sz && n > (size_t)-1 / sz) return NULL;
+    size_t need = n * sz;
+    size_t al = sizeof(void*);
+    size_t start = (a->off + al - 1) & ~(al - 1);
+    if (start > a->cap || need > a->cap - start) return NULL;
+    a->off = start + need;
+    unsigned char* p = a->buf + start;
+    for (size_t i = 0; i < need; i++) p[i] = 0;   /* zero như calloc */
+    return p;
+}
+static inline void g_arena_free(void* ctx, void* p) { (void)ctx; (void)p; }
+static inline void* g_arena_realloc(void* ctx, void* p, size_t n, size_t sz) {
+    /* Arena không thu hồi: cấp mới rồi chép. Người gọi biết đây là arena. */
+    void* q = g_arena_alloc(ctx, n, sz);
+    if (q && p) {
+        size_t need = n * sz;
+        memcpy(q, p, need);
+    }
+    return q;
+}
+static inline GAllocator g_arena_allocator(GArena* a) {
+    GAllocator r;
+    r.ctx = (void*)a;
+    r.alloc_fn = g_arena_alloc;
+    r.free_fn = g_arena_free;
+    r.realloc_fn = g_arena_realloc;
+    return r;
+}
+
+#ifndef G_FREESTANDING
+static inline void* g_heap_alloc(void* ctx, size_t n, size_t sz) {
+    (void)ctx; return calloc(n, sz);
+}
+static inline void g_heap_free(void* ctx, void* p) { (void)ctx; free(p); }
+static inline void* g_heap_realloc(void* ctx, void* p, size_t n, size_t sz) {
+    (void)ctx;
+    if (sz && n > (size_t)-1 / sz) return NULL;
+    return realloc(p, n * sz);
+}
+static inline GAllocator g_heap_allocator(void) {
+    GAllocator r;
+    r.ctx = NULL;
+    r.alloc_fn = g_heap_alloc;
+    r.free_fn = g_heap_free;
+    r.realloc_fn = g_heap_realloc;
+    return r;
+}
+#endif /* !G_FREESTANDING */
+
 /* ================= SLICE — con trỏ béo (ptr + len) ==================
  * 'slice<T>' của G hạ thành một struct nhỏ { T* ptr; size_t len; } truyền theo
  * GIÁ TRỊ. Khác '[]T' (con trỏ trần, mất độ dài) và khác '[N]T' (mảng tĩnh).
