@@ -42,6 +42,39 @@ class IRGenError(Exception):
     pass
 
 
+def _spec_map():
+    """Bảng '{key} -> (specifier, kiểu ép)' của backend C."""
+    from .codegen import Codegen
+    return Codegen.SPEC_MAP
+
+
+class _Cast:
+    """Đánh dấu: ép đối số sang kiểu C này trước khi truyền cho printf."""
+    __slots__ = ("node", "ctype")
+
+    def __init__(self, node, ctype):
+        self.node = node
+        self.ctype = ctype
+
+
+def _apply_flags(spec, flags):
+    """Áp cờ width/precision/căn lề/dấu vào một printf specifier.
+
+    Dùng lại NGUYÊN VẸN bộ của backend C (Codegen._apply_fmt_flags) — logic này
+    đã được 225 ca test phủ; viết lại ở đây chắc chắn sẽ trôi lệch."""
+    from .codegen import Codegen
+    return Codegen._apply_fmt_flags(spec, flags)
+
+
+class _EnumName:
+    """Đánh dấu: in TÊN biến thể của giá trị enum này."""
+    __slots__ = ("node", "enum")
+
+    def __init__(self, node, enum):
+        self.node = node
+        self.enum = enum
+
+
 class _BoolStr:
     """Đánh dấu: in đối số bool này dưới dạng chuỗi "true"/"false"."""
     __slots__ = ("node",)
@@ -777,6 +810,48 @@ class IRGen:
             self.blk = None
             self._dead = True
 
+    def _type_arg_gtype(self, a):
+        """Đối số ở VỊ TRÍ KIỂU của g_alloc/g_realloc -> GType."""
+        if isinstance(a, A.Ident):
+            if a.name in self.structs:
+                return T.GType("struct", name=a.name)
+            if a.name in self.enums:
+                return T.GType("enum", name=a.name)
+            prim = self._resolve_syntax(A.Type(a.name))
+            if prim is not None and prim.kind != "unknown":
+                return prim
+        if isinstance(a, A.Unary) and a.op == "*":
+            inner = self._type_arg_gtype(a.operand)
+            return T.GType("ptr", elem=inner) if inner is not None else None
+        gt = self.gtype(a)
+        return gt if gt.kind != "unknown" else None
+
+    def _gen_arith_builtin(self, e, fname, ty):
+        """abs/min/max/clamp -> so sánh + select (lệnh IR thật).
+
+        Đối số được VẬT HOÁ vào temp trước: 'min(f(), g())' chỉ được gọi f/g một
+        lần, còn macro C của runtime đánh giá lại đối số nhiều lần."""
+        vals = [self.gen_expr(a) for a in e.args]
+        if fname == "abs" and len(vals) == 1:
+            x = vals[0]
+            zero = I.const_int(0, ty)
+            neg = self.emit_val("neg", [x], ty=ty, node=e, hint="ng")
+            c = self.emit_val("lt", [x, zero], ty=T.BOOL, node=e, hint="ac")
+            return self.emit_val("select", [c, neg, x], ty=ty, node=e, hint="ab")
+        if fname in ("min", "max") and len(vals) == 2:
+            a0, a1 = vals
+            op = "lt" if fname == "min" else "gt"
+            c = self.emit_val(op, [a0, a1], ty=T.BOOL, node=e, hint="mc")
+            return self.emit_val("select", [c, a0, a1], ty=ty, node=e, hint="mm")
+        if fname == "clamp" and len(vals) == 3:
+            x, lo, hi = vals
+            c1 = self.emit_val("lt", [x, lo], ty=T.BOOL, node=e, hint="cl")
+            t1 = self.emit_val("select", [c1, lo, x], ty=ty, node=e, hint="c1")
+            c2 = self.emit_val("gt", [t1, hi], ty=T.BOOL, node=e, hint="ch")
+            return self.emit_val("select", [c2, hi, t1], ty=ty, node=e, hint="c2")
+        return self.emit_val("intrinsic", vals, ty=ty, node=e, hint="mi",
+                             name=fname, argc=len(vals))
+
     def _match_subject(self, node):
         """(giá trị, kiểu) của biểu thức được match, TỰ DEREF khi cần.
 
@@ -1203,6 +1278,17 @@ class IRGen:
         fmt, argexprs = self._resolve_format(template, value_args, newline)
         vals = [I.const_str(fmt)]
         for a in argexprs:
+            if isinstance(a, _Cast):
+                v = self.gen_expr(a.node)
+                vals.append(self.emit_val("cast", [v], ty=self.gtype(a.node),
+                                          node=e, hint="fc", to_c=a.ctype))
+                continue
+            if isinstance(a, _EnumName):
+                v = self.gen_expr(a.node)
+                vals.append(self.emit_val(
+                    "call", [v], ty=T.STR, node=e, hint="en",
+                    callee=f"_g_enum_{a.enum}_name"))
+                continue
             if isinstance(a, _BoolStr):
                 c = self.gen_expr(a.node)
                 vals.append(self.emit_val(
@@ -1212,6 +1298,79 @@ class IRGen:
                 vals.append(self.gen_expr(a))
         return self.emit_val("call", vals, ty=T.VOID, node=e, hint="pr",
                              callee="printf", stream=stream, is_print=True)
+
+    #: Số phần tử tối đa in ra cho mảng (khớp Codegen._PRINT_ARRAY_MAX).
+    _PRINT_ARRAY_MAX = 8
+
+    def _expand_struct(self, gt, arg, out, args, depth=0):
+        """Bung 'Tên { f: v, ... }' vào chuỗi định dạng (đệ quy)."""
+        if depth > 4:
+            raise IRGenError("struct lồng quá sâu để in")
+        fields = self._struct_fields(gt.name)
+        if fields is None:
+            raise IRGenError(f"struct chưa biết: '{gt.name}'")
+        if not fields:
+            out.append(f"{gt.name} {{}}")
+            return
+        out.append(gt.name + " { ")
+        for i, (fname, fty) in enumerate(fields):
+            if i:
+                out.append(", ")
+            out.append(f"{fname}: ")
+            fld = A.FieldAccess(arg, fname, getattr(arg, "line", 0),
+                                getattr(arg, "col", 0))
+            fld.gtype = fty
+            self._expand_value(fty, fld, out, args, depth + 1)
+        out.append(" }")
+
+    def _expand_array(self, gt, arg, out, args, depth=0):
+        """Bung '[v0, v1, ...]' (cắt bớt sau _PRINT_ARRAY_MAX phần tử)."""
+        if depth > 4:
+            raise IRGenError("mảng lồng quá sâu để in")
+        n = gt.n
+        shown = min(n, self._PRINT_ARRAY_MAX)
+        out.append("[")
+        for i in range(shown):
+            if i:
+                out.append(", ")
+            idx = A.IntLit(str(i), getattr(arg, "line", 0),
+                           getattr(arg, "col", 0))
+            idx.gtype = T.I32
+            el = A.Index(arg, idx, getattr(arg, "line", 0),
+                         getattr(arg, "col", 0))
+            el.gtype = gt.elem
+            self._expand_value(gt.elem, el, out, args, depth + 1)
+        if shown < n:
+            out.append(f", ... ({n} phần tử)")
+        out.append("]")
+
+    def _expand_value(self, ty, node, out, args, depth):
+        """Một giá trị bên trong struct/mảng đang được bung."""
+        if ty.kind == "struct":
+            self._expand_struct(ty, node, out, args, depth)
+            return
+        if ty.kind == "array" and isinstance(ty.n, int):
+            self._expand_array(ty, node, out, args, depth)
+            return
+        if ty.kind == "enum":
+            out.append("%s")
+            args.append(_EnumName(node, ty.name))
+            return
+        if ty.kind == "slice":
+            raise IRGenError("in slice lồng trong struct chưa hạ được")
+        spec, is_bool = T.printf_spec(ty)
+        if is_bool:
+            out.append("%s")
+            args.append(_BoolStr(node))
+            return
+        out.append(spec)
+        args.append(node)
+
+    def _struct_fields(self, name):
+        for st in self.mod.structs:
+            if st.name == name:
+                return st.fields
+        return None
 
     @staticmethod
     def _spec_for(key, gt, default):
@@ -1260,13 +1419,54 @@ class IRGen:
             # Placeholder có CHỮ KIỂU tường minh ('{d}', '{s}', '{f}', '{x}'...)
             # ánh xạ thẳng sang specifier printf. Chỉ nhận các dạng KHÔNG cần
             # hàm hỗ trợ của backend C.
-            simple = {"d": "%d", "s": "%s", "c": "%c", "u": "%u",
-                      "x": "%x", "X": "%X", "o": "%o", "f": "%f",
-                      "e": "%e", "g": "%g", "p": "%p"}
-            if key in simple:
-                out.append(self._spec_for(key, gt, simple[key]))
-                args.append(arg)
-                continue
+            # Bảng specifier LẤY TỪ backend C (nguồn chân lý duy nhất) — nó đã
+            # xử lý đúng các biến thể 'll' cho 64-bit và kiểu ép kèm theo.
+            simple = _spec_map()
+            # '{key:flags}' — tách cờ, rồi áp vào specifier bằng CHÍNH bộ của
+            # backend C (_apply_fmt_flags) để hai đường không trôi lệch.
+            kbase, sep, flags = key.partition(":")
+            if sep and kbase in ("", "v") and flags and flags[-1] in simple:
+                kbase, flags = flags[-1], flags[:-1]
+            if flags and (flags[0] == "^" or "b" in flags):
+                # căn giữa / nhị phân cần hàm hỗ trợ của runtime C -> chưa hạ.
+                raise IRGenError(
+                    f"placeholder '{{{key}}}' chưa hạ được sang IR")
+            if kbase in simple:
+                spec, cast = simple[kbase]
+                if cast:
+                    arg = _Cast(arg, cast)
+            elif kbase in ("", "v"):
+                if gt.kind == "enum":
+                    # In TÊN biến thể ('Red'), không phải số. Hạ thành lời gọi
+                    # hàm tra tên do backend phát cho mỗi enum.
+                    out.append(_apply_flags("%s", flags) if flags else "%s")
+                    args.append(_EnumName(arg, gt.name))
+                    continue
+                if gt.kind == "struct" and not flags:
+                    # Bung struct thành 'Tên { f: v, ... }' NGAY TRONG chuỗi
+                    # định dạng: mỗi trường thành một placeholder riêng. Nhờ vậy
+                    # backend không cần biết gì về struct.
+                    self._expand_struct(gt, arg, out, args)
+                    continue
+                if gt.kind == "array" and isinstance(gt.n, int) and not flags:
+                    self._expand_array(gt, arg, out, args)
+                    continue
+                if gt.kind in ("struct", "array", "slice"):
+                    raise IRGenError(
+                        f"in giá trị kiểu '{gt}' chưa hạ được sang IR")
+                spec, is_bool = T.printf_spec(gt)
+                if is_bool:
+                    out.append(_apply_flags("%s", flags) if flags else "%s")
+                    args.append(_BoolStr(arg))
+                    continue
+            else:
+                raise IRGenError(
+                    f"placeholder '{{{key}}}' chưa hạ được sang IR")
+            if flags:
+                spec = _apply_flags(spec, flags)
+            out.append(spec)
+            args.append(arg)
+            continue
             if key not in ("", "v"):
                 raise IRGenError(
                     f"placeholder '{{{key}}}' chưa hạ được sang IR")
@@ -1325,6 +1525,36 @@ class IRGen:
             except IRGenError:
                 if self.blk is not None:
                     del self.blk.instrs[mark:]      # bỏ phần đã phát dở
+        # 'typeof(x)' là HẰNG CHUỖI (tên kiểu suy luận) — gấp ngay, không đánh
+        # giá đối số. 'static_assert' đã được checker kiểm; nó không sinh mã.
+        if fname == "typeof":
+            gt = self.gtype(e.args[0]) if e.args else T.UNKNOWN
+            return I.const_str(str(gt))
+        if fname == "static_assert":
+            return I.undef(T.VOID)
+        if fname == "assert":
+            # 'assert(c[, msg])' -> rẽ nhánh + panic. Hạ tường minh để mọi
+            # backend có sẵn, và IR nhìn thấy được luồng thoát.
+            cond = self.gen_expr(e.args[0])
+            msg = (self.gen_expr(e.args[1]) if len(e.args) > 1
+                   else I.const_str("assertion failed"))
+            Lok, Lbad = self.label("as_ok"), self.label("as_bad")
+            self.term(I.Term("branch", [cond], [Lok, Lbad],
+                             line=e.line, col=e.col))
+            self.start(self.block(Lbad))
+            self.emit("panic", [msg], node=e)
+            self.term(I.Term("unreach"))
+            self.start(self.block(Lok))
+            return I.undef(T.VOID)
+        if fname == "swap" and len(e.args) == 2:
+            # 'swap(a, b)' -> ba lệnh load/store qua địa chỉ.
+            aa, ta = self.gen_addr(e.args[0])
+            ab, _ = self.gen_addr(e.args[1])
+            va = self.emit_val("load", [aa], ty=ta, node=e, hint="sw")
+            vb = self.emit_val("load", [ab], ty=ta, node=e, hint="sw")
+            self.emit("store", [aa, vb], node=e)
+            self.emit("store", [ab, va], node=e)
+            return I.undef(T.VOID)
         if fname in self._PRINT_BUILTINS:
             args = []
             for a in e.args:
@@ -1335,9 +1565,31 @@ class IRGen:
             return self.emit_val("intrinsic", args, ty=ty, node=e, hint="bi",
                                  name=fname, argc=len(args))
 
-        if fname in ("g_alloc", "g_realloc", "g_free", "memcpy", "memset",
+        # ---- built-in số học: hạ thành LỆNH IR THẬT, không phải macro C ----
+        # 'abs/min/max/clamp' là macro trong runtime C. Hạ chúng ở đây thành
+        # select/cmp nghĩa là MỌI backend (LLVM/WASM) có sẵn, và tối ưu hoá trên
+        # IR nhìn thấy được phép toán thay vì một lời gọi mờ đục.
+        if fname in ("abs", "min", "max", "clamp") and e.args:
+            return self._gen_arith_builtin(e, fname, ty)
+        if fname in ("g_alloc", "g_realloc"):
+            # Đối số KIỂU (g_alloc(T, n)) không phải giá trị: mang sang IR dưới
+            # dạng cỡ byte đã tính, để backend không phải hiểu cú pháp kiểu của G.
+            idx = 0 if fname == "g_alloc" else 1
+            vals, elem = [], None
+            for i, a in enumerate(e.args):
+                if i == idx:
+                    elem = self._type_arg_gtype(a)
+                    continue
+                vals.append(self.gen_expr(a))
+            esz = self._layout_of(elem) if elem is not None else None
+            if esz is None:
+                esz = 1
+            return self.emit_val("intrinsic", vals, ty=ty, node=e, hint="al",
+                                 name=fname, elem_size=esz,
+                                 elem_c=str(elem) if elem is not None else "void")
+        if fname in ("g_free", "memcpy", "memset",
                      "memmove", "memcmp", "vol_read", "vol_write",
-                     "len", "min", "max", "abs", "clamp"):
+                     "len"):
             args = []
             for a in e.args:
                 if isinstance(a, A.Ident) and a.name in getattr(self, "_typenames", ()):

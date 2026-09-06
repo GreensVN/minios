@@ -70,6 +70,26 @@ class CIRBackend(IRBackend):
         if mod.enums:
             self.w("")
 
+        # 1b) hàm tra TÊN biến thể cho mỗi enum (để in '{}' ra 'Red', không phải 0)
+        for en in mod.enums:
+            self.w(f"static const char* _g_enum_{en.name}_name({en.name} v) {{")
+            self.indent += 1
+            self.w("switch ((long long)v) {")
+            self.indent += 1
+            seen = set()
+            for vn, vv in en.variants:
+                if vv in seen:
+                    continue           # trùng giá trị -> lấy tên đầu (C cấm case trùng)
+                seen.add(vv)
+                self.w(f'case {vv}: return "{vn}";')
+            self.indent -= 1
+            self.w("}")
+            self.w('return "?";')
+            self.indent -= 1
+            self.w("}")
+        if mod.enums:
+            self.w("")
+
         # 2) forward-decl struct + typedef slice (chữ ký cần)
         for st in mod.structs:
             self.w(f"typedef struct {st.name} {st.name};")
@@ -216,6 +236,10 @@ class CIRBackend(IRBackend):
         if c is False:
             return "false"
         if isinstance(c, str):
+            # Hằng SỐ THỰC được lưu nguyên văn dạng chuỗi ('3.14') để giữ đúng
+            # chữ số — phát thẳng, KHÔNG bọc thành chuỗi C.
+            if v.type is not None and v.type.kind == "float":
+                return c
             return self.c_char(c) if v.type is not None and \
                 v.type.kind == "char" else self.c_string(c)
         if isinstance(c, int):
@@ -362,7 +386,15 @@ class CIRBackend(IRBackend):
             else:
                 self.w(f"{d} = ({a[0]}) {self._BIN[op]} ({a[1]});")
         elif op in self._UN:
-            self.w(f"{d} = {self._UN[op]}({a[0]});")
+            # Ép sang kiểu KẾT QUẢ trước khi tính: '-w' với w:u32 phải ra i64
+            # (-1), không phải wrap trong u32 (4294967295). Checker đã suy ra
+            # kiểu rộng hơn — tôn trọng nó, giống nhánh nhị phân.
+            if (op != "lnot" and ins.type is not None
+                    and ins.type.kind in ("int", "float")):
+                self.w(f"{d} = {self._UN[op]}"
+                       f"(({self.c_type(ins.type)})({a[0]}));")
+            else:
+                self.w(f"{d} = {self._UN[op]}({a[0]});")
         elif op == "load":
             self.w(f"{d} = *({a[0]});")
         elif op == "store":
@@ -380,7 +412,9 @@ class CIRBackend(IRBackend):
         elif op == "ptradd":
             self.w(f"{d} = ({a[0]}) + ({a[1]});")
         elif op == "cast":
-            self.w(f"{d} = ({self.c_type(ins.type)})({a[0]});")
+            # 'to_c': kiểu C tường minh do irgen yêu cầu (ép đối số printf).
+            ct = ins.extra.get("to_c") or self.c_type(ins.type)
+            self.w(f"{d} = ({ct})({a[0]});")
         elif op == "bitcast":
             self.w(f"memcpy(&{d}, &({a[0]}), sizeof({d}));")
         elif op == "call":
@@ -455,12 +489,37 @@ class CIRBackend(IRBackend):
             base, lo, hi = a[0], a[1], a[2]
             self.w(f"{d} = ({sn}){{ ({base}) + ({lo}), (size_t)(({hi}) - ({lo})) }};")
             return
+        if name in ("g_alloc", "g_realloc"):
+            # Cỡ phần tử đã được tính trong IR (theo target), nên ở đây chỉ cần
+            # calloc/realloc thô — backend không phải hiểu kiểu của G.
+            esz = ins.extra.get("elem_size", 1)
+            cast = f"({self.c_type(ins.type)})"
+            if name == "g_alloc":
+                self.w(f"{d} = {cast}calloc((size_t)({a[0]}), {esz});")
+            else:
+                self.w(f"{d} = {cast}realloc({a[0]}, "
+                       f"(size_t)({a[1]}) * {esz});")
+            return
+        if name == "g_free":
+            self.w(f"free({a[0]});")
+            return
+        if name in ("memcpy", "memmove", "memset", "memcmp"):
+            call = f"{name}({', '.join(a)})"
+            self.w(f"{d} = {call};" if d else f"{call};")
+            return
+        if name == "vol_read":
+            self.w(f"{d} = *(volatile {self.c_type(ins.type)}*)({a[0]});")
+            return
+        if name == "vol_write":
+            inner = ins.args[1].type
+            self.w(f"*(volatile {self.c_type(inner)}*)({a[0]}) = {a[1]};")
+            return
         if name == "len":
             self.w(f"{d} = ({a[0]}).len;")
             return
         if name in ("sizeof", "alignof"):
-            self.w(f"{d} = 0; /* {name}({ins.extra.get('arg')}) */")
-            return
+            raise BackendError(
+                f"{name} chưa gấp được thành hằng cho kiểu này")
         raise BackendError(
             f"intrinsic '{name}' chưa được hạ chi tiết trong IR nên backend "
             f"c-ir chưa sinh mã được (xem irgen.py: các built-in in ấn/format "
