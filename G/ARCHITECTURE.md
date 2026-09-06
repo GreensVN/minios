@@ -203,19 +203,24 @@ Còn lại của Phase 5: chọn toolchain chéo tự động, layout/ABI theo t
 
 ## 7. Giai đoạn B đang chạy: backend C đọc từ IR
 
-`--backend=c-ir` khớp **81/93 ca, 0 khác** so với backend mặc định
-(`tests/run_backend_diff.sh`).
+`--backend=c-ir` khớp **101/101, 0 khác, 0 chưa hỗ trợ** — gồm cả freestanding
+và panic (`tests/run_backend_diff.sh`). **Tiêu chí thoát của Giai đoạn B đã
+đạt.**
 
 Nguyên tắc đã theo suốt: mọi thứ còn thiếu đều hạ trong `irgen.py`, **không
-phải** trong backend. Hạ trong backend thì LLVM/WASM phải làm lại từ đầu — và
-mỗi lần làm lại là một cơ hội sai khác. Bằng chứng cho nguyên tắc này: **mọi**
-khác biệt mà bộ so khớp tìm ra đều là lỗi của tầng hạ mã IR, không phải của
-backend mới.
+phải** trong backend. Bằng chứng: *mọi* khác biệt mà bộ so khớp tìm ra đều là
+lỗi của tầng hạ mã IR — tức là lỗi mà LLVM/WASM cũng sẽ dính.
 
-Còn 12 ca chưa sinh được mã (mảng nhiều chiều phức tạp, vài dạng con trỏ hàm).
-Không ca nào cho kết quả SAI — chúng báo lỗi rõ ràng. Đó là tiêu chí để đổi mặc
-định: "chưa hỗ trợ" phải về 0, và trong lúc chờ thì thà từ chối còn hơn sinh mã
-sai.
+Bài học về PHẠM VI kiểm chứng: bộ so khớp ban đầu chỉ chạy `examples/` +
+`tests/cases/` và báo "93/93 khớp" khi `asm` mở rộng, `s.at()` và chế độ
+freestanding vẫn còn hỏng. Chỉ khi mở rộng sang `tests/freestanding/` và
+`tests/panic/` mới lộ ra. Một bộ so khớp chỉ mạnh bằng phạm vi đầu vào của nó.
+
+### Giai đoạn C (tiếp theo)
+
+Đổi mặc định sang backend đọc-từ-IR, rồi xoá đường AST→C. Chưa làm trong bản
+này: nên để hai backend chạy song song thêm một thời gian, vì bộ so khớp là
+mạng an toàn rẻ nhất đang có.
 
 ## 8. CHƯA làm (nói rõ để không gây hiểu nhầm)
 

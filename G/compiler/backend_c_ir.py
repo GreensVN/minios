@@ -38,6 +38,14 @@ from . import ir as I
 from . import types as T
 from .backend import IRBackend, BackendError, register
 
+_OS_SIMPLE = {
+    "halt", "cli", "sti", "pause", "breakpoint", "io_wait", "rdtsc",
+    "inb", "outb", "inw", "outw", "inl", "outl",
+    "read_cr0", "read_cr2", "read_cr3", "read_cr4",
+    "write_cr0", "write_cr3", "write_cr4",
+    "invlpg", "wbinvd", "rdmsr", "wrmsr",
+}
+
 _CMP_BUILTINS = {
     "assert_eq", "assert_ne", "assert_lt", "assert_le", "assert_gt",
     "assert_ge", "check_eq", "check_ne", "check_lt", "check_le",
@@ -61,6 +69,7 @@ class CIRBackend(IRBackend):
         self.fnptr_typedefs = {}
         self.fnptr_decls = []
         self._param_names = set()
+        self._cur_src = None
         self._tmp_types = {}
 
     # ------------------------------------------------------------------
@@ -203,9 +212,7 @@ class CIRBackend(IRBackend):
         elem_c = self.c_type(elem)
         nm = self.slice_typedefs.get(elem_c)
         if nm is None:
-            ident = (elem_c.replace("*", "p").replace(" ", "_")
-                     .replace("const_charp", "str"))
-            nm = f"GSlice_{ident}"
+            nm = T.slice_c_name(elem)      # nguồn chân lý dùng chung
             self.slice_typedefs[elem_c] = nm
             self.slice_decls.append(f"G_SLICE_DEF({elem_c}, {nm});")
         return nm
@@ -222,6 +229,10 @@ class CIRBackend(IRBackend):
             return self._fnptr_typedef(ty)
         if ty.kind in ("struct", "enum"):
             return self.cn(ty.name)
+        if ty.kind == "ptr":
+            # Đệ quy để tên struct/enum bên trong CŨNG được đổi tên; T.c_type
+            # không biết quy tắc đổi tên nên '*Default' ra 'default*' (từ khoá C).
+            return self.c_type(ty.elem) + "*"
         return T.c_type(ty)
 
     def _fnptr_typedef(self, ty) -> str:
@@ -489,6 +500,11 @@ class CIRBackend(IRBackend):
     # ------------------------------------------------------------------
     def gen_func(self, f: I.Func):
         self._param_names = {p.name for p in f.params}
+        # Vị trí trong thông điệp panic phải là 'file:dòng:cột' — GIỐNG backend
+        # cũ, nếu không hai backend cho thông điệp khác nhau.
+        src = f.src_file or getattr(self, "_cur_src", None)
+        if src:
+            self._cur_src = src
         self.w(self.signature(f) + " {")
         self.indent += 1
 
@@ -663,8 +679,20 @@ class CIRBackend(IRBackend):
         elif op == "check":
             self.gen_check(ins, a)
         elif op == "asm":
-            tpl = (ins.extra.get("template") or "").replace("\n", "\\n\\t")
-            self.w(f'__asm__ __volatile__("{tpl}");')
+            lines = [l.strip() for l in (ins.extra.get("template") or "").split("\n")
+                     if l.strip()]
+            tpl = "\\n\\t".join(lines)
+            if not ins.extra.get("extended"):
+                self.w(f'__asm__ __volatile__("{tpl}");')
+                return
+            cons = ins.extra.get("constraints") or []
+            n_out = ins.extra.get("n_out", 0)
+            # Output là ĐỊA CHỈ trong IR -> deref để asm ghi vào ô nhớ.
+            outs = ", ".join(f'"{cons[i]}" (*({a[i]}))' for i in range(n_out))
+            ins_s = ", ".join(f'"{cons[i]}" ({a[i]})'
+                              for i in range(n_out, len(a)))
+            clob = ", ".join(f'"{c}"' for c in (ins.extra.get("clobbers") or []))
+            self.w(f'__asm__ __volatile__("{tpl}" : {outs} : {ins_s} : {clob});')
         elif op == "intrinsic":
             self.gen_intrinsic(ins, a, d)
         elif op == "panic":
@@ -722,9 +750,14 @@ class CIRBackend(IRBackend):
             self.indent -= 1
             self.w("}")
 
+    def _where(self, ins) -> str:
+        f = getattr(self, "_cur_src", None) or "?"
+        f = f.replace("\\", "/").split("/")[-1]
+        return self.c_string(f"{f}:{ins.line}:{ins.col}")
+
     def gen_check(self, ins: I.Instr, a):
         kind = ins.extra.get("kind")
-        where = self.c_string(f"{ins.line}:{ins.col}")
+        where = self._where(ins)
         if kind == "bounds":
             self.w(f"(void)g_idx({a[0]}, {a[1]}, {where});")
         elif kind == "slice_bounds":
@@ -745,11 +778,31 @@ class CIRBackend(IRBackend):
             # Cơ sở là CON TRỎ TỚI MẢNG ('*[N]T'): '+ lo' trên nó nhảy theo CẢ
             # MẢNG, không phải theo phần tử. Phải phân rã về 'T*' trước, nếu
             # không slice trỏ ra ngoài vùng nhớ (đọc rác).
+            cap = ins.extra.get("cap")
             if (bt is not None and bt.kind == "ptr" and bt.elem is not None
                     and bt.elem.kind == "array"):
                 base = f"(*({base}))"
-            self.w(f"{d} = ({sn}){{ ({base}) + ({lo}), "
-                   f"(size_t)(({hi}) - ({lo})) }};")
+                if cap is None and isinstance(bt.elem.n, int):
+                    cap = str(bt.elem.n)
+            elif bt is not None and bt.kind == "slice":
+                # Cắt lát của một SLICE: cộng vào con trỏ bên trong, không phải
+                # vào cả struct (ptr+len).
+                cap = f"({base}).len"
+                base = f"({base}).ptr"
+            # KẸP biên như g_sslice: chỉ số ngoài vùng cho slice RỖNG chứ không
+            # trỏ ra ngoài bộ nhớ gốc.
+            lo_v, hi_v = self.tmp("_gsl"), self.tmp("_gsh")
+            self.w(f"long long {lo_v} = (long long)({lo});")
+            self.w(f"long long {hi_v} = (long long)({hi});")
+            self.w(f"if ({lo_v} < 0) {lo_v} = 0;")
+            if cap is not None:
+                self.w(f"if ({hi_v} > (long long)({cap})) "
+                       f"{hi_v} = (long long)({cap});")
+                self.w(f"if ({lo_v} > (long long)({cap})) "
+                       f"{lo_v} = (long long)({cap});")
+            self.w(f"if ({hi_v} < {lo_v}) {hi_v} = {lo_v};")
+            self.w(f"{d} = ({sn}){{ ({base}) + {lo_v}, "
+                   f"(size_t)({hi_v} - {lo_v}) }};")
             return
         if name in ("g_alloc", "g_realloc"):
             # Cỡ phần tử đã được tính trong IR (theo target), nên ở đây chỉ cần
@@ -787,6 +840,60 @@ class CIRBackend(IRBackend):
             self.w(f"int {n} = snprintf(NULL, 0, {args});")
             self.w(f"{d} = (const char*)malloc((size_t){n} + 1);")
             self.w(f"snprintf((char*){d}, (size_t){n} + 1, {args});")
+            return
+        if name in _OS_SIMPLE:
+            args = list(a)
+            if name in ("inb", "inw", "inl") and args:
+                args[0] = f"(uint16_t)({args[0]})"
+            elif name in ("outb", "outw", "outl") and len(args) == 2:
+                w = {"outb": "uint8_t", "outw": "uint16_t",
+                     "outl": "uint32_t"}[name]
+                args = [f"(uint16_t)({args[0]})", f"({w})({args[1]})"]
+            call = f"g_{name}({', '.join(args)})"
+            self.w(f"{d} = {call};" if d else f"{call};")
+            return
+        if name in ("popcount", "clz", "ctz", "bswap", "rotl", "rotr"):
+            bits = ins.extra.get("bits", 32)
+            w64 = bits > 32
+            if name == "popcount":
+                fn = "__builtin_popcountll" if w64 else "__builtin_popcount"
+                self.w(f"{d} = (int){fn}((unsigned long long)({a[0]}));")
+            elif name in ("clz", "ctz"):
+                # clz/ctz KHÔNG xác định với 0 trong C -> trả bề rộng kiểu.
+                # CHỈ 'clz' cần trừ phần bù khi kiểu hẹp hơn ô mà builtin dùng
+                # (đếm số 0 dẫn ĐẦU); 'ctz' đếm từ bit thấp nên không đổi.
+                b = "ll" if w64 else ""
+                fn = f"__builtin_{'clz' if name == 'clz' else 'ctz'}{b}"
+                cast = "unsigned long long" if w64 else "unsigned"
+                expr = f"(int){fn}(({cast})({a[0]}))"
+                if name == "clz":
+                    host = 64 if w64 else 32
+                    if bits < host:
+                        expr += f" - {host - bits}"
+                self.w(f"{d} = (({a[0]}) == 0) ? {bits} : {expr};")
+            elif name == "bswap":
+                fn = {8: None, 16: "__builtin_bswap16",
+                      32: "__builtin_bswap32"}.get(bits, "__builtin_bswap64")
+                if fn is None:
+                    self.w(f"{d} = {a[0]};")
+                else:
+                    self.w(f"{d} = ({self.c_type(ins.type)}){fn}({a[0]});")
+            else:
+                # Xoay bit theo ĐÚNG bề rộng kiểu (u8 xoay trong 8 bit) — nội
+                # tuyến như backend cũ; runtime chỉ có bản 64-bit.
+                ut = {8: "uint8_t", 16: "uint16_t",
+                      32: "uint32_t"}.get(bits, "uint64_t")
+                v, nn = self.tmp("_grv"), self.tmp("_grn")
+                main = "<<" if name == "rotl" else ">>"
+                back = ">>" if name == "rotl" else "<<"
+                self.w(f"{ut} {v} = ({ut})({a[0]});")
+                self.w(f"unsigned {nn} = (unsigned)({a[1]}) & {bits - 1}u;")
+                self.w(f"{d} = ({self.c_type(ins.type)})({nn} ? "
+                       f"(({v} {main} {nn}) | ({v} {back} ({bits} - {nn}))) "
+                       f": {v});")
+            return
+        if name == "str_at_checked":
+            self.w(f"{d} = g_str_at_c({a[0]}, {a[1]}, {self._where(ins)});")
             return
         if name == "slice_ptr":
             self.w(f"{d} = ({a[0]}).ptr;")

@@ -16,6 +16,7 @@ GC="$ROOT/gc"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 GREEN="\033[32m"; RED="\033[1;31m"; YEL="\033[33m"; RST="\033[0m"
+strip_ansi() { sed -E 's/\x1b\[[0-9;]*m//g'; }
 
 same=0; diff_n=0; unsup=0
 declare -a UNSUP_LIST=()
@@ -54,6 +55,45 @@ for src in "$ROOT"/examples/*.g "$ROOT"/tests/cases/*.g; do
         diff_n=$((diff_n+1)); continue
     fi
     echo -e "${GREEN}KHỚP${RST}        $name"
+    same=$((same+1))
+done
+
+# --- freestanding: cả hai backend phải BIÊN DỊCH được (không chạy: lệnh đặc quyền)
+for src in "$ROOT"/tests/freestanding/*.g "$ROOT"/examples/kernel/*.g; do
+    [ -e "$src" ] || continue
+    name="$(basename "$src" .g)"
+    "$GC" "$src" --freestanding -c -o "$TMP/$name.fo" >/dev/null 2>&1 || continue
+    if "$GC" "$src" --backend=c-ir --freestanding -c -o "$TMP/$name.fn" \
+            >"$TMP/$name.ferr" 2>&1; then
+        echo -e "${GREEN}KHỚP${RST}        $name (freestanding)"
+        same=$((same+1))
+    else
+        echo -e "${RED}KHÁC${RST}         $name (freestanding: c-ir không dịch được)"
+        head -3 "$TMP/$name.ferr"
+        diff_n=$((diff_n+1))
+    fi
+done
+
+# --- panic: lỗi lúc chạy phải cho CÙNG mã thoát 101 và cùng thông điệp
+for src in "$ROOT"/tests/panic/*.g; do
+    [ -e "$src" ] || continue
+    name="$(basename "$src" .g)"
+    want="$ROOT/tests/panic/$name.txt"
+    "$GC" "$src" --backend=c-ir -o "$TMP/$name.pn" >/dev/null 2>&1 || {
+        echo -e "${RED}KHÁC${RST}         $name (panic: c-ir không dịch được)"
+        diff_n=$((diff_n+1)); continue; }
+    "$TMP/$name.pn" </dev/null >"$TMP/$name.pout" 2>&1
+    prc=$?
+    if [ "$prc" != "101" ]; then
+        echo -e "${RED}KHÁC${RST}         $name (panic: mã thoát $prc, cần 101)"
+        diff_n=$((diff_n+1)); continue
+    fi
+    if [ -f "$want" ] && ! strip_ansi <"$TMP/$name.pout" \
+            | grep -qFf "$want"; then
+        echo -e "${RED}KHÁC${RST}         $name (panic: sai thông điệp)"
+        diff_n=$((diff_n+1)); continue
+    fi
+    echo -e "${GREEN}KHỚP${RST}        $name (panic)"
     same=$((same+1))
 done
 

@@ -143,10 +143,15 @@ _C_NAME = {
 
 
 def slice_c_name(elem: GType) -> str:
-    """Tên struct C cho slice<T>. Một typedef cho mỗi kiểu phần tử."""
+    """Tên struct C cho slice<T> — MỘT nguồn chân lý cho cả hai backend.
+
+    Trước đây codegen và backend c-ir mỗi bên tự ghép tên với thứ tự thay thế
+    khác nhau, nên 'slice<str>' ra 'GSlice_str' ở chỗ này và
+    'GSlice_const_charp' ở chỗ kia — typedef không khớp lúc dùng."""
     base = c_type(elem)
-    ident = (base.replace("*", "p").replace(" ", "_")
-             .replace("const_char_p", "str"))
+    if base == "const char*":
+        return "GSlice_str"
+    ident = base.replace("*", "p").replace(" ", "_")
     return f"GSlice_{ident}"
 
 

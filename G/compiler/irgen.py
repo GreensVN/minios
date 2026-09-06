@@ -577,8 +577,21 @@ class IRGen:
                 self._flush_defers_upto(depth)
                 self.term(I.Term("jump", labels=[cont], line=st.line, col=st.col))
         elif isinstance(st, A.Asm):
-            self.emit("asm", [], node=st, template=st.code,
-                      outputs=len(st.outputs), inputs=len(st.inputs),
+            # asm MỞ RỘNG có toán hạng: output là ĐỊA CHỈ (ghi vào), input là
+            # giá trị. Trước đây IR chỉ giữ template và vứt toán hạng, nên
+            # '%0' trong template không còn gì để tham chiếu.
+            vals, cons = [], []
+            for c, ex in st.outputs:
+                addr, _ = self.gen_addr(ex)
+                vals.append(addr)
+                cons.append(c)
+            n_out = len(st.outputs)
+            for c, ex in st.inputs:
+                vals.append(self.gen_expr(ex))
+                cons.append(c)
+            self.emit("asm", vals, node=st, template=st.code,
+                      constraints=cons, n_out=n_out,
+                      clobbers=list(st.clobbers),
                       extended=getattr(st, "extended", False))
         else:
             raise IRGenError(f"chưa hạ được câu lệnh {type(st).__name__}")
@@ -866,12 +879,21 @@ class IRGen:
         subj, sty = self._match_subject(st)
         Lend = self.label("mend")
 
+        # Binding kiểu Rust ('x =>' / 'x if x > 0 =>'): checker ghi tên C của
+        # biến vào st.bindings, song song với arms. Nhánh có binding luôn KHỚP
+        # (điều kiện chỉ còn guard) và phải thấy biến đó trong phạm vi.
+        bindings = getattr(st, "bindings", None) or [None] * len(st.arms)
         arm_labels, cases, default = [], [], None
         simple = True
-        for arm in st.arms:
+        for arm, bname in zip(st.arms, bindings):
             pats = arm[0]
             lbl = self.label("arm")
             arm_labels.append(lbl)
+            if bname is not None:
+                simple = False
+                if arm[1] is None:
+                    default = lbl       # binding trần = bắt tất cả
+                continue
             if pats is None:
                 default = lbl
                 continue
@@ -894,19 +916,29 @@ class IRGen:
             # chuỗi so sánh tuần tự
             for i, arm in enumerate(st.arms):
                 pats, guard, _ = arm
-                if pats is None:
+                bname = bindings[i]
+                if bname is None and pats is None:
                     self.term(I.Term("jump", labels=[arm_labels[i]]))
                     break
                 Lnext = self.label("mnext")
-                acc = None
-                for p in pats:
-                    c = self._pat_cond(p, subj, sty)
-                    acc = c if acc is None else self.emit_val(
-                        "lor", [acc, c], ty=T.BOOL, node=st, hint="or")
-                if guard is not None:
-                    g = self.gen_expr(guard)
-                    acc = self.emit_val("land", [acc, g], ty=T.BOOL, node=st,
-                                        hint="gd") if acc is not None else g
+                if bname is not None:
+                    # Biến binding phải có trong phạm vi TRƯỚC khi tính guard.
+                    self._bind_match_var(bname, subj, sty, st)
+                    if guard is None:
+                        self.term(I.Term("jump", labels=[arm_labels[i]]))
+                        break
+                    acc = self.gen_expr(guard)
+                else:
+                    acc = None
+                    for p in pats:
+                        c = self._pat_cond(p, subj, sty)
+                        acc = c if acc is None else self.emit_val(
+                            "lor", [acc, c], ty=T.BOOL, node=st, hint="or")
+                    if guard is not None:
+                        g = self.gen_expr(guard)
+                        acc = self.emit_val("land", [acc, g], ty=T.BOOL,
+                                            node=st, hint="gd") \
+                            if acc is not None else g
                 self.term(I.Term("branch", [acc], [arm_labels[i], Lnext],
                                  line=st.line, col=st.col))
                 self.start(self.block(Lnext))
@@ -981,6 +1013,13 @@ class IRGen:
             return self.emit_val("select", [c2, hi, t1], ty=ty, node=e, hint="c2")
         return self.emit_val("intrinsic", vals, ty=ty, node=e, hint="mi",
                              name=fname, argc=len(vals))
+
+    def _bind_match_var(self, bname, subj, sty, node):
+        """Đưa biến binding của một nhánh match vào phạm vi (trỏ tới subject)."""
+        addr = self.emit_val("alloca", [], ty=T.GType("ptr", elem=sty),
+                             node=node, hint="mb", name=bname)
+        self.emit("store", [addr, subj], node=node)
+        self.declare(bname, addr, sty)
 
     def _match_subject(self, node):
         """(giá trị, kiểu) của biểu thức được match, TỰ DEREF khi cần.
@@ -1229,8 +1268,16 @@ class IRGen:
         if isinstance(e, A.SizeOf):
             # Gấp thành HẰNG bằng engine bố cục theo target — backend không phải
             # nhờ 'sizeof' của C, và con số giống nhau ở mọi backend.
-            n = self._layout_of(self.resolve(e.type),
-                                align=getattr(e, "align", False))
+            # 'sizeof(x)' với x là BIẾN cũng được parser dựng thành A.SizeOf
+            # (tên trần không phân biệt được kiểu/biến), nên phải tra biến trước.
+            gt = None
+            if getattr(e.type, "resolved", None) is None:
+                found = self.lookup(getattr(e.type, "name", ""))
+                if found is not None:
+                    gt = found[1]
+            if gt is None:
+                gt = self.resolve(e.type)
+            n = self._layout_of(gt, align=getattr(e, "align", False))
             if n is not None:
                 return I.const_int(n, T.USIZE)
             return self.emit_val("intrinsic", [], ty=T.USIZE, node=e, hint="sz",
@@ -1377,12 +1424,30 @@ class IRGen:
                             node=e, hint="mv")
         subj, sty = self._match_subject(e)
         Lend = self.label("mxend")
-        for pats, guard, val in e.arms:
-            if pats is None:
+        bindings = getattr(e, "bindings", None) or [None] * len(e.arms)
+        for (pats, guard, val), bname in zip(e.arms, bindings):
+            if bname is None and pats is None:
                 self.emit("store", [res, self.gen_expr(val)], node=e)
                 self.term(I.Term("jump", labels=[Lend]))
                 break
             Lhit, Lnext = self.label("mxhit"), self.label("mxnext")
+            if bname is not None:
+                # Binding phải vào phạm vi trước cả guard lẫn giá trị nhánh.
+                self.push_scope()
+                self._bind_match_var(bname, subj, sty, e)
+                if guard is None:
+                    self.emit("store", [res, self.gen_expr(val)], node=e)
+                    self.pop_scope()
+                    self.term(I.Term("jump", labels=[Lend]))
+                    break
+                acc = self.gen_expr(guard)
+                self.term(I.Term("branch", [acc], [Lhit, Lnext]))
+                self.start(self.block(Lhit))
+                self.emit("store", [res, self.gen_expr(val)], node=e)
+                self.pop_scope()
+                self.term(I.Term("jump", labels=[Lend]))
+                self.start(self.block(Lnext))
+                continue
             acc = None
             for p in pats:
                 c = self._pat_cond(p, subj, sty)
@@ -1458,6 +1523,16 @@ class IRGen:
 
     #: Số phần tử tối đa in ra cho mảng (khớp Codegen._PRINT_ARRAY_MAX).
     _PRINT_ARRAY_MAX = 8
+
+    #: Intrinsic hệ điều hành hạ thẳng sang hàm/macro của runtime C.
+    _OS_INTRINSICS = {
+        "popcount", "clz", "ctz", "bswap", "rotl", "rotr",
+        "halt", "cli", "sti", "pause", "breakpoint", "io_wait", "rdtsc",
+        "inb", "outb", "inw", "outw", "inl", "outl",
+        "read_cr0", "read_cr2", "read_cr3", "read_cr4",
+        "write_cr0", "write_cr3", "write_cr4",
+        "invlpg", "wbinvd", "rdmsr", "wrmsr",
+    }
 
     _CMP_BUILTINS = {
         "assert_eq", "assert_ne", "assert_lt", "assert_le", "assert_gt",
@@ -1786,6 +1861,10 @@ class IRGen:
         # method của str -> hàm runtime
         if getattr(e, "is_str_method", False):
             args = [self.gen_expr(e.recv)] + [self.gen_expr(a) for a in e.args]
+            if e.str_c_fn == "g_str_at":
+                # 's.at(i)' PHẢI kiểm biên (panic), không trả '\0' âm thầm.
+                return self.emit_val("intrinsic", args, ty=ty, node=e,
+                                     hint="sa", name="str_at_checked")
             return self.emit_val("call", args, ty=ty, node=e, hint="sm",
                                  callee=e.str_c_fn)
 
@@ -1932,6 +2011,18 @@ class IRGen:
             v = self.gen_expr(e.args[0])
             return self.emit_val("intrinsic", [v], ty=T.USIZE, node=e,
                                  hint="ln", name="len")
+        # Intrinsic HỆ ĐIỀU HÀNH (bit, CPU, cổng I/O, MSR...): hạ thành một
+        # intrinsic IR mang theo BỀ RỘNG của đối số, để backend chọn đúng biến
+        # thể C ('__builtin_clzll' vs '__builtin_clz'...). Checker đã gác năng
+        # lực target trước đó.
+        if fname in self._OS_INTRINSICS:
+            vals = [self.gen_expr(a) for a in e.args]
+            at = self.gtype(e.args[0]) if e.args else T.U64
+            return self.emit_val("intrinsic", vals, ty=ty, node=e, hint="os",
+                                 name=fname,
+                                 bits=(at.bits or 32) if at.kind in
+                                 ("int", "char") else 64,
+                                 signed=bool(getattr(at, "signed", True)))
         if fname in ("g_free", "memcpy", "memset",
                      "memmove", "memcmp", "vol_read", "vol_write"):
             args = []

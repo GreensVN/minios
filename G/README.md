@@ -566,6 +566,35 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.19.0 — ✅ Giai đoạn B HOÀN TẤT: hai backend khớp 101/101
+
+- ✅ **`--backend=c-ir` khớp 101/101, 0 khác, 0 chưa hỗ trợ** — gồm cả
+  `tests/freestanding/` (biên dịch không libc) và `tests/panic/` (lỗi lúc chạy
+  phải cùng mã thoát 101 **và** cùng thông điệp). Đây là tiêu chí thoát của
+  Giai đoạn B trong ARCHITECTURE.md §3.
+- 🐛 **Lỗi hạ mã IR còn lại được sửa** (mọi backend tương lai đều sẽ dính):
+  - thuộc tính `@packed`/`@align` đặt sai chỗ (phải sau `}` đóng struct);
+  - struct chưa sắp xếp topo → C thấy kiểu chưa hoàn chỉnh;
+  - method TĨNH trong `impl` bị thêm tham số `self` ngầm;
+  - `Enum.Variant` bị coi là truy cập trường (checker lưu tuple `(Kiểu, Tên)`,
+    irgen đọc như tên trần);
+  - `==`/`!=` trên struct/slice không hạ về hàm so sánh;
+  - **binding trong `match`** (`x if x < 0 =>`) chưa được hạ → biến không tồn tại;
+  - `slice<str>` sinh hai tên typedef khác nhau ở hai backend — nay
+    `types.slice_c_name` là nguồn chân lý duy nhất;
+  - cắt lát của slice không **kẹp biên** như `g_sslice`;
+  - `*Struct` không đổi tên C an toàn (`*Default` → `default*`, từ khoá C);
+  - intrinsic bit/CPU (`popcount`/`clz`/`ctz`/`bswap`/`rotl`/`rotr`, cổng I/O,
+    MSR) chưa hạ; `clz` cần bù bề rộng còn `ctz` thì **không**;
+  - `asm` mở rộng **mất toán hạng** → `%0` không tham chiếu được gì;
+  - `s.at(i)` mất kiểm biên → không panic;
+  - `sizeof(x)` với `x` là BIẾN (parser dựng thành `A.SizeOf`).
+- 🧪 **Bộ so khớp mở rộng**: `run_backend_diff.sh` nay chạy cả freestanding và
+  panic. Chính phần mở rộng này phát hiện 3 lỗi cuối — bộ cũ đã báo "93/93 khớp"
+  trong khi asm, `s.at`, và freestanding vẫn hỏng.
+- 🧪 **Bộ test: 225 ca** + backend-diff 101 + target 21 + panic 4 + IR 97
+  + IR-unit 25 + layout 11 + ASan 93; fuzz 32 000 vòng, 0 crash.
+
 ## Mới trong 0.18.0 — 🔁 Giai đoạn B gần xong: 81/93 ca khớp hai backend
 
 - 🔁 **`--backend=c-ir` khớp 81 ca** (từ 39), **0 khác**. Còn 12 ca chưa sinh mã

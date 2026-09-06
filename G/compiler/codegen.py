@@ -94,8 +94,8 @@ class Codegen:
         phần tử cần một struct riêng."""
         name = self.slice_typedefs.get(elem_c)
         if name is None:
-            ident = (elem_c.replace("*", "p").replace(" ", "_")
-                     .replace("const_charp", "str"))
+            ident = ("str" if elem_c == "const char*"
+                     else elem_c.replace("*", "p").replace(" ", "_"))
             name = f"GSlice_{ident}"
             self.slice_typedefs[elem_c] = name
             self.slice_decls.append(f"G_SLICE_DEF({elem_c}, {name});")

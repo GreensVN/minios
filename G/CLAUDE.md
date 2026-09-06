@@ -271,6 +271,19 @@ element type. Those printers dereference struct fields, so they are spliced in
 
 ### Two C backends, on purpose
 
+**Status: they now agree on 101/101 cases (0 differing, 0 unsupported),
+including freestanding compilation and runtime panics.** Phase B's exit
+criterion is met; flipping the default is Phase C and has not been done yet,
+deliberately — the differential harness is the cheapest safety net available
+and it only works while both backends exist.
+
+A lesson worth keeping: the harness originally covered only `examples/` and
+`tests/cases/` and reported "93/93 matching" while extended `asm`, `s.at()`
+bounds checks, and freestanding mode were all still broken. Widening it to
+`tests/freestanding/` and `tests/panic/` exposed three more bugs immediately.
+A differential harness is only as strong as its input set — if you add a test
+*category*, add it here too.
+
 `--backend=c` (default) lowers from the AST; `--backend=c-ir`
 (`backend_c_ir.py`) lowers from G-IR. They coexist during the migration because
 the AST one passes 225 tests and replacing it piecewise would create an
