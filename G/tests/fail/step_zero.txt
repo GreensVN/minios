@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: bước lặp 'step 0' không hợp lệ (vòng lặp sẽ không bao giờ tiến — lặp vô hạn hoặc không chạy)

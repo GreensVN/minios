@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: struct 'S' được định nghĩa nhiều lần (đã có struct cùng tên)

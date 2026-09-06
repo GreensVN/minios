@@ -1,0 +1,5 @@
+4 6
+true false
+true true east
+0 2 1 3 
+true

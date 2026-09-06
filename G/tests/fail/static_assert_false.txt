@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: static_assert thất bại lúc biên dịch: CAP quá nhỏ

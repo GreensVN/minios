@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: điều kiện 'if' không thể là giá trị kiểu 'str' — muốn kiểm tra rỗng dùng 'strlen(s) == 0' hoặc so sánh '=='

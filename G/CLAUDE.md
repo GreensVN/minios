@@ -54,7 +54,9 @@ Two kinds of tests, both keyed by basename:
   terminate on EOF).
 - **Fail tests** — every `tests/fail/<name>.g`. Must *fail* `--check`; the diagnostic must
   **contain** the (ANSI-stripped) message snapshot in `tests/fail/<name>.txt`. These lock in
-  diagnostics against regression.
+  diagnostics against regression. The first line is written by `--bless`; any extra lines
+  (hand-added, preserved by `--bless`) must also appear in the output — used e.g. to assert
+  the multi-error summary `gc: 4 lỗi`.
 - **Freestanding tests** — every `tests/freestanding/*.g` and `examples/kernel/*.g`. Compiled
   with `--freestanding -c` to a `.o` and checked for **exit 0** (NOT run — they may contain
   privileged instructions like `hlt`/`cli`/`outb`). Locks in libc-free compilation of the OS
@@ -99,13 +101,39 @@ missing. Key annotations:
   auto-deref, `==` string lowering, shift-width handling.
 - `Ident.c_name` / `Let.c_name` / `For.c_name` — unique C names that implement **shadowing**
   (C forbids redeclaration in a scope; the checker renames via `declare`).
-- `Call.is_method` / `.recv` / `.method` / `.struct` / `.recv_is_ptr` — method-call resolution.
-- `Match.subject_type` / `.has_default` / `.bindings` — match lowering.
+- `Call.is_method` / `.recv` / `.method` / `.struct` / `.recv_is_ptr` — method-call resolution;
+  `Call.is_static_method` for `Type.fn(args)` (no `self`). `Function.is_static` is set on
+  `impl` methods in `collect_funcs`. `impl` targets may be structs **or enums**.
+- `FieldAccess.enum_variant = (Enum, Variant)` for qualified `Color.Red`; `Ident.is_enum_variant`
+  for bare variants (both are constants — `_is_addressable` must not take `&` of them).
+- `Match.subject_type` / `.has_default` / `.bindings` / `.deref_subject` (for `match self` in
+  an enum method, where `self: *Enum`) — match lowering.
+- `Binary.widen_i64` — constant integer expression whose folded value exceeds 32 bits; codegen
+  casts the left operand so C computes in 64-bit.
+- `Param.c_name` — parameters go through `declare()` too, so a parameter named like a libc
+  function or a global gets a safe/unique C name.
 - `For.var_type`, `ForEach.elem_type` / `.iter_kind`, `FieldAccess.auto_deref`.
 - `prog.enum_tables` — the enum value table, shared checker→codegen (avoids a back-dependency).
 
 **Consequence: never run codegen without the checker, and if you add an AST construct that
 codegen needs type info for, attach it during `infer`/`check_*`, not in codegen.**
+
+### C identifier hygiene
+
+Every G identifier that reaches C goes through `Checker.safe_c_name` (codegen exposes it as
+`cn()`): C keywords and libc names get a `_g` suffix, and `declare()` appends `_sK` when a
+local would collide with a global/function. Codegen must apply `cn()` to **every** emitted
+name (struct/enum/typedef/field/variant/param/global/method), and use `Ident.c_name` when set.
+`main` and `extern` symbols keep their raw name. Pointer/array declarators are built by
+`c_decl()` (east-const, `int (*p)[3]`, `int *a[2]`), never by string-concatenating `*`.
+
+### Error recovery
+
+`err()` raises `CheckError`; `check_block` and the top-level loop wrap each statement/function
+in `_recover()`, which records the error, restores scope depth, and continues. A failing `let`
+still declares its name (type `unknown`) to avoid cascades. All errors are raised together as
+`CheckErrors` (cap `CheckErrors.MAX = 20`); the driver renders each and prints `gc: N lỗi`.
+Inside expressions errors still propagate immediately — do not "recover" mid-expression.
 
 ### Checker pass ordering (in `Checker.check`)
 
@@ -141,7 +169,7 @@ A new construct typically threads through the stages in order:
 (infer/validate, attach annotations) → **codegen** (emit C). Use `--tokens`, `--ast`, and
 especially `--emit-c` to inspect each stage in isolation.
 
-## OS development (v0.6.0)
+## OS development (v0.6.0+)
 
 G targets bare-metal/kernel work. The pieces, and where they live:
 

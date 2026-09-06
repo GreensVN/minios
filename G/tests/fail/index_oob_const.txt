@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: chỉ số 5 vượt biên mảng '[2]int' (hợp lệ: 0..1)

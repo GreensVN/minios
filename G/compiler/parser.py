@@ -236,7 +236,7 @@ class Parser:
         return A.EnumDef(name, variants, **self.pos_of(t))
 
     def parse_impl(self) -> A.Impl:
-        self.expect("kw", "impl")
+        t = self.expect("kw", "impl")
         struct = self.expect("id").value
         self.expect("op", "{")
         methods = []
@@ -246,7 +246,7 @@ class Parser:
             methods.append(self._with_attrs(self.parse_fn(recv=struct), mattrs))
             self.skip_semis()
         self.expect("op", "}")
-        return A.Impl(struct, methods)
+        return A.Impl(struct, methods, **self.pos_of(t))
 
     def parse_global(self) -> A.GlobalVar:
         t = self.cur()
@@ -422,7 +422,7 @@ class Parser:
         inclusive = self.accept("op", "..=")
         if inclusive or self.accept("op", ".."):
             end = self.parse_expr()
-            step = self.parse_expr() if self.accept("kw", "step") else None
+            step = self.parse_expr() if self.accept("id", "step") else None
             self.no_struct_lit = saved
             body = self.parse_block()
             return A.For(var, first, end, body, bool(inclusive), step,

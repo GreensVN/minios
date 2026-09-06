@@ -78,6 +78,8 @@ class EnumDef:
 class Impl:
     struct: str
     methods: list       # list[Function]
+    line: int = 0
+    col: int = 0
 
 
 @dataclass

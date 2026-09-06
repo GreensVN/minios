@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: static_assert cần một điều kiện HẰNG lúc biên dịch (literal, const, sizeof/alignof, biến thể enum và phép toán giữa chúng) — biểu thức này tham chiếu biến/lời gọi lúc chạy

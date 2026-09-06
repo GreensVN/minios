@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể so sánh 'str' với 'str' (chuỗi: '==' so nội dung; thứ tự dùng strcmp(a, b) < 0)
