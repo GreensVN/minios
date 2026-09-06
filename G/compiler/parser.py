@@ -260,6 +260,19 @@ class Parser:
         t = self.cur()
         self.expect("kw", "struct")
         name = self.expect("id").value
+        # 'struct Pair<A, B> { ... }' — struct generic, nhân bản theo bộ kiểu
+        # cụ thể giống hàm generic.
+        type_params = []
+        if self.is_op("<"):
+            self.advance()
+            while not self.is_op(">"):
+                type_params.append(self.expect("id").value)
+                if not self.accept("op", ","):
+                    break
+            self.expect("op", ">")
+            if not type_params:
+                self.error(f"'struct {name}<>' cần ít nhất một tham số kiểu",
+                           show_token=False)
         self.expect("op", "{")
         fields = []
         self.skip_semis()
@@ -270,7 +283,8 @@ class Parser:
             self.accept("op", ",")
             self.skip_semis()
         self.expect("op", "}")
-        return A.StructDef(name, fields, **self.pos_of(t))
+        return A.StructDef(name, fields, type_params=type_params,
+                           **self.pos_of(t))
 
     def parse_enum(self) -> A.EnumDef:
         t = self.cur()
@@ -313,6 +327,16 @@ class Parser:
 
     def parse_impl(self) -> A.Impl:
         t = self.expect("kw", "impl")
+        # 'impl<T, E> Result<T, E> { ... }' — impl cho struct GENERIC. Tham số
+        # kiểu khai báo sau 'impl' rồi dùng lại trong tên kiểu.
+        impl_tparams = []
+        if self.is_op("<"):
+            self.advance()
+            while not self.is_op(">"):
+                impl_tparams.append(self.expect("id").value)
+                if not self.accept("op", ","):
+                    break
+            self.expect("op", ">")
         struct = self.expect("id").value
         # 'impl Trait for Kiểu { ... }'
         trait = None
@@ -320,6 +344,22 @@ class Parser:
             self.advance()
             trait = struct
             struct = self.expect("id").value
+        # Bỏ qua đối số kiểu trên tên kiểu ('Result<T, E>') — khuôn được nhân
+        # bản theo tham số của chính 'impl<...>'.
+        if self.is_op("<") and self._looks_like_type_args():
+            self.advance()
+            depth = 0
+            while True:
+                if self.is_op("<"):
+                    depth += 1
+                elif self.is_op(">"):
+                    if depth == 0:
+                        self.advance()
+                        break
+                    depth -= 1
+                elif self.check("eof"):
+                    break
+                self.advance()
         self.expect("op", "{")
         methods = []
         self.skip_semis()
@@ -329,7 +369,9 @@ class Parser:
             self.skip_semis()
         # (recv luôn là KIỂU nhận, kể cả trong 'impl Trait for Kiểu')
         self.expect("op", "}")
-        return A.Impl(struct, methods, trait=trait, **self.pos_of(t))
+        im = A.Impl(struct, methods, trait=trait, **self.pos_of(t))
+        im.type_params = impl_tparams
+        return im
 
     def parse_global(self) -> A.GlobalVar:
         t = self.cur()
@@ -978,11 +1020,47 @@ class Parser:
             return e
         if t.kind == "id":
             self.advance()
+            # 'Pair<int, str>{ a: 1, b: "x" }' — struct literal GENERIC. Chỉ
+            # nhận khi sau '>' là '{' (nếu không 'a < b' bị nuốt nhầm).
+            if (not self.no_struct_lit and self.is_op("<")
+                    and self._looks_like_generic_lit()):
+                self.advance()
+                targs = []
+                while not self.is_op(">"):
+                    targs.append(self.parse_type())
+                    if not self.accept("op", ","):
+                        break
+                self.expect("op", ">")
+                lit = self.parse_struct_lit(t.value, t)
+                lit.type_args = targs
+                return lit
             if (not self.no_struct_lit and self.is_op("{")
                     and self._looks_like_struct_lit()):
                 return self.parse_struct_lit(t.value, t)
             return A.Ident(t.value, line=t.line, col=t.col)
         self.error("cần biểu thức")
+
+    def _looks_like_generic_lit(self):
+        """'Name<...>{' — struct literal generic (yêu cầu '{' ngay sau '>')."""
+        i = 1
+        depth = 0
+        while i < 24:
+            tk = self.at(i)
+            if tk.kind == "eof":
+                return False
+            v = tk.value
+            if v == "<":
+                depth += 1
+            elif v == ">":
+                if depth == 0:
+                    return self.at(i + 1).value == "{"
+                depth -= 1
+            elif tk.kind in ("id", "int") or v in ("*", ",", "[", "]"):
+                pass
+            else:
+                return False
+            i += 1
+        return False
 
     def _looks_like_call_type_args(self):
         """'f<int>(' — đối số kiểu ở nơi GỌI. Yêu cầu có '(' ngay sau '>' để

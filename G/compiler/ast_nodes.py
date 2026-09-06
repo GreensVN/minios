@@ -72,6 +72,8 @@ class StructDef:
     name: str
     fields: list        # list[Param]
     attrs: list = field(default_factory=list)   # list[Attr]
+    #: Tham số kiểu của struct generic: 'struct Pair<A, B> { ... }'.
+    type_params: list = field(default_factory=list)
     line: int = 0
     col: int = 0
 
@@ -92,6 +94,8 @@ class Impl:
     col: int = 0
     #: 'impl Trait for Struct' -> tên trait; None = impl thường.
     trait: Optional[str] = None
+    #: 'impl<T, E> Result<T, E>' -> ['T', 'E'] (impl cho struct generic).
+    type_params: list = field(default_factory=list)
 
 
 @dataclass
@@ -404,6 +408,9 @@ class StructLit:
     fields: list            # list[(field_name, expr)]
     line: int = 0
     col: int = 0
+    #: Đối số kiểu cho struct generic: 'Pair<int,str>{...}'.
+    type_args: Optional[list] = None
+
 
 @dataclass
 class IfExpr:              # 'if c { a } else { b }' ở vị trí BIỂU THỨC

@@ -242,6 +242,10 @@ class Checker:
         self.traits = {}           # tên trait -> A.TraitDef
         self.trait_impls = {}      # tên kiểu -> {tên trait đã impl}
         self.generic_funcs = {}    # tên -> A.Function (KHUÔN generic)
+        self.generic_structs = {}  # tên -> A.StructDef (KHUÔN struct generic)
+        self.generic_impls = {}    # tên struct generic -> [A.Impl]
+        self.struct_insts = {}     # (tên, bộ kiểu) -> tên struct đã nhân bản
+        self._pending_struct_impls = []   # impl của struct generic, kiểm sau
         self.generic_insts = {}    # (tên, bộ kiểu) -> tên hàm đã nhân bản
         self._mono_depth = 0
         self._layout_cache = None  # engine bố cục (layout.py), dựng lười
@@ -278,6 +282,7 @@ class Checker:
             if isinstance(it, A.Function) and it.body is not None
         }
         self.collect_const_values()
+        self._extract_generic_structs()
         self.collect_types()
         # Chia sẻ bảng giá trị enum cho codegen (để sinh hàm tên-biến-thể, khử
         # trùng nhãn 'case' theo giá trị) — tránh phụ thuộc ngược checker<-codegen.
@@ -305,6 +310,18 @@ class Checker:
                 self._recover(self.check_function, it)
             elif isinstance(it, A.Impl):
                 for m in it.methods:
+                    if m.body is not None:
+                        self._recover(self.check_function, m)
+        # Method của struct generic được sinh LƯỜI trong lúc kiểm, nên kiểm
+        # thân của chúng ở đây (lặp tới khi không còn bản nhân mới).
+        seen = 0
+        while self._pending_struct_impls and seen < 64:
+            batch = self._pending_struct_impls
+            self._pending_struct_impls = []
+            for im in batch:
+                seen += 1
+                self.cur_file = getattr(im, "src_file", None)
+                for m in im.methods:
                     if m.body is not None:
                         self._recover(self.check_function, m)
         if self._errors:
@@ -724,6 +741,24 @@ class Checker:
         raise _CTAbort()
 
     # ---------- thu thập khai báo ----------
+    def _extract_generic_structs(self):
+        """Tách KHUÔN struct generic khỏi prog.items (giống hàm generic).
+
+        Khuôn không phải kiểu thật: 'Pair<A,B>' chỉ thành struct khi có bộ kiểu
+        cụ thể. Để nó lọt vào collect_types sẽ sinh 'kiểu chưa biết: A'."""
+        for it in list(self.prog.items):
+            if isinstance(it, A.StructDef) and getattr(it, "type_params", None):
+                if it.name in self.generic_structs:
+                    self.err(f"struct generic '{it.name}' được định nghĩa "
+                             f"nhiều lần", it)
+                self.generic_structs[it.name] = it
+                self.prog.items.remove(it)
+        # 'impl' cho struct generic cũng phải chờ (self là kiểu chưa biết).
+        for it in list(self.prog.items):
+            if isinstance(it, A.Impl) and it.struct in self.generic_structs:
+                self.generic_impls.setdefault(it.struct, []).append(it)
+                self.prog.items.remove(it)
+
     def collect_types(self):
         # Lượt 1: đăng ký TÊN struct/enum trước để cho phép tham chiếu tiến (forward).
         for it in self.prog.items:
@@ -901,6 +936,8 @@ class Checker:
                              f"lại làm tên trait", it)
                 self.traits[it.name] = it
             elif isinstance(it, A.Impl):
+                if getattr(it, "_registered", False):
+                    continue          # bản nhân của struct generic: đã đăng ký
                 self.cur_file = getattr(it, "src_file", None)
                 if it.trait is not None and it.trait not in self.traits:
                     sug = suggest(it.trait, set(self.traits))
@@ -1128,6 +1165,82 @@ class Checker:
             for _, v in e.fields:
                 out += self._global_refs(v)
         return out
+
+    # ================= STRUCT GENERIC =================
+    def _instantiate_struct(self, name, ty, targs_syn):
+        """Nhân bản 'struct P<A,B>' với bộ kiểu cụ thể; trả về TÊN struct sinh ra."""
+        import copy as _copy
+        tmpl = self.generic_structs[name]
+        if not targs_syn:
+            self.err(f"'{name}' là struct generic — cần đối số kiểu, vd "
+                     f"'{name}<{', '.join(tmpl.type_params)}>'", ty)
+            return None
+        if len(targs_syn) != len(tmpl.type_params):
+            self.err(f"'{name}' cần {len(tmpl.type_params)} đối số kiểu nhưng "
+                     f"nhận {len(targs_syn)}", ty)
+            return None
+        targs = [self.resolve(t) for t in targs_syn]
+        key = (name, tuple(self.tyname(t) for t in targs))
+        hit = self.struct_insts.get(key)
+        if hit is not None:
+            return hit
+        if len(self.struct_insts) >= self._MAX_INSTANCES:
+            self.err(f"quá nhiều bản nhân struct generic "
+                     f"(>{self._MAX_INSTANCES})", ty)
+            return None
+
+        new_name = self._mangle_generic(name, targs)
+        self.struct_insts[key] = new_name          # ghi TRƯỚC: cho phép đệ quy
+        mapping = {tp: self._gtype_to_syntax(t)
+                   for tp, t in zip(tmpl.type_params, targs)}
+        inst = _copy.deepcopy(tmpl)
+        inst.name = new_name
+        inst.type_params = []
+        inst.src_file = getattr(tmpl, "src_file", None)
+        for f in inst.fields:
+            self._subst_type_inplace(f.type, mapping)
+
+        # Đăng ký như một struct THƯỜNG.
+        self.structs.setdefault(new_name, {})
+        self.struct_order.setdefault(new_name, [])
+        for f in inst.fields:
+            self.structs[new_name][f.name] = self.resolve(f.type)
+            self.struct_order[new_name].append(f.name)
+        self.type_names.add(new_name)
+        self.prog.items.append(inst)
+        self._layout_cache = None                  # bố cục có struct mới
+
+        # 'impl' của khuôn cũng phải được nhân bản cho bản này.
+        for im in self.generic_impls.get(name, ()):
+            i2 = _copy.deepcopy(im)
+            i2.struct = new_name
+            i2.src_file = getattr(im, "src_file", None)
+            # Ánh xạ cho impl: tham số kiểu của CHÍNH impl ('impl<T,E>') theo
+            # thứ tự khai báo, CỘNG tên khuôn -> tên bản nhân (để 'self: *Result'
+            # và mọi 'Result<T,E>' trong thân trỏ đúng struct cụ thể).
+            imap = dict(mapping)
+            for tp, t in zip(getattr(im, "type_params", []) or [], targs):
+                imap[tp] = self._gtype_to_syntax(t)
+            imap[name] = A.Type(new_name)
+            for m in i2.methods:
+                m.recv = new_name
+                self._subst_type_inplace(m.ret, imap)
+                for p in m.params:
+                    self._subst_type_inplace(p.type, imap)
+                self._subst_body(m.body, imap)
+            self.prog.items.append(i2)
+            # Đăng ký method NGAY (bản nhân sinh ra LƯỜI, sau khi collect_funcs
+            # đã chạy). Dùng dict nên gán lại cùng tên là vô hại — nhưng phải
+            # tránh để collect_funcs chạy lại trên cùng node và báo "trùng".
+            i2._registered = True
+            self.methods.setdefault(new_name, {})
+            for m in i2.methods:
+                m.is_static = not (m.params and m.params[0].name == "self")
+                self.methods[new_name][m.name] = m
+            if im.trait is not None:
+                self.trait_impls.setdefault(new_name, set()).add(im.trait)
+            self._pending_struct_impls.append(i2)
+        return new_name
 
     # ================= TRAIT =================
     def check_trait_impls(self):
@@ -1507,6 +1620,12 @@ class Checker:
             g = T.slice_of(el, mutable=getattr(ty, "slice_mut", False))
         else:
             base = ty.name
+            # 'Pair<int, str>' -> nhân bản khuôn thành struct cụ thể rồi dùng
+            # tên đã sinh. Làm ngay trong resolve nên MỌI vị trí kiểu (tham số,
+            # trường, biến, kiểu trả về) đều hoạt động mà không phải sửa từng nơi.
+            if base in self.generic_structs:
+                inst = self._instantiate_struct(base, ty, ty.type_args)
+                base = inst if inst is not None else base
             if base in self.primitives:
                 g = self.primitives[base]
             elif base in self.structs:
@@ -3534,6 +3653,21 @@ class Checker:
         return ""
 
     def infer_struct_lit(self, e: A.StructLit):
+        # 'Pair<int,str>{...}' -> nhân bản khuôn rồi dùng tên đã sinh.
+        if e.name in self.generic_structs:
+            targs = getattr(e, "type_args", None)
+            if not targs:
+                tmpl = self.generic_structs[e.name]
+                self.err(
+                    f"'{e.name}' là struct generic — cần đối số kiểu, vd "
+                    f"'{e.name}<{', '.join(tmpl.type_params)}>{{...}}'", e)
+                return T.UNKNOWN
+            syn = A.Type(e.name, type_args=list(targs),
+                         line=e.line, col=e.col)
+            inst = self._instantiate_struct(e.name, syn, targs)
+            if inst is None:
+                return T.UNKNOWN
+            e.name = inst
         if e.name not in self.structs:
             sug = suggest(e.name, set(self.structs))
             msg = f"struct chưa định nghĩa: '{e.name}'"

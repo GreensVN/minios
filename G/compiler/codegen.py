@@ -81,8 +81,15 @@ class Codegen:
         elif getattr(t, "is_fn", False):
             base = self._fnptr_typedef(t)
         else:
+            # Kiểu GENERIC ('Pair<int,str>') được checker phân giải thành một
+            # struct cụ thể và ghi vào 'resolved' — dùng tên đó, vì t.name vẫn
+            # là tên KHUÔN và không tồn tại trong C.
+            rname = None
+            r = getattr(t, "resolved", None)
+            if r is not None and getattr(r, "kind", None) in ("struct", "enum"):
+                rname = r.name
             base = (TYPE_MAP.get(t.name) or T.BUILTIN_STRUCT_C.get(t.name)
-                    or self.cn(t.name))
+                    or self.cn(rname or t.name))
         return base + "*" * getattr(t, "elem_ptr", 0)
 
     def _slice_typedef_ast(self, t: A.Type) -> str:
