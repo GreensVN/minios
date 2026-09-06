@@ -476,6 +476,22 @@ static inline const char* g_str_repeat_i(const char* s, int k) {
 static inline const char* g_substr_i(const char* s, int start, int len) {
     return g_substr(s, (ptrdiff_t)start, (ptrdiff_t)len);
 }
+/* Lát cắt chuỗi s[lo..hi) -> chuỗi mới (heap). Cận được kẹp vào [0, len] và
+ * hi < lo cho ra chuỗi rỗng, nên không bao giờ đọc ngoài vùng nhớ. */
+static inline const char* g_str_slice(const char* s, long long lo, long long hi) {
+    if (!s) s = "";
+    long long n = (long long)strlen(s);
+    if (lo < 0) lo = 0;
+    if (hi > n) hi = n;
+    if (hi < lo) hi = lo;
+    size_t len = (size_t)(hi - lo);
+    char* p = (char*)malloc(len + 1);
+    if (!p) return NULL;
+    memcpy(p, s + lo, len);
+    p[len] = '\0';
+    return p;
+}
+
 /* Ký tự tại vị trí i, có KIỂM biên (i ngoài [0, len] -> '\0' thay vì đọc rác). */
 static inline char g_str_at(const char* s, int i) {
     if (!s || i < 0) return '\0';

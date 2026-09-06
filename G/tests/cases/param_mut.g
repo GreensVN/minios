@@ -14,7 +14,7 @@ fn norm(mut x: int, lo: int) -> int {
 }
 fn main() -> int {
     println("{} {}", norm(3, 5), norm(9, 5))
-    let mut a = 7
+    let a = 7
     println("{}", norm(a, 5))
     println("{}", a)          // đối số nơi gọi KHÔNG đổi
     let mut c = C{n: 1}

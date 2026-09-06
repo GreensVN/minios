@@ -49,7 +49,7 @@ fn main() -> int {
     println("o.inner.v = {}", o.inner.v)
 
     // Struct rỗng
-    let u = Unit {}
+    let _u = Unit {}
     println("unit ok")
     return 0
 }

@@ -26,7 +26,7 @@ fn main() -> int {
     println("sizeof(UartRegs) đóng gói = {} byte", sizeof(UartRegs))
 
     // --- MMIO mô phỏng: ghi/đọc qua 'volatile' trên một vùng RAM ---
-    let mut mmio: *u32 = g_alloc(u32, 4)
+    let mmio: *u32 = g_alloc(u32, 4)
     vol_write(mmio + 0, 0xDEADBEEF)
     vol_write(mmio + 1, 0x0000CAFE)
     println("MMIO[0]={x} MMIO[1]={x}", vol_read(mmio + 0), vol_read(mmio + 1))

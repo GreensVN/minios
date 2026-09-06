@@ -723,7 +723,15 @@ class Codegen:
     def fn_signature(self, fn: A.Function) -> str:
         parts = []
         for p in fn.params:
-            parts.append(self.c_decl(getattr(p, "c_name", "") or self.cn(p.name), p.type, decay_first=True))
+            pname = getattr(p, "c_name", "") or self.cn(p.name)
+            # Tham số MẢNG 'mut' được sao chép ra bộ đệm cục bộ trong prologue (xem
+            # gen_fn): tham số C thật đổi tên, còn tên gốc thuộc về bản sao.
+            if getattr(p, "mutable", False) and fn.body is not None:
+                dims = self._dims(p.type)
+                if dims and all(isinstance(d, int) for d in dims):
+                    p.arr_copy_from = pname + "__src"
+                    pname = p.arr_copy_from
+            parts.append(self.c_decl(pname, p.type, decay_first=True))
         params = ", ".join(parts) if parts else "void"
         ret = self.c_type(fn.ret)
         qual = ""
@@ -740,7 +748,18 @@ class Codegen:
         self.cur_src_file = getattr(fn, "src_file", None) or getattr(self, "cur_src_file", None)
         self.w(self.fn_signature(fn) + " {")
         self.scope_stack = []
-        self.gen_scoped_body(fn.body, is_loop=False)
+        # Tham số MẢNG khai báo 'mut': C truyền mảng dưới dạng con trỏ, nên ghi
+        # vào nó sẽ sửa mảng của NGƯỜI GỌI — trái ngữ nghĩa "tham số là bản sao"
+        # mà 'mut' trên tham số vô hướng vẫn giữ. Sao chép ra bộ đệm cục bộ.
+        prologue = []
+        for prm in fn.params:
+            src = getattr(prm, "arr_copy_from", None)
+            if src is None:
+                continue
+            pname = getattr(prm, "c_name", "") or self.cn(prm.name)
+            prologue.append(self.c_decl(pname, prm.type, None, const=False) + ";")
+            prologue.append(f"memcpy({pname}, {src}, sizeof({pname}));")
+        self.gen_scoped_body(fn.body, is_loop=False, prologue=prologue)
         # Hàm non-void mà checker đã chứng minh luôn-trả-về nhưng câu lệnh cuối
         # không phải 'return' tường minh (vd match enum vét cạn / if-else-diverge):
         # chèn __builtin_unreachable() để C không cảnh báo "control reaches end".
@@ -885,6 +904,19 @@ class Codegen:
                 ty = self._gtype_to_ctype_decl(gt)
                 self.w(self.c_decl(name, ty, init, const=const) + ";")
             return
+
+        # ----- 'let b = a' với a là MẢNG tĩnh: SAO CHÉP, không chia sẻ -----
+        # '__auto_type b = a' cho ra một CON TRỎ vào chính bộ nhớ của a (mảng phân
+        # rã), nên 'b[0] = 9' sửa luôn a — trái ngữ nghĩa giá trị của G. Khai báo
+        # một mảng thật rồi memcpy.
+        if st.value is not None and not isinstance(st.value, A.ArrayLit):
+            vgt = self.gtype_of(st.value)
+            if vgt is not None and vgt.kind == "array" and isinstance(vgt.n, int):
+                src = self.gen_expr(st.value)
+                ty = st.type if st.type is not None else self._gtype_to_ctype_decl(vgt)
+                self.w(self.c_decl(name, ty, None, const=False) + ";")
+                self.w(f"memcpy({name}, {src}, sizeof({name}));")
+                return
 
         init_c = self.gen_expr(st.value) if st.value is not None else None
         if st.type is not None:
@@ -1404,6 +1436,20 @@ class Codegen:
             return self.gen_match_expr(e)
         if isinstance(e, A.Call):
             return self.gen_call(e)
+        if isinstance(e, A.Slice):
+            # s[lo..hi] -> g_str_slice(s, lo, hi); cận khuyết = 0 / độ dài chuỗi.
+            # Chuỗi nguồn vật hoá MỘT lần (có thể là lời gọi hàm).
+            base = self.gen_expr(e.base)
+            sv = self.tmp("_gsl")
+            lo = self.gen_expr(e.lo) if e.lo is not None else "0"
+            if e.hi is not None:
+                hi = f"(long long)({self.gen_expr(e.hi)})"
+                if e.inclusive:
+                    hi = f"({hi} + 1)"
+            else:
+                hi = f"(long long)g_str_len_i({sv})"
+            return (f"({{ const char* {sv} = ({base}); "
+                    f"g_str_slice({sv}, (long long)({lo}), {hi}); }})")
         if isinstance(e, A.Index):
             base_c = self.gen_expr(e.base)
             idx_c = self.gen_expr(e.index)

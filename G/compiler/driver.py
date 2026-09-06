@@ -16,7 +16,7 @@ from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -36,9 +36,11 @@ class GError(Exception):
 
 
 # ---------- chẩn đoán lỗi đẹp ----------
-def render_diag(filename, source, line, col, msg, phase):
+def render_diag(filename, source, line, col, msg, phase, kind="lỗi"):
     RED = "\033[1;31m"; BOLD = "\033[1m"; CYAN = "\033[36m"; RST = "\033[0m"
-    head = f"{BOLD}{filename}:{line}:{col}:{RST} {RED}lỗi {phase}:{RST} {msg}"
+    if kind != "lỗi":
+        RED = "\033[1;33m"        # cảnh báo: vàng
+    head = f"{BOLD}{filename}:{line}:{col}:{RST} {RED}{kind} {phase}:{RST} {msg}"
     lines = (source or "").splitlines()
     body = ""
     if 1 <= line <= len(lines):
@@ -115,7 +117,8 @@ def has_main(prog):
                for it in prog.items)
 
 
-def compile_to_c(main_path, freestanding=False):
+def compile_to_c(main_path, freestanding=False, no_warnings=False,
+                 warnings_as_errors=False):
     """Trả về dict {c, has_main}. Báo lỗi đúng file nguồn (kể cả module import)."""
     sources = {}
     main_ap = os.path.abspath(main_path)
@@ -124,8 +127,9 @@ def compile_to_c(main_path, freestanding=False):
     def _to_gerror(e):
         fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
         return GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
+    ck = Checker(prog, freestanding=freestanding)
     try:
-        Checker(prog, freestanding=freestanding).check()
+        ck.check()
     except CheckErrors as e:
         errs = [_to_gerror(x) for x in e.errors]
         first = errs[0]
@@ -133,6 +137,18 @@ def compile_to_c(main_path, freestanding=False):
         raise first
     except CheckError as e:
         raise _to_gerror(e)
+    # Cảnh báo (không chặn biên dịch): in sau khi checker chạy xong sạch.
+    if ck.warnings and not no_warnings:
+        for msg, wline, wcol, wfile in ck.warnings:
+            wpath, wsrc = sources.get(wfile or main_ap, (main_path, main_src))
+            kind = "lỗi" if warnings_as_errors else "cảnh báo"
+            print(render_diag(wpath, wsrc, wline, wcol, msg, "kiểu/ngữ nghĩa",
+                              kind=kind), file=sys.stderr)
+        if warnings_as_errors:
+            n = len(ck.warnings)
+            print(f"gc: \033[1;31m{n} cảnh báo bị coi là lỗi\033[0m (-W)",
+                  file=sys.stderr)
+            sys.exit(1)
     try:
         c_code = Codegen(prog).generate()
     except CodegenError as e:
@@ -301,6 +317,10 @@ def main(argv):
     ap.add_argument("--tokens", action="store_true", help="in danh sách token")
     ap.add_argument("--ast", action="store_true", help="in cây cú pháp AST")
     ap.add_argument("--cc", default=None, help="trình biên dịch C (mặc định tự dò)")
+    ap.add_argument("-w", "--no-warnings", action="store_true",
+                    help="tắt cảnh báo (vd biến khai báo mà không dùng)")
+    ap.add_argument("-W", "--warnings-as-errors", action="store_true",
+                    help="coi cảnh báo là lỗi (dừng biên dịch)")
     ap.add_argument("--freestanding", action="store_true",
                     help="chế độ không libc (kernel/firmware): -ffreestanding "
                          "-nostdlib, không cần 'main', runtime tự cài memcpy/panic")
@@ -334,10 +354,12 @@ def main(argv):
             dump_ast(args.input)
             return 0
         if args.check:
-            compile_to_c(args.input, args.freestanding)  # chạy tới hết checker
+            compile_to_c(args.input, args.freestanding, args.no_warnings,
+                         args.warnings_as_errors)  # chạy tới hết checker
             print(f"gc: \033[32mOK\033[0m — không phát hiện lỗi kiểu trong {args.input}")
             return 0
-        result = compile_to_c(args.input, args.freestanding)
+        result = compile_to_c(args.input, args.freestanding, args.no_warnings,
+                              args.warnings_as_errors)
     except GError as e:
         print(render_diag(e.filename, e.source, e.line, e.col, e.msg, e.phase),
               file=sys.stderr)

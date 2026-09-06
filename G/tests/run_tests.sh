@@ -29,6 +29,29 @@ run_one() {
         cat "$TMP/$name.cc"
         fail=$((fail+1)); return
     fi
+    # Không ca test nào được phát CẢNH BÁO (vd biến khai báo mà không dùng):
+    # giữ toàn bộ ví dụ/test sạch, và bảo đảm cảnh báo không bị dương tính giả.
+    if grep -q "cảnh báo" "$TMP/$name.cc"; then
+        echo -e "${RED}CÓ CẢNH BÁO${RST}    $name"
+        strip_ansi < "$TMP/$name.cc" | grep "cảnh báo" | head -5
+        fail=$((fail+1)); return
+    fi
+    # Mã C sinh ra phải sạch dưới -Wall -Wextra (bắt lỗi SINH MÃ sớm: ép kiểu
+    # sai, so sánh signed/unsigned, biến C thừa...).
+    if command -v gcc >/dev/null 2>&1; then
+        if "$GC" "$src" --emit-c -o "$TMP/$name.gen.c" >/dev/null 2>&1; then
+            local cw
+            cw="$(gcc -std=gnu11 -I "$ROOT/runtime" -Wall -Wextra \
+                      -Wno-unused-variable -Wno-unused-const-variable \
+                      -Wno-unused-but-set-variable \
+                      -c "$TMP/$name.gen.c" -o /dev/null 2>&1)"
+            if [ -n "$cw" ]; then
+                echo -e "${RED}C CẢNH BÁO${RST}     $name"
+                echo "$cw" | head -6
+                fail=$((fail+1)); return
+            fi
+        fi
+    fi
     # Đầu vào tuỳ chọn: tests/input/<tên>.txt được đưa vào stdin (cho chương trình
     # đọc input). Nếu không có, dùng /dev/null để EOF ngay (tất định, không treo).
     local infile="$ROOT/tests/input/$name.txt"
@@ -168,6 +191,51 @@ run_fail_fs() {
     fi
 }
 
+# Test CẢNH BÁO: chương trình hợp lệ (biên dịch được) nhưng phải phát đúng các
+# cảnh báo mong đợi. Khoá lại cả nội dung lẫn việc KHÔNG có dương tính giả.
+run_warn() {
+    local src="$1"
+    local name; name="$(basename "$src" .g)"
+    local exp="$ROOT/tests/warn/$name.txt"
+    # Chỉ lấy DÒNG TIÊU ĐỀ của mỗi cảnh báo ('file:dòng:cột: cảnh báo ...') —
+    # bỏ các dòng trích nguồn/caret bên dưới (chúng cũng chứa từ 'cảnh báo').
+    local got; got="$("$GC" "$src" --check 2>&1 | strip_ansi \
+                      | grep -oE 'cảnh báo [^:]+: .*')"
+    if [ "$bless" = "1" ]; then
+        mkdir -p "$ROOT/tests/warn"
+        echo "$got" | grep -oE 'cảnh báo [^:]+: .*' > "$exp"
+        echo -e "${YEL}BLESS${RST}        $name (warn)"; return
+    fi
+    if [ ! -f "$exp" ]; then
+        echo -e "${YEL}THIẾU KQ${RST}     $name (warn) (chạy --bless để tạo)"
+        fail=$((fail+1)); return
+    fi
+    # Số cảnh báo phải KHỚP CHÍNH XÁC (bắt dương tính giả), và mỗi dòng mong đợi
+    # phải xuất hiện.
+    local want_n got_n
+    want_n="$(grep -c . "$exp")"
+    got_n="$(echo "$got" | grep -c .)"
+    if [ "$want_n" != "$got_n" ]; then
+        echo -e "${RED}FAIL${RST}         $name (warn: mong $want_n cảnh báo, nhận $got_n)"
+        echo "$got" | head -6
+        fail=$((fail+1)); return
+    fi
+    local ok=1 want
+    while IFS= read -r want; do
+        [ -z "$want" ] && continue
+        if ! echo "$got" | grep -qF "$want"; then
+            ok=0
+            echo -e "${RED}FAIL${RST}         $name (warn)"
+            echo "  mong đợi chứa: $want"
+            fail=$((fail+1)); break
+        fi
+    done < "$exp"
+    if [ "$ok" = "1" ]; then
+        echo -e "${GREEN}PASS${RST}         $name (warn)"
+        pass=$((pass+1))
+    fi
+}
+
 echo "=== Bộ test ngôn ngữ G ==="
 for src in "$ROOT"/examples/*.g "$ROOT"/tests/cases/*.g; do
     [ -e "$src" ] || continue
@@ -184,6 +252,10 @@ done
 for src in "$ROOT"/tests/fail_fs/*.g; do
     [ -e "$src" ] || continue
     run_fail_fs "$src"
+done
+for src in "$ROOT"/tests/warn/*.g; do
+    [ -e "$src" ] || continue
+    run_warn "$src"
 done
 
 echo "-------------------------"

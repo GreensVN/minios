@@ -186,6 +186,43 @@ mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
 `repeat` field that the *checker* expands into N copies of the element before
 any inference runs, so everything downstream sees a plain `ArrayLit`.
 
+### Warnings
+
+`Checker.warnings` collects non-fatal diagnostics; `driver` prints them in
+yellow after a clean check, and `-w`/`-W` suppress them / turn them into errors.
+Unused-variable detection lives in `Checker.pop()`: `_decl_nodes` maps a scope
+entry to its declaring node, `_used_names` records reads (set in `lookup`), and
+`_assigned_cnames` records writes. Anything that can write *indirectly* must
+call `_mark_written` — `&x`, a self-mutating method receiver, `for mut x in a`,
+and `_check_lvalue_mutable` (which marks up front, because its
+"write-through-pointer" branches return early). Constant folding also has to
+call `_used_names.add`, since a `const` used only as an array size never goes
+through `lookup`. The `tests/warn/` category asserts the exact *count* of
+warnings, so a false positive fails the suite.
+
+### Destructuring desugars in the parser
+
+`let P{x, y} = v` becomes an `A.Multi` holding a hidden `Let` for `v` (tagged
+`destructure_of`) plus one `Let` per binding reading a field off it — so `v` is
+evaluated once. `parse_block` flattens `A.Multi` immediately, meaning no later
+pass needs to know it exists, and the bindings land in the *enclosing* scope
+(an `A.Block` would have created a new one). The hidden temp is exempt from the
+unused-variable warning.
+
+### String slices allocate
+
+`s[a..b]` is `A.Slice` -> `g_str_slice`, which clamps both bounds, so
+out-of-range indices give a short/empty string instead of reading past the
+buffer. It allocates, hence it is rejected under `--freestanding`. Arrays are
+deliberately *not* sliceable: G has no length-carrying slice type.
+
+### Arrays are values, and C fights you on it
+
+Two places must copy explicitly or C silently shares memory: `gen_let` emits a
+real array plus `memcpy` for `let b = a` (never `__auto_type`), and `gen_fn`
+copies `mut` array parameters into a local buffer in the prologue while
+`fn_signature` renames the incoming pointer to `<name>__src`.
+
 ### `mut` on parameters is real
 
 `Param.mutable` is set by the parser and passed to `declare()` in

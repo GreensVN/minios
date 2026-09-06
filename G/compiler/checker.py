@@ -205,6 +205,12 @@ class Checker:
     def __init__(self, program: A.Program, freestanding: bool = False):
         self.prog = program
         self.freestanding = freestanding
+        self.warnings = []         # [(msg, line, col, file)] — không chặn biên dịch
+        self._decl_nodes = {}      # id(info) -> node khai báo (cho cảnh báo không dùng)
+        self._used_names = set()   # tên đã được ĐỌC ở đâu đó
+        self._assigned_cnames = set()  # tên C đã bị GHI (gán/++/for mut/&mut)
+        self._decl_node = None     # node đang khai báo (đặt quanh declare())
+        self.cur_src_file = None
         self.structs = {}          # name -> {field: GType}
         self.struct_order = {}     # name -> [field names]
         self.enums = {}            # name -> {variant: value_int}
@@ -407,6 +413,9 @@ class Checker:
         if isinstance(e, A.Ident):
             v = self.const_ints.get(e.name)
             if v is not None:
+                # Hằng dùng làm cỡ mảng được GẤP ở đây, không đi qua lookup() —
+                # phải tự đánh dấu đã dùng, nếu không sẽ báo nhầm "không dùng".
+                self._used_names.add(e.name)
                 return v
             if e.name in self.enum_of_variant:
                 return self.enums.get(self.enum_of_variant[e.name], {}).get(e.name)
@@ -1095,7 +1104,31 @@ class Checker:
         self.scopes.append({})
 
     def pop(self):
-        self.scopes.pop()
+        """Rời scope: báo các biến khai báo mà KHÔNG hề được đọc. Tên bắt đầu
+        bằng '_' được miễn (quy ước 'cố ý bỏ qua', như Rust/Go)."""
+        sc = self.scopes.pop()
+        for name, info in sc.items():
+            if name.startswith("_") or name == "self":
+                continue
+            node = self._decl_nodes.pop(id(info), None)
+            if node is None:
+                continue
+            if name not in self._used_names:
+                self.warn(
+                    f"biến '{name}' được khai báo nhưng không dùng — bỏ đi, hoặc "
+                    f"đổi tên thành '_{name}' nếu cố ý", node)
+            elif info[1] and info[2] not in self._assigned_cnames:
+                # 'let mut' mà không bao giờ bị GHI: 'mut' thừa (và che mất ý
+                # định thật sự của biến). Đối chiếu theo tên C nên shadowing
+                # không lẫn lộn.
+                self.warn(
+                    f"biến '{name}' khai báo 'mut' nhưng không bao giờ được gán "
+                    f"lại — bỏ 'mut'", node)
+
+    def warn(self, msg, node=None):
+        self.warnings.append((
+            msg, getattr(node, "line", 0), getattr(node, "col", 0),
+            getattr(node, "src_file", None) or self.cur_src_file))
 
     def declare(self, name, gt, mutable):
         """Khai báo biến cục bộ; cấp một tên C duy nhất để cho phép shadowing
@@ -1112,7 +1145,10 @@ class Checker:
                 k += 1
             cname = f"{cname}_s{k}"
         self.fn_cnames.add(cname)
-        self.scopes[-1][name] = (gt, mutable, cname)
+        info = (gt, mutable, cname)
+        self.scopes[-1][name] = info
+        if self._decl_node is not None:
+            self._decl_nodes[id(info)] = self._decl_node
         return cname
 
     # Từ khoá / định danh dành riêng của C (và tên macro/hàm libc hay gặp) không
@@ -1143,6 +1179,7 @@ class Checker:
     def lookup(self, name):
         for s in reversed(self.scopes):
             if name in s:
+                self._used_names.add(name)
                 return s[name]
         if name in self.globals:
             g = self.globals[name]
@@ -1234,6 +1271,7 @@ class Checker:
     def check_function(self, fn: A.Function):
         self.cur_fn = fn.name
         self._cur_params = fn.params
+        self.cur_src_file = getattr(fn, "src_file", None) or self.cur_src_file
         self.fn_cnames = set()
         self.push()
         seen = set()
@@ -1456,12 +1494,36 @@ class Checker:
                         except CheckError:
                             gt = T.UNKNOWN
                     st.resolved_type = gt
+                    self._decl_node = st
                     st.c_name = self.declare(st.name, gt, st.mutable)
+                    self._decl_node = None
                 raise
             return
         self._check_stmt(st)
 
     def _check_let(self, st: A.Let):
+        # 'let P{...} = v': biến ẩn giữ v — kiểm tên struct khớp để báo lỗi rõ
+        # ràng thay vì để lỗi "không có trường" của từng binding.
+        dsname = getattr(st, "destructure_of", None)
+        if dsname is not None:
+            vt = self.infer(st.value)
+            if dsname not in self.structs:
+                sug = suggest(dsname, set(self.structs))
+                msg = f"struct chưa định nghĩa: '{dsname}'"
+                if sug:
+                    msg += f" — có phải '{sug}'?"
+                self.err(msg, st)
+            got = vt.name if vt.kind == "struct" else (
+                vt.elem.name if vt.kind == "ptr" and vt.elem
+                and vt.elem.kind == "struct" else None)
+            if got is None:
+                self.err(
+                    f"'let {dsname}{{...}}' cần một giá trị struct nhưng nhận "
+                    f"'{self.tyname(vt)}'", st)
+            elif got != dsname:
+                self.err(
+                    f"'let {dsname}{{...}}' không khớp: giá trị có kiểu "
+                    f"'{got}'", st)
         if True:
             # Mảng literal có chú thích kiểu: cho phép phần tử 'null' (kiểu đích
             # là mảng con trỏ) — gắn kiểu mong đợi trước khi suy luận.
@@ -1500,7 +1562,11 @@ class Checker:
             else:
                 gt = val_t if val_t is not None else T.INT
             st.resolved_type = gt
+            # Biến ẩn của destructuring không phải do người dùng viết -> miễn
+            # cảnh báo "khai báo nhưng không dùng".
+            self._decl_node = None if getattr(st, "destructure_of", None) else st
             st.c_name = self.declare(st.name, gt, st.mutable)
+            self._decl_node = None
             # Theo dõi biến BẤT BIẾN khởi tạo bằng 'null' để bắt '.field' trên nó.
             nc = getattr(self, "_null_consts", None)
             if nc is None:
@@ -1655,6 +1721,7 @@ class Checker:
                     "'mut' nếu chỉ cần đọc", st)
             else:
                 self._check_lvalue_mutable(st.iterable, st)
+                self._mark_written(st.iterable)
                 st.by_ref = True
                 # Phần tử là mảng (hàng của mảng nhiều chiều): trong C nó đã là
                 # con trỏ tới hàng, ghi 'row[i] = v' xuyên thẳng vào mảng gốc —
@@ -1950,6 +2017,23 @@ class Checker:
     def _is_range_loop_var(self, name) -> bool:
         return name in getattr(self, "_range_vars", set())
 
+    def _mark_written(self, e):
+        """Đánh dấu biến gốc của 'e' là ĐÃ BỊ GHI (cho cảnh báo 'mut' thừa):
+        '&x', receiver của method tự-sửa, 'for mut x in a' đều là ghi gián tiếp."""
+        while True:
+            if isinstance(e, A.Ident):
+                info = self.lookup(e.name)
+                if info is not None:
+                    self._assigned_cnames.add(info[2])
+                return
+            if isinstance(e, (A.FieldAccess, A.Index)):
+                e = e.base
+                continue
+            if isinstance(e, A.Unary) and e.op == "*":
+                e = e.operand
+                continue
+            return
+
     def _check_lvalue_mutable(self, tgt, stmt):
         """Đi từ ô nhớ đích về biến gốc để kiểm tra tính bất biến.
         Ghi qua con trỏ (deref/index trên ptr) luôn được phép."""
@@ -1958,6 +2042,10 @@ class Checker:
                 isinstance(tgt, A.Unary) and tgt.op == "*"):
             self.err("vế trái của phép gán phải là ô nhớ (biến/trường/phần tử/"
                      "*con_trỏ), không thể gán cho biểu thức này", stmt)
+        # Đánh dấu biến gốc là ĐÃ GHI trước khi đi sâu: các nhánh "ghi qua con
+        # trỏ" bên dưới return sớm, mà 'p[i] = v' / 'p.f = v' vẫn là dùng 'p' để
+        # ghi — nếu bỏ qua sẽ báo nhầm "'mut' thừa".
+        self._mark_written(tgt)
         e = tgt
         while True:
             if isinstance(e, A.Ident):
@@ -2214,6 +2302,8 @@ class Checker:
             return self.infer_call(e)
         if isinstance(e, A.Index):
             return self.infer_index(e)
+        if isinstance(e, A.Slice):
+            return self.infer_slice(e)
         if isinstance(e, A.FieldAccess):
             return self.infer_field(e)
         if isinstance(e, A.Cast):
@@ -2313,6 +2403,34 @@ class Checker:
             return T.array_of(elem, len(e.elements))
         if isinstance(e, A.StructLit):
             return self.infer_struct_lit(e)
+        return T.UNKNOWN
+
+    def infer_slice(self, e: A.Slice):
+        """'s[lo..hi]' — lát cắt CHUỖI, trả về chuỗi mới (heap, kẹp biên lúc
+        chạy). Mảng chưa hỗ trợ: G không có kiểu slice mang theo độ dài."""
+        bt = self.infer(e.base)
+        for part in (e.lo, e.hi):
+            if part is None:
+                continue
+            pt = self.infer(part)
+            if not pt.is_integer() and pt.kind != "unknown":
+                self.err(f"cận của lát cắt phải là số nguyên, nhận "
+                         f"'{self.tyname(pt)}'", e)
+        if bt.kind == "str" or (bt.kind == "ptr" and bt.elem
+                                and bt.elem.kind == "char"):
+            if self.freestanding:
+                self.err("lát cắt chuỗi 's[a..b]' cấp phát chuỗi mới trên heap "
+                         "nên không dùng được ở chế độ '--freestanding'", e)
+                return T.UNKNOWN
+            return T.STR
+        if self._is_static_array(bt):
+            self.err(
+                f"chưa hỗ trợ lát cắt trên MẢNG ('{self.tyname(bt)}') — G chưa "
+                f"có kiểu slice mang theo độ dài; dùng con trỏ '&a[lo]' kèm số "
+                f"phần tử, hoặc vòng lặp sao chép", e)
+            return T.UNKNOWN
+        self.err(f"không thể cắt lát giá trị kiểu '{self.tyname(bt)}' "
+                 f"(chỉ áp dụng cho chuỗi)", e)
         return T.UNKNOWN
 
     def infer_ident(self, e: A.Ident):
@@ -2518,6 +2636,8 @@ class Checker:
                          f"'{self.tyname(ot)}'", e)
             return T.BOOL
         if e.op == "&":
+            # Lấy địa chỉ = có thể ghi qua con trỏ -> tính là ĐÃ GHI.
+            self._mark_written(e.operand)
             # '&' chỉ lấy được địa chỉ của một Ô NHỚ (lvalue). '&(a+b)', '&f()',
             # '&(x as T)'... là rvalue -> C báo "lvalue required" khó hiểu; bắt sớm.
             if not self._is_lvalue(e.operand):
@@ -2917,6 +3037,7 @@ class Checker:
                 # con trỏ). Qua con trỏ thì luôn cho phép (đã chủ ý mượn để ghi).
                 if not e.recv_is_ptr and self.method_mutates_self(sname, mname):
                     self._require_mutable_receiver(recv, sname, mname, e)
+                    self._mark_written(recv)
                 arg_types = [self.infer(a) for a in e.args]
                 m = self.methods[sname][mname]
                 want = max(0, len(m.params) - 1)  # trừ 'self'

@@ -346,7 +346,13 @@ class Parser:
         stmts = []
         self.skip_semis()
         while not self.is_op("}") and not self.check("eof"):
-            stmts.append(self.parse_stmt())
+            st = self.parse_stmt()
+            # A.Multi (destructuring) làm PHẲNG ngay vào block cha: các pass sau
+            # (checker/codegen/phân tích luồng) không cần biết tới nó.
+            if isinstance(st, A.Multi):
+                stmts.extend(st.stmts)
+            else:
+                stmts.append(st)
             self.skip_semis()
         self.expect("op", "}")
         return stmts
@@ -400,12 +406,16 @@ class Parser:
         self.skip_semis()
         return A.ExprStmt(expr)
 
-    def parse_let(self) -> A.Let:
+    def parse_let(self):
         t = self.cur()
         is_const = bool(self.accept("kw", "const"))
         if not is_const:
             self.expect("kw", "let")
         mutable = bool(self.accept("kw", "mut")) and not is_const
+        # ----- destructuring struct: 'let P{x, y} = v' / 'let P{x: a} = v' -----
+        if (self.cur().kind == "id" and self.at(1).value == "{"
+                and self._looks_like_destructure()):
+            return self._parse_destructure(t, mutable, is_const)
         name = self.expect("id").value
         typ = None
         if self.accept("op", ":"):
@@ -415,6 +425,49 @@ class Parser:
             value = self.parse_expr()
         self.skip_semis()
         return A.Let(name, typ, value, mutable, is_const=is_const, **self.pos_of(t))
+
+    def _looks_like_destructure(self):
+        """Phân biệt 'let P{x, y} = v' (destructuring) với 'let s = P{x: 1}'.
+        Ở vị trí NGAY SAU 'let', một 'Tên {' luôn là pattern: dạng khởi tạo phải
+        có '=' trước struct literal."""
+        i = 2                       # bỏ qua 'Tên' '{'
+        if self.at(i).value == "}":
+            return True
+        return self.at(i).kind == "id" and self.at(i + 1).value in (",", "}", ":")
+
+    def _parse_destructure(self, t, mutable, is_const):
+        """'let P{x, y} = v' -> một Let ẩn giữ v, rồi mỗi trường một Let.
+        Giá trị được vật hoá đúng MỘT lần (v có thể có tác dụng phụ)."""
+        sname = self.expect("id").value
+        self.expect("op", "{")
+        binds = []                  # (tên_trường, tên_biến)
+        self.skip_semis()
+        while not self.is_op("}"):
+            fname = self.expect("id").value
+            vname = fname
+            if self.accept("op", ":"):        # 'x: tên_khác'
+                vname = self.expect("id").value
+            binds.append((fname, vname))
+            self.accept("op", ",")
+            self.skip_semis()
+        self.expect("op", "}")
+        if not binds:
+            self.error(f"'let {sname}{{}}' không rút trích trường nào — bỏ câu "
+                       f"lệnh này, hoặc liệt kê các trường cần lấy",
+                       show_token=False)
+        if not self.accept("op", "="):
+            self.error(f"'let {sname}{{...}}' cần '=' và một giá trị để rút trích")
+        value = self.parse_expr()
+        self.skip_semis()
+        pos = self.pos_of(t)
+        tmp = f"__gds{t.line}_{t.col}"
+        stmts = [A.Let(tmp, None, value, False, **pos)]
+        stmts[0].destructure_of = sname
+        for fname, vname in binds:
+            fa = A.FieldAccess(A.Ident(tmp, line=t.line, col=t.col), fname,
+                               t.line, t.col)
+            stmts.append(A.Let(vname, None, fa, mutable, is_const=is_const, **pos))
+        return A.Multi(stmts, **pos)
 
     def parse_if(self) -> A.If:
         self.expect("kw", "if")
@@ -479,7 +532,8 @@ class Parser:
             if self.is_op("{"):
                 body = self.parse_block()
             else:
-                body = [self.parse_stmt()]
+                one = self.parse_stmt()
+                body = one.stmts if isinstance(one, A.Multi) else [one]
             arms.append((pats, guard, body))
             self.accept("op", ",")
             self.skip_semis()
@@ -676,7 +730,28 @@ class Parser:
             elif self.accept("op", "["):
                 saved = self.no_struct_lit
                 self.no_struct_lit = False
+                # 's[a..b]' / 's[a..=b]' — lát cắt chuỗi (kiểu Rust). Cận có thể
+                # khuyết: 's[..n]', 's[n..]', 's[..]'.
+                if self.is_op("..") or self.is_op("..="):
+                    inc = bool(self.accept("op", "..="))
+                    if not inc:
+                        self.advance()          # '..'
+                    lo = None
+                    hi = None if self.is_op("]") else self.parse_expr()
+                    self.no_struct_lit = saved
+                    self.expect("op", "]")
+                    e = A.Slice(e, lo, hi, inc, t.line, t.col)
+                    continue
                 idx = self.parse_expr()
+                if self.is_op("..") or self.is_op("..="):
+                    inc = bool(self.accept("op", "..="))
+                    if not inc:
+                        self.advance()
+                    hi = None if self.is_op("]") else self.parse_expr()
+                    self.no_struct_lit = saved
+                    self.expect("op", "]")
+                    e = A.Slice(e, idx, hi, inc, t.line, t.col)
+                    continue
                 self.no_struct_lit = saved
                 self.expect("op", "]")
                 e = A.Index(e, idx, t.line, t.col)

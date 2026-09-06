@@ -395,3 +395,23 @@ class MatchExpr:           # 'match x { p => v, ... }' ở vị trí BIỂU TH�
     arms: list             # list[(patterns_list | None, guard | None, value_expr)]
     line: int = 0
     col: int = 0
+
+
+@dataclass
+class Multi:
+    """Nhiều câu lệnh sinh ra từ MỘT câu lệnh nguồn (vd destructuring), phẳng
+    vào block cha — KHÔNG tạo scope mới như A.Block."""
+    stmts: list
+    line: int = 0
+    col: int = 0
+
+
+@dataclass
+class Slice:
+    """'s[lo..hi]' / 's[lo..=hi]' — lát cắt CHUỖI. lo/hi có thể None (khuyết)."""
+    base: object
+    lo: object
+    hi: object
+    inclusive: bool = False
+    line: int = 0
+    col: int = 0

@@ -1,0 +1,2 @@
+cảnh báo kiểu/ngữ nghĩa: biến 'khong_dung' được khai báo nhưng không dùng — bỏ đi, hoặc đổi tên thành '_khong_dung' nếu cố ý
+cảnh báo kiểu/ngữ nghĩa: biến 'mut_thua' khai báo 'mut' nhưng không bao giờ được gán lại — bỏ 'mut'

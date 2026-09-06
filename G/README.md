@@ -560,6 +560,32 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.11.0 — 🧩 Destructuring, lát cắt chuỗi, hệ thống cảnh báo
+
+- ✨ **Destructuring struct**: `let P{x, y} = p` rút trích trường ra biến cùng
+  tên; `let P{x: a} = p` đổi tên; `let mut P{...}` cho binding khả biến. Giá trị
+  nguồn được đánh giá **đúng một lần**, nên `let P{x} = mk()` an toàn.
+- ✨ **Lát cắt chuỗi** `s[lo..hi]` / `s[lo..=hi]`, cận khuyết được: `s[..n]`,
+  `s[n..]`, `s[..]`. Chỉ số được **kẹp** vào `[0, len]` (và `hi < lo` cho chuỗi
+  rỗng) nên không bao giờ đọc ngoài vùng nhớ.
+- ✨ **Hệ thống cảnh báo** (không chặn biên dịch, in màu vàng): biến khai báo mà
+  **không dùng**, và `let mut` **không bao giờ được ghi**. Tiền tố `_` để miễn
+  (`let _bo_qua = ...`). Ghi gián tiếp — method tự-sửa, `&x`, `for mut x`, ghi
+  qua con trỏ `p[i] = v` — đều được tính đúng là "có ghi". Cờ mới `-w` (tắt
+  cảnh báo) và `-W` (coi cảnh báo là lỗi).
+- 🐛 **`let b = a` trên mảng CHIA SẺ bộ nhớ** thay vì sao chép — `b[0] = 9` sửa
+  luôn `a` (`__auto_type` làm mảng phân rã thành con trỏ). Nay sao chép thật,
+  đúng ngữ nghĩa giá trị của G.
+- 🐛 **Tham số mảng `mut` ghi xuyên về nơi gọi** — C truyền mảng như con trỏ nên
+  `fn f(mut a: [3]int) { a[0] = 99 }` sửa mảng của người gọi, trong khi `mut`
+  trên tham số vô hướng lại là bản sao. Nay tham số mảng `mut` cũng là bản sao
+  cục bộ.
+- 🛡️ **Runner nghiêm ngặt hơn**: mọi ca test giờ phải **không có cảnh báo** nào
+  (G lẫn `gcc -Wall -Wextra`), và có hạng mục `tests/warn/` khoá lại nội dung
+  cảnh báo *và* số lượng (bắt dương tính giả).
+- 🧪 **Bộ test: 205 ca** (+8): `destructure`, `str_slice`, `array_value_copy`,
+  `unused_vars` và 4 ca "phải lỗi".
+
 ## Mới trong 0.10.0 — ✨ `if`/`match` biểu thức, method của `str`, `[v; N]`
 
 - ✨ **`if` và `match` ở vị trí BIỂU THỨC** (như Rust): `let v = if c { a } else { b }`,
