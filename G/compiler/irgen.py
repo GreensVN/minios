@@ -253,6 +253,12 @@ class IRGen:
                 self.mod.enums.append(I.EnumLayout(it.name, vals))
 
         self._deferred_globals = []
+        # Sắp xếp topo theo phụ thuộc "nhúng THEO GIÁ TRỊ": struct chứa struct
+        # khác phải đứng SAU nó. Trường con trỏ không tạo ràng buộc (khai báo
+        # tiến là đủ). Làm ở đây — không phải trong backend — để mọi backend
+        # nhận danh sách đã đúng thứ tự.
+        self.mod.structs = self._topo_sort_structs(self.mod.structs)
+
         for it in self.prog.items:
             if isinstance(it, A.GlobalVar):
                 self.gen_global(it)
@@ -315,6 +321,41 @@ class IRGen:
             return lay.align_of(gt) if align else lay.size_of(gt)
         except Exception:
             return None
+
+    @staticmethod
+    def _topo_sort_structs(structs):
+        """Thứ tự định nghĩa hợp lệ cho C. Chu trình (đã bị checker cấm) thì giữ
+        nguyên thứ tự khai báo thay vì lặp vô hạn."""
+        by_name = {st.name: st for st in structs}
+
+        def deps(st):
+            out = []
+            for _, fty in st.fields:
+                t = fty
+                # đi qua mảng để thấy phần tử; con trỏ thì DỪNG (không ràng buộc)
+                while t is not None and t.kind == "array":
+                    t = t.elem
+                if t is not None and t.kind == "struct" and t.name in by_name:
+                    out.append(t.name)
+            return out
+
+        order, state = [], {}
+
+        def visit(name):
+            st = state.get(name)
+            if st == 2:
+                return
+            if st == 1:
+                return              # chu trình: checker đã báo lỗi
+            state[name] = 1
+            for d in deps(by_name[name]):
+                visit(d)
+            state[name] = 2
+            order.append(by_name[name])
+
+        for st in structs:
+            visit(st.name)
+        return order
 
     def resolve(self, ty):
         """A.Type → GType. Checker đã phân giải; ở đây dùng lại chú thích nếu có."""
@@ -419,8 +460,14 @@ class IRGen:
     def gen_func(self, fn: A.Function, recv=None):
         name = f"{recv}__{fn.name}" if recv else fn.name
         params = []
-        if recv:
-            params.append(I.Param("self", T.GType("ptr", elem=T.GType("struct", name=recv))))
+        # Method TĨNH ('fn of(x, y)' trong impl) KHÔNG có 'self' — chỉ thêm
+        # tham số self khi hàm thật sự khai báo nó. Trước đây mọi hàm trong impl
+        # đều bị thêm, nên nơi gọi truyền thiếu một đối số.
+        has_self = any(p.name == "self" for p in fn.params)
+        if recv and has_self:
+            elem = (T.GType("enum", name=recv) if recv in self.enums
+                    else T.GType("struct", name=recv))
+            params.append(I.Param("self", T.GType("ptr", elem=elem)))
         for p in fn.params:
             if p.name == "self" and recv:
                 continue
@@ -966,10 +1013,22 @@ class IRGen:
             return int(p.value)
         if isinstance(p, A.Ident) and p.name in self.enum_of_variant:
             return self.enums[self.enum_of_variant[p.name]][p.name]
-        if isinstance(p, A.FieldAccess) and getattr(p, "is_enum_variant", False):
-            v = getattr(p, "enum_variant", None)
-            if v is not None and v in self.enum_of_variant:
+        if isinstance(p, A.FieldAccess):
+            v = self._enum_variant_name(p)
+            if v is not None:
                 return self.enums[self.enum_of_variant[v]][v]
+        return None
+
+    def _enum_variant_name(self, e):
+        """Tên biến thể của 'Enum.Variant' (checker ghi tuple (Kiểu, Tên))."""
+        ev = getattr(e, "enum_variant", None)
+        if isinstance(ev, tuple) and len(ev) == 2:
+            ev = ev[1]
+        if isinstance(ev, str) and ev in self.enum_of_variant:
+            return ev
+        if (getattr(e, "is_enum_variant", False)
+                and getattr(e, "field", None) in self.enum_of_variant):
+            return e.field
         return None
 
     def _pat_cond(self, p, subj, sty):
@@ -1010,6 +1069,13 @@ class IRGen:
             return I.Value("global", name=e.name,
                            type=T.GType("ptr", elem=ty)), ty
         if isinstance(e, A.FieldAccess):
+            if self._enum_variant_name(e) is not None:
+                # 'Enum.Variant' là HẰNG, không phải ô nhớ -> vật hoá.
+                ty = self.gtype(e)
+                addr = self.emit_val("alloca", [], ty=T.GType("ptr", elem=ty),
+                                     node=e, hint="ev")
+                self.emit("store", [addr, self.gen_expr(e)], node=e)
+                return addr, ty
             base_ty = self.gtype(e.base)
             if base_ty.kind == "ptr":
                 base = self.gen_expr(e.base)
@@ -1142,12 +1208,11 @@ class IRGen:
                 return addr
             return self.emit_val("load", [addr], ty=ety, node=e, hint="ix")
         if isinstance(e, A.FieldAccess):
-            if getattr(e, "is_enum_variant", False):
-                v = getattr(e, "enum_variant", e.field)
-                en = self.enum_of_variant.get(v)
-                if en is not None:
-                    return I.Value("const", const=self.enums[en][v],
-                                   type=T.GType("enum", name=en))
+            v = self._enum_variant_name(e)
+            if v is not None:
+                en = self.enum_of_variant[v]
+                return I.Value("const", const=self.enums[en][v],
+                               type=T.GType("enum", name=en))
             addr, fty = self.gen_addr(e)
             if fty.kind == "array":
                 return addr
@@ -1246,6 +1311,28 @@ class IRGen:
         if getattr(e, "deref_right", False) and rt.elem is not None:
             rt = rt.elem
             r = self.emit_val("load", [r], ty=rt, node=e, hint="dr")
+        if e.op in ("==", "!=") and lt.kind == "struct" and rt.kind == "struct":
+            # C không so sánh struct bằng '=='; dùng hàm so theo từng trường.
+            same = self.emit_val("call", [l, r], ty=T.BOOL, node=e, hint="sq",
+                                 callee=f"_g_eq_{lt.name}")
+            if e.op == "!=":
+                return self.emit_val("lnot", [same], ty=T.BOOL, node=e, hint="nq")
+            return same
+        if e.op in ("==", "!=") and lt.kind == "slice" and rt.kind == "slice":
+            pa = self.emit_val("intrinsic", [l], ty=T.GType("ptr", elem=lt.elem),
+                               node=e, hint="sp", name="slice_ptr")
+            pb = self.emit_val("intrinsic", [r], ty=T.GType("ptr", elem=rt.elem),
+                               node=e, hint="sp", name="slice_ptr")
+            la = self.emit_val("intrinsic", [l], ty=T.USIZE, node=e, hint="sn",
+                               name="len")
+            lb = self.emit_val("intrinsic", [r], ty=T.USIZE, node=e, hint="sn",
+                               name="len")
+            c1 = self.emit_val("eq", [pa, pb], ty=T.BOOL, node=e, hint="s1")
+            c2 = self.emit_val("eq", [la, lb], ty=T.BOOL, node=e, hint="s2")
+            same = self.emit_val("land", [c1, c2], ty=T.BOOL, node=e, hint="sa")
+            if e.op == "!=":
+                return self.emit_val("lnot", [same], ty=T.BOOL, node=e, hint="nq")
+            return same
         if e.op in ("==", "!=") and lt.kind == "str" and rt.kind == "str":
             c = self.emit_val("call", [l, r], ty=T.BOOL, node=e, hint="se",
                               callee="g_str_eq")

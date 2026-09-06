@@ -116,20 +116,20 @@ class CIRBackend(IRBackend):
 
         # 3) định nghĩa struct
         for st in mod.structs:
-            attr = ""
             bits = []
             if st.packed:
                 bits.append("packed")
             if st.align:
                 bits.append(f"aligned({st.align})")
-            if bits:
-                attr = f" __attribute__(({', '.join(bits)})) "
-            self.w(f"struct {self.cn(st.name)}{attr} {{")
+            # Thuộc tính đặt SAU dấu '}' đóng struct. Đặt sau tên tag thì GCC
+            # báo "expected identifier or '(' before '{'".
+            attr = f" __attribute__(({', '.join(bits)}))" if bits else ""
+            self.w(f"struct {self.cn(st.name)} {{")
             self.indent += 1
             for fname, fty in st.fields:
                 self.w(self.c_decl(fty, self.cn(fname)) + ";")
             self.indent -= 1
-            self.w("};")
+            self.w("}" + attr + ";")
         if mod.structs:
             self.w("")
 
@@ -787,6 +787,9 @@ class CIRBackend(IRBackend):
             self.w(f"int {n} = snprintf(NULL, 0, {args});")
             self.w(f"{d} = (const char*)malloc((size_t){n} + 1);")
             self.w(f"snprintf((char*){d}, (size_t){n} + 1, {args});")
+            return
+        if name == "slice_ptr":
+            self.w(f"{d} = ({a[0]}).ptr;")
             return
         if name == "print_slice":
             self.w(f"{d} = {self._slice_print_fn(ins.args[0].type)}({a[0]});")
