@@ -195,17 +195,17 @@ class Parser:
         self.expect("op", "(")
         params = []
         while not self.is_op(")"):
-            # 'mut' tuỳ chọn trước tên tham số (gồm 'mut self'): tham số trong G vốn
-            # đã là ô nhớ khả biến, nên 'mut' ở đây chỉ mang tính tài liệu (báo hiệu
-            # 'method này sửa self' / 'tham số này bị ghi'). Chấp nhận & bỏ qua.
-            self.accept("kw", "mut")
+            # 'mut' trước tên tham số (gồm 'mut self') cho phép GHI vào tham số
+            # bên trong hàm — nhất quán với 'let'/'let mut'. Không có 'mut' thì
+            # tham số là binding bất biến (bản sao của đối số vẫn chỉ đọc).
+            pmut = bool(self.accept("kw", "mut"))
             pname = self.expect("id").value
             # 'self' trong method có thể không cần kiểu
             if pname == "self" and recv and not self.is_op(":"):
-                params.append(A.Param("self", A.Type(recv, ptr=1)))
+                params.append(A.Param("self", A.Type(recv, ptr=1), pmut))
             else:
                 self.expect("op", ":")
-                params.append(A.Param(pname, self.parse_type()))
+                params.append(A.Param(pname, self.parse_type(), pmut))
             if not self.accept("op", ","):
                 break
         self.expect("op", ")")

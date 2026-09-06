@@ -186,6 +186,14 @@ mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
 `repeat` field that the *checker* expands into N copies of the element before
 any inference runs, so everything downstream sees a plain `ArrayLit`.
 
+### `mut` on parameters is real
+
+`Param.mutable` is set by the parser and passed to `declare()` in
+`check_function`, so a parameter without `mut` is an immutable binding just like
+a `let`. `self` is force-mutable (whether the *receiver* may be mutated is a
+separate check in `_require_mutable_receiver`). `_is_param` exists only to pick
+the right hint: parameters are fixed with `mut x: T`, not `let mut`.
+
 ### Struct literals must be complete
 
 `infer_struct_lit` requires every field of a non-empty struct to be present.

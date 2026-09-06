@@ -249,13 +249,20 @@ class Lexer:
         self.advance()  # bỏ "
         buf = []
         while self.i < len(self.src) and self.peek() != '"':
+            # Xuống dòng giữa chuỗi gần như luôn là quên dấu '"' đóng. Báo ngay
+            # tại DÒNG MỞ chuỗi thay vì chạy tiếp tới cuối file rồi trỏ vào EOF.
+            if self.peek() == "\n":
+                raise LexError(
+                    "chuỗi không được đóng trước khi xuống dòng — thiếu '\"' "
+                    "(chuỗi nhiều dòng: dùng '\\n' hoặc nối nhiều chuỗi)",
+                    line, col)
             c = self.advance()
             if c == "\\":
                 buf.append(self.read_escape())
             else:
                 buf.append(c)
         if self.i >= len(self.src):
-            self.error("chuỗi không được đóng")
+            raise LexError("chuỗi không được đóng", line, col)
         self.advance()  # bỏ "
         self.add("str", "".join(buf), line, col)
 
@@ -296,8 +303,18 @@ class Lexer:
             if cp > 0x10FFFF:
                 self.error(f"điểm mã Unicode vượt giới hạn: U+{cp:X}")
             return chr(cp)
-        return {
+        table = {
             "n": "\n", "t": "\t", "r": "\r", "0": "\0",
             "\\": "\\", '"': '"', "'": "'", "a": "\a", "b": "\b",
             "f": "\f", "v": "\v", "e": "\x1b",
-        }.get(c, c)
+        }
+        if c not in table:
+            # Escape KHÔNG biết trước đây bị nuốt âm thầm ('\q' -> 'q'), nên gõ
+            # nhầm '\d' hay quên nhân đôi '\' trong đường dẫn Windows đều lặng lẽ
+            # sai. Từ chối, và nhắc cách viết dấu gạch chéo ngược theo nghĩa đen.
+            shown = repr(c)[1:-1] if c else "<hết file>"
+            self.error(
+                f"escape không hợp lệ: '\\{shown}' — escape hợp lệ: "
+                f"\\n \\t \\r \\0 \\a \\b \\f \\v \\e \\\\ \\\" \\' "
+                f"\\xNN \\u{{XXXX}} (muốn một dấu '\\' theo nghĩa đen thì viết '\\\\')")
+        return table[c]

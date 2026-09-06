@@ -41,6 +41,7 @@ class Attr:                     # @name | @name(arg, ...)  — thuộc tính C/A
 class Param:
     name: str
     type: Type
+    mutable: bool = False
 
 
 @dataclass

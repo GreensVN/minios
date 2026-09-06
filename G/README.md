@@ -628,9 +628,18 @@ Một nền tảng vững để mở rộng tiếp. 🚀
 - 🧰 **`import mod/a`** (thiếu ngoặc kép) từng báo "cần khai báo cấp cao (gặp op
   '/')" — nay gợi ý thẳng `import "mod/a.g"`. Phụ chú `(gặp ...)` cũng được bỏ
   khỏi các lỗi cú pháp đã tự đủ nghĩa, vì nó trỏ vào token *sau* chỗ sai.
-- 🧪 **Bộ test: 193 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
+- 🐛 **`mut` trên tham số bị bỏ qua hoàn toàn** — parser nhận rồi vứt đi, nên
+  `fn f(x: int) { x = 5 }` vẫn ghi được vào tham số *không* `mut`, trái hẳn với
+  `let`. Nay `mut` có nghĩa thật: thiếu nó là lỗi, kèm gợi ý đúng ngữ cảnh
+  (`mut x: ...`, không phải `let mut`). `self` vẫn luôn khả biến.
+- 🐛 **Escape lạ bị nuốt âm thầm**: `"a\q"` cho ra `aq`, nên gõ nhầm `\d` hay
+  quên nhân đôi `\` trong đường dẫn đều lặng lẽ sai. Nay là lỗi, có liệt kê
+  escape hợp lệ.
+- 🧰 **Chuỗi quên `"` đóng** từng báo lỗi ở *cuối file*; nay báo ngay tại dòng mở
+  chuỗi khi gặp xuống dòng.
+- 🧪 **Bộ test: 197 ca** (+21): `if_match_expr`, `str_methods`, `array_repeat`,
   `fmt_center`, `null_guard`, `foreach_mut`, `print_array`, `path_sep`,
-  `str_at_bounds`, `import_line`, 19 ca "phải lỗi" và một hạng mục test mới `tests/fail_fs/`
+  `str_at_bounds`, `import_line`, `param_mut`, 22 ca "phải lỗi" và một hạng mục test mới `tests/fail_fs/`
   (hợp lệ khi hosted, phải bị từ chối ở `--freestanding`).
 
 ## Mới trong 0.9.0 — 🔍 Bắt thêm lỗi tĩnh, sửa lỗi sinh mã

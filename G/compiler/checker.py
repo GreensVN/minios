@@ -1222,8 +1222,18 @@ class Checker:
         return str(t) if t is not None else "?"
 
     # ---------- kiểm tra hàm ----------
+    def _is_param(self, name) -> bool:
+        """'name' là một tham số của hàm đang kiểm? (để gợi ý 'mut x: T' thay vì
+        'let mut')."""
+        fd = self.func_defs.get(self.cur_fn)
+        params = getattr(fd, "params", None) if fd is not None else None
+        if params is None:
+            params = getattr(self, "_cur_params", ())
+        return any(p.name == name for p in params)
+
     def check_function(self, fn: A.Function):
         self.cur_fn = fn.name
+        self._cur_params = fn.params
         self.fn_cnames = set()
         self.push()
         seen = set()
@@ -1231,7 +1241,10 @@ class Checker:
             if p.name in seen:
                 self.err(f"tham số trùng tên '{p.name}' trong hàm '{fn.name}'", fn)
             seen.add(p.name)
-            p.c_name = self.declare(p.name, self.resolve(p.type), True)
+            # 'self' luôn khả biến (là con trỏ tới đối tượng nhận; việc có được
+            # SỬA hay không đã kiểm ở nơi gọi qua _require_mutable_receiver).
+            pmut = getattr(p, "mutable", False) or p.name == "self"
+            p.c_name = self.declare(p.name, self.resolve(p.type), pmut)
         self.cur_ret = self.resolve(fn.ret)
         if self.cur_ret.kind == "array":
             self.err(
@@ -1954,6 +1967,13 @@ class Checker:
                 mutable = info[1]
                 e.c_name = info[2]
                 if not mutable:
+                    # Tham số hàm sửa bằng 'fn f(mut x: T)', không phải 'let mut'.
+                    if self._is_param(e.name):
+                        self.err(
+                            f"không thể gán cho tham số '{e.name}' (bất biến) — "
+                            f"khai báo 'mut {e.name}: ...' trong danh sách tham "
+                            f"số nếu hàm cần ghi vào nó", stmt)
+                        return
                     self.err(
                         f"không thể gán cho '{e.name}' (bất biến — dùng 'let mut'"
                         + ("; biến đếm 'for i in a..b' không sửa được — sao chép ra "
