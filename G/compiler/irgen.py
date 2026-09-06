@@ -252,6 +252,7 @@ class IRGen:
                 self.enums[it.name] = dict(vals)
                 self.mod.enums.append(I.EnumLayout(it.name, vals))
 
+        self._deferred_globals = []
         for it in self.prog.items:
             if isinstance(it, A.GlobalVar):
                 self.gen_global(it)
@@ -262,7 +263,33 @@ class IRGen:
             elif isinstance(it, A.Impl):
                 for m in it.methods:
                     self.gen_func(m, recv=it.struct)
+        self._emit_global_ctor()
         return self.mod
+
+    def _emit_global_ctor(self):
+        """Hàm '_g_init_globals' gán các global có initializer động, theo đúng
+        thứ tự khai báo (global sau tham chiếu được global trước)."""
+        if not self._deferred_globals:
+            return
+        f = I.Func("_g_init_globals", [], T.VOID)
+        self.mod.funcs.append(f)
+        self.fn = f
+        self.scopes, self.loops, self.defers = [], [], []
+        self._dead = False
+        self.start(self.block("entry"))
+        self.push_scope()
+        for name, ty, value in self._deferred_globals:
+            addr = I.Value("global", name=name, type=T.GType("ptr", elem=ty))
+            if ty.kind == "array":
+                if isinstance(value, A.ArrayLit):
+                    self._store_array_lit(addr, value, ty)
+                else:
+                    self.emit("memcpy", [addr, self.gen_expr(value)], node=value)
+            else:
+                self.emit("store", [addr, self.gen_expr(value)], node=value)
+        self.term(I.Term("ret"))
+        self.pop_scope()
+        self.fn = None
 
     def _layout_of(self, gt, align=False):
         """sizeof/alignof của một GType theo target, hoặc None nếu chưa tính được."""
@@ -301,7 +328,11 @@ class IRGen:
         return self._resolve_syntax(ty)
 
     def _resolve_syntax(self, ty):
-        """Phân giải tối giản từ cú pháp (dự phòng khi thiếu chú thích)."""
+        """Dự phòng khi node KHÔNG có chú thích 'resolved' của checker.
+
+        Đường chính là `Checker.resolve` ghi `ty.resolved`; hàm này chỉ chạy cho
+        node do irgen tự dựng. Nó CỐ Ý không xử lý kiểu hàm/slice — nếu cần
+        những kiểu đó thì phải lấy từ chú thích, không đoán lại."""
         base = getattr(ty, "name", "unknown")
         prim = {
             "void": T.VOID, "bool": T.BOOL, "char": T.CHAR, "str": T.STR,
@@ -342,6 +373,12 @@ class IRGen:
         init = None
         if g.value is not None:
             init = self._const_value(g.value, ty)
+            if init is None and not getattr(g, "is_extern", False):
+                # Initializer KHÔNG phải hằng biên dịch (tham chiếu global khác,
+                # lời gọi hàm, g_alloc): C cấm. Hoãn sang một hàm khởi tạo chạy
+                # TRƯỚC main, giữ đúng thứ tự khai báo. Trước đây giá trị bị bỏ
+                # im lặng -> global mang 0.
+                self._deferred_globals.append((g.name, ty, g.value))
         self.mod.globals.append(I.Global(
             g.name, ty, init=init, is_const=g.is_const,
             is_extern=getattr(g, "is_extern", False), mutable=g.mutable))
@@ -1000,7 +1037,11 @@ class IRGen:
                                      ty=T.GType("ptr", elem=ety), node=e,
                                      hint="sa", on="slice")
                 return addr, ety
-            if bt.kind == "ptr" or (bt.kind == "array" and bt.n == "dyn"):
+            # 'str' cũng là con trỏ (const char*): phải LẤY GIÁ TRỊ rồi index.
+            # Trước đây nó rơi vào nhánh gen_addr -> index trên ĐỊA CHỈ của biến
+            # giữ chuỗi, đọc ra rác.
+            if (bt.kind in ("ptr", "str")
+                    or (bt.kind == "array" and bt.n == "dyn")):
                 base = self.gen_expr(e.base)
             else:
                 base, _ = self.gen_addr(e.base)
@@ -1555,6 +1596,12 @@ class IRGen:
             kbase, sep, flags = key.partition(":")
             if sep and kbase in ("", "v") and flags and flags[-1] in simple:
                 kbase, flags = flags[-1], flags[:-1]
+            # '{b}' phụ thuộc KIỂU: bool -> "true"/"false"; số nguyên -> nhị
+            # phân (giống backend C). '{:08b}' luôn là nhị phân.
+            if kbase == "b" and gt.kind == "bool":
+                out.append(_apply_flags("%s", flags) if flags else "%s")
+                args.append(_BoolStr(arg))
+                continue
             # '{b}' / '{:08b}' — chuỗi NHỊ PHÂN qua hàm runtime g_bin_str.
             if kbase == "b" or (flags and flags.endswith("b")):
                 bflags = flags[:-1] if flags.endswith("b") else flags
@@ -1732,9 +1779,24 @@ class IRGen:
             return self.emit_val("intrinsic", vals, ty=ty, node=e, hint="al",
                                  name=fname, elem_size=esz,
                                  elem_c=str(elem) if elem is not None else "void")
+        if fname == "len" and e.args:
+            # 'len' gấp thành HẰNG cho mảng tĩnh / chuỗi literal; chỉ slice mới
+            # cần đọc trường '.len' lúc chạy. Trước đây mọi trường hợp đều hạ
+            # thành intrinsic 'len' và backend giả định là slice.
+            at = self.gtype(e.args[0])
+            if at.kind == "array" and isinstance(at.n, int):
+                return I.const_int(at.n, T.USIZE)
+            if isinstance(e.args[0], A.ArrayLit):
+                return I.const_int(len(e.args[0].elements), T.USIZE)
+            if at.kind == "str":
+                v = self.gen_expr(e.args[0])
+                return self.emit_val("call", [v], ty=T.USIZE, node=e,
+                                     hint="sl", callee="g_str_len_i")
+            v = self.gen_expr(e.args[0])
+            return self.emit_val("intrinsic", [v], ty=T.USIZE, node=e,
+                                 hint="ln", name="len")
         if fname in ("g_free", "memcpy", "memset",
-                     "memmove", "memcmp", "vol_read", "vol_write",
-                     "len"):
+                     "memmove", "memcmp", "vol_read", "vol_write"):
             args = []
             for a in e.args:
                 if isinstance(a, A.Ident) and a.name in getattr(self, "_typenames", ()):

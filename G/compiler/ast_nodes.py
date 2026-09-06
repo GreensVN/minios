@@ -15,6 +15,7 @@ class Type:
     array: Optional[object] = None # mảng 1 chiều: số phần tử (int/biểu thức hằng) / "dyn" cho []T
     dims: Optional[list] = None    # mảng nhiều chiều: [d0, d1, ...] (mỗi d là int/biểu thức/"dyn")
     elem_ptr: int = 0              # con trỏ trên PHẦN TỬ ([N]*T: mảng các con trỏ)
+    resolved: Optional[object] = None    # GType do checker phân giải (irgen dùng lại)
     slice_elem: Optional[object] = None  # slice<T>: kiểu phần tử T
     slice_mut: bool = False        # 'mut slice<T>': cho phép ghi qua slice
     is_fn: bool = False            # True nếu là kiểu con trỏ hàm: fn(P...) -> R

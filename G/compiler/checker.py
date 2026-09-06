@@ -1133,6 +1133,13 @@ class Checker:
             g = T.array_of(g, d)
         for _ in range(ty.ptr):
             g = T.ptr_of(g)
+        # Ghi lại kết quả lên chính node cú pháp: irgen (và mọi pass sau) dùng
+        # nó thay vì tự phân giải lại. Trước đây irgen có bản phân giải RÚT GỌN
+        # riêng, và nó trôi lệch — 'fn(int)->int' bị suy thành 'int'.
+        try:
+            ty.resolved = g
+        except Exception:
+            pass
         return g
 
     def _fold_dim(self, d, ty):

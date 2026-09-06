@@ -58,6 +58,9 @@ class CIRBackend(IRBackend):
         self.slice_decls = []
         self.slice_print_fns = {}
         self.slice_print_decls = []
+        self.fnptr_typedefs = {}
+        self.fnptr_decls = []
+        self._param_names = set()
         self._tmp_types = {}
 
     # ------------------------------------------------------------------
@@ -163,6 +166,9 @@ class CIRBackend(IRBackend):
         for f in mod.funcs:
             if f.is_extern and self._runtime_provides(f.name):
                 continue
+            if f.name == "_g_init_globals":
+                self.w("__attribute__((constructor)) " + self.signature(f) + ";")
+                continue
             self.w(self.signature(f) + ";")
         self.w("")
 
@@ -170,6 +176,9 @@ class CIRBackend(IRBackend):
         for f in mod.funcs:
             if f.is_extern or not f.blocks:
                 continue
+            if f.name == "_g_init_globals":
+                # Chạy TRƯỚC main để global có initializer động mang đúng giá trị.
+                self.w("__attribute__((constructor))")
             self.gen_func(f)
             self.w("")
 
@@ -180,6 +189,10 @@ class CIRBackend(IRBackend):
         if self.slice_decls:
             block = ["// Slice: con trỏ béo { T* ptr; size_t len; }."]
             block += self.slice_decls + [""]
+            self.out[slice_at:slice_at] = block
+        if self.fnptr_decls:
+            block = ["// Con trỏ hàm (typedef sinh tự động)."]
+            block += self.fnptr_decls + [""]
             self.out[slice_at:slice_at] = block
         return "\n".join(self.out)
 
@@ -206,10 +219,26 @@ class CIRBackend(IRBackend):
         if ty.kind == "array":
             return self.c_type(ty.elem) + "*"
         if ty.kind == "func":
-            return "void*"
+            return self._fnptr_typedef(ty)
         if ty.kind in ("struct", "enum"):
             return self.cn(ty.name)
         return T.c_type(ty)
+
+    def _fnptr_typedef(self, ty) -> str:
+        """typedef con trỏ hàm cho kiểu 'fn(P...)->R'.
+
+        Không dùng 'void*': C không gọi được qua void*, và ép kiểu tại mỗi lời
+        gọi thì mất kiểm tra kiểu. Một typedef cho mỗi chữ ký."""
+        params = [self.c_type(p) for p in (ty.params or ())]
+        ret = self.c_type(ty.ret) if ty.ret is not None else "void"
+        key = f"{ret}({','.join(params)})"
+        nm = self.fnptr_typedefs.get(key)
+        if nm is None:
+            nm = f"_gfn{len(self.fnptr_typedefs)}"
+            self.fnptr_typedefs[key] = nm
+            plist = ", ".join(params) if params else "void"
+            self.fnptr_decls.append(f"typedef {ret} (*{nm})({plist});")
+        return nm
 
     def c_decl(self, ty, name: str) -> str:
         """Khai báo C 'kiểu tên', giữ đúng dạng mảng '[N]'."""
@@ -370,9 +399,20 @@ class CIRBackend(IRBackend):
         if not isinstance(v, I.Value):
             raise BackendError(f"toán hạng không phải Value: {v!r}")
         if v.kind == "temp":
+            # Tham số xuất hiện trong IR dưới dạng temp cùng tên; khai báo của
+            # chúng đã được đổi tên (cn) nên chỗ dùng phải khớp — nếu không,
+            # 'round' sẽ trỏ vào round() của <math.h> thay vì tham số.
+            if v.name in self._param_names:
+                return self.cn(v.name)
             return v.name
-        if v.kind in ("global", "func"):
-            return self.cn(v.name)
+        if v.kind == "global":
+            # IR coi global là một CON TRỎ tới ô nhớ ('@x : *T'), còn trong C tên
+            # global CHÍNH LÀ ô nhớ. Lấy địa chỉ để hai mô hình khớp nhau: khi đó
+            # 'load @x' thành '*(&x)' — hợp lệ và trình biên dịch C rút gọn ngay.
+            # Với mảng, '&arr' đúng kiểu 'T(*)[N]' như IR mô tả.
+            return f"(&{self.cn(v.name)})"
+        if v.kind == "func":
+            return self.cn(v.name) if v.name in self._user_fns else v.name
         if v.kind == "strlit":
             return self.c_string(v.const)
         if v.kind == "undef":
@@ -442,6 +482,7 @@ class CIRBackend(IRBackend):
     # hàm
     # ------------------------------------------------------------------
     def gen_func(self, f: I.Func):
+        self._param_names = {p.name for p in f.params}
         self.w(self.signature(f) + " {")
         self.indent += 1
 
@@ -681,7 +722,15 @@ class CIRBackend(IRBackend):
         if name == "makeslice":
             sn = self.slice_typedef(ins.type.elem)
             base, lo, hi = a[0], a[1], a[2]
-            self.w(f"{d} = ({sn}){{ ({base}) + ({lo}), (size_t)(({hi}) - ({lo})) }};")
+            bt = ins.args[0].type
+            # Cơ sở là CON TRỎ TỚI MẢNG ('*[N]T'): '+ lo' trên nó nhảy theo CẢ
+            # MẢNG, không phải theo phần tử. Phải phân rã về 'T*' trước, nếu
+            # không slice trỏ ra ngoài vùng nhớ (đọc rác).
+            if (bt is not None and bt.kind == "ptr" and bt.elem is not None
+                    and bt.elem.kind == "array"):
+                base = f"(*({base}))"
+            self.w(f"{d} = ({sn}){{ ({base}) + ({lo}), "
+                   f"(size_t)(({hi}) - ({lo})) }};")
             return
         if name in ("g_alloc", "g_realloc"):
             # Cỡ phần tử đã được tính trong IR (theo target), nên ở đây chỉ cần
