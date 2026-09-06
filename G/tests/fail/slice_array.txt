@@ -1,1 +1,0 @@
-lỗi kiểu/ngữ nghĩa: chưa hỗ trợ lát cắt trên MẢNG ('[3]int')

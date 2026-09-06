@@ -45,6 +45,10 @@ class Codegen:
         self.global_inits = []       # (tên, biểu_thức) cho global khởi tạo lúc chạy
         self.scope_stack = []   # ngăn xếp scope cho defer (LIFO, theo block)
         self._tmp = 0
+        self.slice_print_fns = {}    # tên typedef slice -> tên hàm in
+        self.slice_print_decls = []  # thân các hàm in slice
+        self.slice_typedefs = {}     # kiểu phần tử C -> tên typedef slice
+        self.slice_decls = []        # các dòng 'G_SLICE_DEF(T, GSlice_T);'
         self.fnptr_typedefs = {}     # khoá chữ ký C -> tên typedef con trỏ hàm
         self.fnptr_decls = []        # các dòng 'typedef R (*_gfnN)(...);' theo thứ tự
 
@@ -71,11 +75,35 @@ class Codegen:
 
     def _c_base(self, t: A.Type) -> str:
         """Kiểu C của PHẦN TỬ trong cùng: tên kiểu + con trỏ-phần-tử ([N]*T)."""
-        if getattr(t, "is_fn", False):
+        if getattr(t, "slice_elem", None) is not None:
+            base = self._slice_typedef_ast(t)
+        elif getattr(t, "is_fn", False):
             base = self._fnptr_typedef(t)
         else:
             base = TYPE_MAP.get(t.name) or self.cn(t.name)
         return base + "*" * getattr(t, "elem_ptr", 0)
+
+    def _slice_typedef_ast(self, t: A.Type) -> str:
+        """Đăng ký typedef slice cho một A.Type 'slice<T>'."""
+        elem_c = self._ctype_str(t.slice_elem)
+        return self._slice_typedef(elem_c)
+
+    def _slice_typedef(self, elem_c: str) -> str:
+        """Đăng ký (nếu chưa có) 'typedef struct { T* ptr; size_t len; }' cho
+        kiểu phần tử C này, trả về tên typedef. C không có generic nên mỗi kiểu
+        phần tử cần một struct riêng."""
+        name = self.slice_typedefs.get(elem_c)
+        if name is None:
+            ident = (elem_c.replace("*", "p").replace(" ", "_")
+                     .replace("const_charp", "str"))
+            name = f"GSlice_{ident}"
+            self.slice_typedefs[elem_c] = name
+            self.slice_decls.append(f"G_SLICE_DEF({elem_c}, {name});")
+        return name
+
+    def _slice_typedef_gt(self, gt) -> str:
+        """Như trên nhưng nhận GType (dùng ở phía biểu thức)."""
+        return self._slice_typedef(T.c_type(gt.elem))
 
     def _ctype_str(self, t) -> str:
         """Chuỗi kiểu C ĐẦY ĐỦ cho ngữ cảnh kiểu trừu tượng (tham số typedef, cast):
@@ -433,6 +461,10 @@ class Codegen:
         # sinh theo cùng thứ tự topo để eq của struct lồng có trước eq của struct cha.
         self.emit_struct_eq_fns(topo)
 
+        # Điểm chèn HÀM IN SLICE: phải SAU định nghĩa struct (chúng truy cập
+        # trường của struct), khác với typedef slice vốn chỉ cần khai báo tiến.
+        slice_print_at = len(self.out)
+
         # 2) biến toàn cục
         for it in self.prog.items:
             if isinstance(it, A.GlobalVar):
@@ -475,6 +507,18 @@ class Codegen:
         if self.fnptr_decls:
             block = ["// Con trỏ hàm (typedef sinh tự động cho kiểu fn(...)->R)."]
             block += self.fnptr_decls + [""]
+            self.out[fnptr_at:fnptr_at] = block
+        # Typedef slice (ptr+len) — chèn TRƯỚC typedef con trỏ hàm để một slice
+        # chứa con trỏ hàm vẫn hợp lệ.
+        # Hàm in slice trước (chỉ số lớn hơn), rồi typedef — chèn từ dưới lên để
+        # các chỉ số đã tính không bị dịch.
+        if self.slice_print_decls:
+            block = ["// In slice ('{}' trên slice<T>) — độ dài biết lúc chạy."]
+            block += self.slice_print_decls + [""]
+            self.out[slice_print_at:slice_print_at] = block
+        if self.slice_decls:
+            block = ["// Slice: con trỏ béo { T* ptr; size_t len; }."]
+            block += self.slice_decls + [""]
             self.out[fnptr_at:fnptr_at] = block
 
         return "\n".join(self.out)
@@ -645,6 +689,10 @@ class Codegen:
             return self._struct_print_fragment(gt.name, cexpr)
         if gt.kind == "array" and isinstance(gt.n, int):
             return self._gtype_array_frag(gt, cexpr)
+        if gt.kind == "slice":
+            # Độ dài slice chỉ biết LÚC CHẠY nên không thể dựng chuỗi định dạng
+            # tĩnh như mảng: phát một hàm in riêng cho từng kiểu phần tử.
+            return "%s", [f"{self._slice_print_fn(gt)}({cexpr})"]
         if gt.kind == "enum" and gt.name in self.enum_names:
             return "%s", [f"{self._enum_name_fn(gt.name)}({cexpr})"]
         if self._is_stringy(gt):
@@ -1361,6 +1409,20 @@ class Codegen:
 
     # ---------- biểu thức ----------
     def gen_expr(self, e) -> str:
+        c = self._gen_expr_raw(e)
+        # Chuyển ngầm mảng tĩnh -> slice, do checker đánh dấu (xem Checker.coerce).
+        # Đặt ở MỘT chỗ duy nhất nên mọi ngữ cảnh (đối số, gán, return, phần tử
+        # mảng...) đều được xử lý giống nhau.
+        ts = getattr(e, "to_slice", None)
+        if ts is not None:
+            n, _mut = ts
+            gt = self.gtype_of(e)
+            elem_c = T.c_type(gt.elem) if gt.elem is not None else "void"
+            sname = self._slice_typedef(elem_c)
+            return f"(({sname}){{ {c}, (size_t){n} }})"
+        return c
+
+    def _gen_expr_raw(self, e) -> str:
         if isinstance(e, A.IntLit):
             return self._int_literal_c(e)
         if isinstance(e, A.FloatLit):
@@ -1453,6 +1515,25 @@ class Codegen:
         if isinstance(e, A.Call):
             return self.gen_call(e)
         if isinstance(e, A.Slice):
+            bt = self.gtype_of(e.base)
+            rt = self.gtype_of(e)
+            if rt.kind == "slice":
+                # Mảng tĩnh / slice -> slice. Dựng { ptr+lo, hi-lo } qua macro có
+                # kẹp biên; độ dài đi CÙNG con trỏ nên không thể tách rời.
+                sname = self._slice_typedef_gt(rt)
+                src = self.gen_expr(e.base)
+                if bt.kind == "array":
+                    n = bt.n if isinstance(bt.n, int) else 0
+                    src = f"(({sname}){{ {src}, (size_t){n} }})"
+                lo = self.gen_expr(e.lo) if e.lo is not None else "0"
+                if e.hi is not None:
+                    hi = f"(long long)({self.gen_expr(e.hi)})"
+                    if e.inclusive:
+                        hi = f"({hi} + 1)"
+                else:
+                    hi = "0x7fffffffffffffffLL"     # tới hết (macro sẽ kẹp)
+                return (f"g_sslice({sname}, {src}, (long long)({lo}), {hi}, "
+                        f"{self._where(e)})")
             # s[lo..hi] -> g_str_slice(s, lo, hi); cận khuyết = 0 / độ dài chuỗi.
             # Chuỗi nguồn vật hoá MỘT lần (có thể là lời gọi hàm).
             base = self.gen_expr(e.base)
@@ -1473,6 +1554,11 @@ class Codegen:
             # số không phải hằng (hằng đã được checker bắt). Con trỏ/[]T không có
             # độ dài -> không kiểm. Tắt bằng --no-checks.
             bt = self.gtype_of(e.base)
+            if bt.kind == "slice":
+                # Kiểm biên bằng ĐỘ DÀI MANG THEO — luôn có, kể cả khi slice đã
+                # đi qua nhiều lời gọi hàm.
+                return (f"({base_c}).ptr[g_sidx(({base_c}), {idx_c}, "
+                        f"{self._where(e)})]")
             if (bt.kind == "array" and isinstance(bt.n, int)
                     and not self._is_const_expr(e.index)):
                 return f"{base_c}[g_idx({idx_c}, {bt.n}, {self._where(e)})]"
@@ -1629,8 +1715,9 @@ class Codegen:
                     fmt = self.c_string(f"[dbg dòng {line}] {frag}\n")
                     tail = (", " + ", ".join(cargs)) if cargs else ""
                     return f"({{ fprintf(stderr, {fmt}{tail}); {ce}; }})"
-                if gt.kind == "struct" and gt.name in self.struct_defs:
-                    frag, cargs = self._struct_print_fragment(gt.name, tv)
+                if (gt.kind == "struct" and gt.name in self.struct_defs
+                        or gt.kind == "slice"):
+                    frag, cargs = self._gtype_print_frag(gt, tv)
                     fmt = self.c_string(f"[dbg dòng {line}] {frag}\n")
                     tail = (", " + ", ".join(cargs)) if cargs else ""
                 else:
@@ -1724,6 +1811,8 @@ class Codegen:
         if gt.kind == "array" and gt.n not in (None, "dyn"):
             return str(gt.n)
         c = self.gen_expr(arg)
+        if gt.kind == "slice":
+            return f"({c}).len"          # độ dài mang theo trong chính slice
         if gt.kind == "str":
             return f"strlen({c})"
         return f"(sizeof({c}) / sizeof(({c})[0]))"
@@ -2014,6 +2103,39 @@ class Codegen:
             "%g": "double", "%c": "int", "%p": "void*",
         }.get(spec)   # %s -> None (không ép)
 
+    def _slice_print_fn(self, gt: T.GType) -> str:
+        """Đăng ký (nếu chưa có) hàm in cho 'slice<T>', trả về tên hàm.
+
+        In ra '[a, b, c]' vào bộ đệm xoay vòng tĩnh (không cần g_free), cắt bớt
+        sau _PRINT_ARRAY_MAX phần tử — giống cách in mảng tĩnh."""
+        sname = self._slice_typedef_gt(gt)
+        fn = self.slice_print_fns.get(sname)
+        if fn is not None:
+            return fn
+        fn = f"_gslprint_{sname}"
+        self.slice_print_fns[sname] = fn
+        frag, cargs = self._gtype_print_frag(gt.elem, "s.ptr[i]")
+        args = (", " + ", ".join(cargs)) if cargs else ""
+        cap = self._PRINT_ARRAY_MAX
+        self.slice_print_decls += [
+            f"static const char* {fn}({sname} s) {{",
+            "    static char bufs[4][512]; static unsigned bi = 0;",
+            "    char* b = bufs[bi++ & 3]; size_t off = 0;",
+            "    off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, \"[\");",
+            f"    size_t shown = s.len < {cap} ? s.len : {cap};",
+            "    for (size_t i = 0; i < shown; i++) {",
+            "        if (i) off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, \", \");",
+            f'        off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, "{frag}"{args});',
+            "    }",
+            "    if (shown < s.len)",
+            "        off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off,",
+            '                                ", ... (%zu phần tử)", s.len);',
+            "    snprintf(b + off, sizeof(bufs[0]) - off, \"]\");",
+            "    return b;",
+            "}",
+        ]
+        return fn
+
     def _gtype_array_frag(self, gt: T.GType, cexpr):
         """(đoạn_fmt, [c_args]) cho một MẢNG cỡ tĩnh: '[v0, v1, ...]'. Đệ quy cho
         mảng nhiều chiều và cho phần tử struct/enum. Cắt bớt sau _PRINT_ARRAY_MAX
@@ -2143,7 +2265,8 @@ class Codegen:
                 # tiếp (gen_print đã vật hoá struct nên nhánh None chỉ gặp tên trần).
                 gt = self.gtype_of(arg) if arg is not None else T.UNKNOWN
                 if ((gt.kind == "struct" and gt.name in self.struct_defs
-                     or gt.kind == "array" and isinstance(gt.n, int))
+                     or gt.kind == "array" and isinstance(gt.n, int)
+                     or gt.kind == "slice")
                         and key.partition(":")[0] in ("", "v")):
                     base = ce if ce is not None else self.gen_expr(arg)
                     frag, sargs = self._gtype_print_frag(gt, base)

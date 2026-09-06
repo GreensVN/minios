@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể ghi qua slice CHỈ ĐỌC ('slice<int>') — khai báo tham số kiểu 'mut slice<int>' nếu hàm cần sửa dữ liệu

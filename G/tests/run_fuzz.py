@@ -52,7 +52,7 @@ TOKENS = [
     "->", "=>", "=", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/",
     "%", "&", "|", "^", "~", "!", "&&", "||", "<<", ">>", "+=", "-=", "?",
     "main", "x", "y", "foo", "T", "P", "int", "i64", "u8", "f64", "bool",
-    "str", "char", "void",
+    "str", "char", "void", "slice", "len", "<", ">",
     "0", "1", "42", "0xFF", "0b101", "1.5", '"s"', "'c'", "{}", '"{}"',
 ]
 
@@ -77,7 +77,7 @@ def mutate(src, rng):
     """Đột biến một nguồn hợp lệ theo cách thô bạo nhưng hay lộ bug."""
     if not src:
         return src
-    kind = rng.randrange(8)
+    kind = rng.randrange(9)
     n = len(src)
     if kind == 0:                                   # cắt đuôi (EOF đột ngột)
         return src[:rng.randrange(1, n)]
@@ -103,6 +103,15 @@ def mutate(src, rng):
     if kind == 6:                                   # lồng sâu (bắt đệ quy vô hạn)
         depth = rng.randrange(50, 400)
         return "fn main() -> int { return " + "(" * depth + "1" + ")" * depth + " }"
+    if kind == 7:                                   # chèn đoạn dùng slice
+        frag = rng.choice([
+            "fn _f(xs: slice<int>) -> int { return xs[0] }",
+            "fn _g(xs: mut slice<int>) { xs[0] = 1 }",
+            "fn _h() -> int { let a: [3]int = [1,2,3] return len(a[0..2]) }",
+            "fn _i(xs: slice<slice<int>>) -> int { return 0 }",
+            "fn _j() -> int { let a: [2]int = [1,2] let s = a[..] return s[9] }",
+        ])
+        return src + "\n" + frag + "\n"
     lines = src.splitlines()                        # trộn thứ tự dòng
     rng.shuffle(lines)
     return "\n".join(lines)

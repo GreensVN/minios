@@ -342,6 +342,30 @@ class Parser:
             ty = A.Type("fn", ptr=ptr, elem_ptr=elem_ptr, is_fn=True,
                         fn_params=fparams, fn_ret=fret, **self.pos_of(t))
         else:
+            # 'slice<T>' / 'mut slice<T>' — con trỏ béo (ptr + len). Giữ '[]T'
+            # nguyên nghĩa cũ (con trỏ trần) để mã hiện có không đổi hành vi.
+            smut = False
+            if self.is_kw("mut") and self.at(1).kind == "id" \
+                    and self.at(1).value == "slice":
+                self.advance()
+                smut = True
+            if self.check("id", "slice") and self.at(1).value == "<":
+                self.advance()                      # 'slice'
+                self.expect("op", "<")
+                inner = self.parse_type()
+                if not self.is_op(">"):
+                    self.error("kiểu slice cần đóng bằng '>' (vd 'slice<int>')",
+                               show_token=False)
+                self.advance()                      # '>'
+                ty = A.Type("slice", ptr=ptr, elem_ptr=elem_ptr,
+                            slice_elem=inner, slice_mut=smut, **self.pos_of(t))
+                if dims:
+                    ty.dims = dims
+                    ty.array = dims[0]
+                return ty
+            if smut:
+                self.error("'mut' ở vị trí kiểu chỉ dùng với slice "
+                           "(vd 'mut slice<int>')", show_token=False)
             name = self.expect("id").value
             ty = A.Type(name, ptr=ptr, elem_ptr=elem_ptr, **self.pos_of(t))
         if dims:

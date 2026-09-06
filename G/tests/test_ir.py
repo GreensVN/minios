@@ -259,6 +259,65 @@ class TestLoweringChoices(unittest.TestCase):
                          "vòng lặp vô hạn vẫn sinh block thoát")
 
 
+class TestSlices(unittest.TestCase):
+    """slice<T> phải mang theo độ dài xuống tận IR."""
+
+    def test_array_to_slice_is_explicit(self):
+        """Chuyển ngầm mảng->slice phải HIỆN trong IR (makeslice), không ẩn."""
+        mod = build("""
+            fn f(xs: slice<int>) -> int { return xs[0] }
+            fn main() -> int {
+                let a: [3]int = [1, 2, 3]
+                return f(a)
+            }
+        """)
+        self.assertEqual(irverify.verify(mod), [])
+        names = [i.extra.get("name") for i in instrs_of(mod.func("main"))
+                 if i.op == "intrinsic"]
+        self.assertIn("makeslice", names)
+
+    def test_slice_expr_lowers_to_makeslice(self):
+        mod = build("""
+            fn f(xs: slice<int>) -> int { return xs[0] }
+            fn main() -> int {
+                let a: [4]int = [1, 2, 3, 4]
+                return f(a[1..3])
+            }
+        """)
+        self.assertEqual(irverify.verify(mod), [])
+        names = [i.extra.get("name") for i in instrs_of(mod.func("main"))
+                 if i.op == "intrinsic"]
+        self.assertIn("makeslice", names)
+
+    def test_mut_slice_type_carries_mutability(self):
+        mod = build("""
+            fn fill(xs: mut slice<int>) { xs[0] = 1 }
+            fn main() -> int {
+                let mut a: [2]int = [0, 0]
+                fill(a)
+                return a[0]
+            }
+        """)
+        self.assertEqual(irverify.verify(mod), [])
+        p = mod.func("fill").params[0]
+        self.assertEqual(p.type.kind, "slice")
+        self.assertTrue(p.type.mutable_slice)
+
+    def test_slice_works_freestanding(self):
+        mod = build("""
+            fn sum(xs: slice<u32>) -> u32 {
+                let mut s: u32 = 0
+                for i in 0..len(xs) { s += xs[i] }
+                return s
+            }
+            fn kmain() {
+                let regs: [2]u32 = [1, 2]
+                outb(0x80, sum(regs) as u8)
+            }
+        """, freestanding=True)
+        self.assertEqual(irverify.verify(mod), [])
+
+
 class TestVerifierCatchesBugs(unittest.TestCase):
     """Verifier phải THẬT SỰ bắt lỗi — nếu không nó chỉ là trang trí."""
 

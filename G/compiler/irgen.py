@@ -204,6 +204,9 @@ class IRGen:
                 out = T.GType("enum", name=base)
             else:
                 out = T.UNKNOWN
+        if getattr(ty, "slice_elem", None) is not None:
+            return T.slice_of(self.resolve(ty.slice_elem),
+                              mutable=getattr(ty, "slice_mut", False))
         dims = getattr(ty, "dims", None) or []
         for d in reversed(dims):
             n = d
@@ -774,6 +777,23 @@ class IRGen:
     # biểu thức
     # ------------------------------------------------------------------
     def gen_expr(self, e, want_value=True):
+        ts = getattr(e, "to_slice", None)
+        if ts is not None:
+            # Chuyển ngầm mảng tĩnh -> slice (checker đánh dấu). Hạ tường minh
+            # thành 'makeslice' để backend không phải tự suy ra.
+            n, mut = ts
+            gt = self.gtype(e)
+            sty = T.slice_of(gt.elem, mutable=mut)
+            try:
+                addr, _ = self.gen_addr(e)
+            except IRGenError:
+                addr = self._gen_expr_inner(e)
+            return self.emit_val("intrinsic", [addr, I.const_int(0),
+                                               I.const_int(n)],
+                                 ty=sty, node=e, hint="sl", name="makeslice")
+        return self._gen_expr_inner(e, want_value)
+
+    def _gen_expr_inner(self, e, want_value=True):
         ty = self.gtype(e)
 
         if isinstance(e, A.IntLit):
@@ -852,6 +872,20 @@ class IRGen:
             return self.emit_val("intrinsic", [], ty=T.U64, node=e, hint="sz",
                                  name="sizeof", arg=str(self.gtype(e.expr)))
         if isinstance(e, A.Slice):
+            if ty.kind == "slice":
+                # slice hoá: mang theo (ptr, len) — độ dài không tách rời con trỏ
+                bt = self.gtype(e.base)
+                base = (self.gen_addr(e.base)[0] if bt.kind == "array"
+                        else self.gen_expr(e.base))
+                lo = self.gen_expr(e.lo) if e.lo is not None else I.const_int(0)
+                hi = (self.gen_expr(e.hi) if e.hi is not None
+                      else (I.const_int(bt.n) if bt.kind == "array"
+                            and isinstance(bt.n, int)
+                            else self.emit_val("intrinsic", [base], ty=T.USIZE,
+                                               node=e, hint="sl", name="len")))
+                return self.emit_val("intrinsic", [base, lo, hi], ty=ty, node=e,
+                                     hint="sl", name="makeslice",
+                                     inclusive=e.inclusive)
             base = self.gen_expr(e.base)
             lo = self.gen_expr(e.lo) if e.lo is not None else I.const_int(0)
             hi = (self.gen_expr(e.hi) if e.hi is not None

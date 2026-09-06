@@ -566,6 +566,42 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.13.0 — 🔪 Slice thật (`slice<T>`)
+
+- ✨ **`slice<T>` / `mut slice<T>` — con trỏ BÉO `(ptr, len)`.** Khác hẳn `[]T`
+  (con trỏ trần, mất độ dài) và `[N]T` (mảng tĩnh). Độ dài **đi cùng** con trỏ,
+  nên không thể "quên" truyền nó:
+  ```g
+  fn total(xs: slice<int>) -> int {
+      let mut s = 0
+      for i in 0..len(xs) { s += xs[i] }   // len() hoạt động
+      return s
+  }
+  fn fill(xs: mut slice<int>, v: int) {
+      for i in 0..len(xs) { xs[i] = v }    // ghi cần 'mut slice'
+  }
+  let mut a: [5]int = [1, 2, 3, 4, 5]
+  total(a)          // mảng tĩnh TỰ chuyển thành slice (mang theo N)
+  total(a[1..3])    // cắt lát: nửa mở; có a[..n], a[n..], a[..], a[lo..=hi]
+  fill(a[0..2], 7)  // sửa đúng phần được mượn
+  println("{}", a[1..4])   // in ra: [2, 3, 4]
+  ```
+- 🛡️ **Kiểm biên qua RANH GIỚI HÀM** — điều `[]T` không làm được. `get(a[0..2], 2)`
+  panic đúng chỗ dù mảng gốc còn phần tử ở vị trí đó, vì slice mang theo `len`
+  của **chính nó**. Tắt cùng `--no-checks` như mọi kiểm tra khác.
+- 🛡️ **Quyền ghi nằm ở KIỂU, không ở biến.** `slice<T>` chỉ đọc; ghi qua nó là
+  lỗi biên dịch. Không thể **mượn quyền ghi** từ một mảng `let`: truyền nó cho
+  `mut slice<T>` bị từ chối. Và slice **không tự rã** thành `*T` — làm vậy là
+  vứt bỏ độ dài, đúng thứ slice sinh ra để ngăn.
+- 🧩 Hoạt động ở **freestanding/kernel** (struct thuần, không libc, không cấp
+  phát), trong **struct**, với mọi kiểu phần tử (`str`, `struct`, `enum`), và
+  cắt lát được **slice của slice**.
+- 🧪 **Bộ panic mới** (`tests/run_panic.sh`): khẳng định lỗi lúc chạy **panic
+  đúng mã thoát 101** và `--no-checks` gỡ được — trước đây an toàn lúc chạy
+  hoàn toàn không có test nào phủ.
+- 🧪 **Bộ test: 220 ca** + panic 4 + IR 96 + IR-unit 25 + ASan 92; fuzz **40 000
+  vòng** với token slice, 0 crash.
+
 ## Mới trong 0.12.0 — 🏗️ G-IR, giao diện backend, fuzzing
 
 Bản này là bước **kiến trúc**, không phải bước tính năng ngôn ngữ. Xem

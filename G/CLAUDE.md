@@ -202,6 +202,33 @@ user's `let mut log = 0` becomes `static int log;`, colliding with `log()` and
 surfacing a raw C error. Add to this set whenever the runtime pulls in a new
 library.
 
+### Slices are fat pointers, and the checker owns the coercion
+
+`slice<T>` is `GType(kind="slice", elem=T, mutable_slice=bool)`, lowered to a C
+struct `{ T* ptr; size_t len; }` (`G_SLICE_DEF` in the runtime), one typedef per
+element type since C has no generics.
+
+Two rules that must not be relaxed:
+- a slice never decays to `*T` (`assignable` returns False) — decaying throws
+  away the length, which is the entire reason slices exist;
+- write permission lives in the *type* (`mut slice<T>`), not in the mutability
+  of the variable holding it. `_check_lvalue_mutable` special-cases slices:
+  `xs[i] = v` mutates the pointee, so it must not demand `mut xs`.
+
+Array→slice coercion is decided in **one place**: `Checker.coerce()`, which tags
+the node with `to_slice=(n, mutable)`. `Codegen.gen_expr` and `IRGen.gen_expr`
+each honour that tag at a single entry point. Do not scatter the "is the target
+a slice?" question across call/assign/return sites — that duplication is exactly
+what the IR work was meant to eliminate. `coerce()` also rejects borrowing write
+access from an immutable array and calls `_mark_written` (otherwise the
+unused-`mut` warning fires falsely).
+
+Printing: a slice's length is only known at runtime, so unlike static arrays it
+cannot use a compile-time format string. `_slice_print_fn` emits one printer per
+element type. Those printers dereference struct fields, so they are spliced in
+**after** struct definitions (`slice_print_at`), while the typedefs go earlier
+(`fnptr_at`) because signatures need them.
+
 ### The IR is the architectural seam
 
 `compiler/ir.py` + `irgen.py` + `irverify.py` + `backend.py` exist because the

@@ -177,16 +177,31 @@ là bằng chứng cho tuyên bố "IR biểu diễn được cả ngôn ngữ" 
 
 ---
 
-## 5. CHƯA làm (nói rõ để không gây hiểu nhầm)
+## 5. Đã triển khai trong Phase 2 (một phần): Slice
+
+`slice<T>` / `mut slice<T>` — con trỏ béo `(ptr, len)`; xem README 0.13.0.
+
+Vì sao slice được làm **trước** generics/traits, dù roadmap gốc xếp sau: nó
+không cần thay đổi hệ kiểu (chỉ thêm một `kind`), nhưng loại bỏ được thành ngữ
+"con trỏ trần + độ dài rời" ở mọi nơi — thứ mà generics/traits sẽ phải xây
+chồng lên. Làm ngược lại thì phải viết lại container hai lần.
+
+Ba bất biến của thiết kế, được khoá bằng test:
+1. slice **không bao giờ** tự rã thành `*T` (rã = vứt độ dài);
+2. quyền ghi ở **kiểu** (`mut slice<T>`), không ở biến giữ nó;
+3. chuyển ngầm mảng→slice quyết định ở **một chỗ duy nhất** (`Checker.coerce`),
+   codegen và irgen chỉ đọc dấu — không lặp lại suy luận đích.
+
+## 6. CHƯA làm (nói rõ để không gây hiểu nhầm)
 
 Các mục sau **chưa được triển khai**, mới chỉ có chỗ đứng trong kiến trúc:
 
 - backend C đọc từ IR (Giai đoạn B) — backend hiện tại **vẫn đi thẳng từ AST**;
 - backend LLVM / WASM / native;
-- generics, traits, `Result<T,E>`, `Slice<T>` tổng quát;
+- generics, traits, `Result<T,E>`;
 - allocator abstraction; memory model hình thức (owned/borrowed);
-- target/HAL layer (intrinsic vẫn giả định x86-64);
-- incremental compilation, IR cache, package manager, LSP;
-- fuzzing hạ tầng.
+- target/HAL layer (intrinsic vẫn giả định x86-64) — **đây là lỗ hổng đúng
+  đắn**: `inb`/`outb`/`cli` qua được checker trên mọi kiến trúc;
+- incremental compilation, IR cache, package manager, LSP.
 
 Roadmap chi tiết cho từng mục: xem §2 (xếp hạng) và §3 (thứ tự).

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class GType:
-    kind: str            # void bool int float char str ptr array struct enum func null unknown
+    kind: str            # void bool int float char str ptr array slice struct enum func null unknown
     name: str = ""       # tên int (i32...) / struct / enum
     bits: int = 0
     signed: bool = True
@@ -16,6 +16,7 @@ class GType:
     n: object = None     # array: số phần tử (int hoặc 'dyn')
     params: tuple = ()   # func
     ret: object = None   # func
+    mutable_slice: bool = False   # slice: cho phép GHI qua nó?
 
     # ---------- thuộc tính ----------
     def is_numeric(self):
@@ -27,12 +28,18 @@ class GType:
     def is_pointerish(self):
         return self.kind in ("ptr", "str", "null")
 
+    def is_slice(self):
+        return self.kind == "slice"
+
     def __str__(self):
         if self.kind == "ptr":
             return "*" + str(self.elem)
         if self.kind == "array":
             sz = "" if self.n == "dyn" else str(self.n)
             return f"[{sz}]{self.elem}"
+        if self.kind == "slice":
+            return f"slice<{self.elem}>" if not self.mutable_slice \
+                else f"mut slice<{self.elem}>"
         if self.kind in ("struct", "enum"):
             return self.name
         if self.kind in ("int", "float") and self.name:
@@ -83,6 +90,11 @@ def array_of(elem, n):
     return GType("array", elem=elem, n=n)
 
 
+def slice_of(elem, mutable=False):
+    """slice<T> — con trỏ BÉO: (ptr, len). Khác '[]T' (con trỏ trần, mất độ dài)."""
+    return GType("slice", elem=elem, mutable_slice=mutable)
+
+
 # ---------- ánh xạ sang C ----------
 _C_NAME = {
     "void": "void", "bool": "bool", "char": "char", "str": "const char*",
@@ -93,7 +105,17 @@ _C_NAME = {
 }
 
 
+def slice_c_name(elem: GType) -> str:
+    """Tên struct C cho slice<T>. Một typedef cho mỗi kiểu phần tử."""
+    base = c_type(elem)
+    ident = (base.replace("*", "p").replace(" ", "_")
+             .replace("const_char_p", "str"))
+    return f"GSlice_{ident}"
+
+
 def c_type(t: GType) -> str:
+    if t.kind == "slice":
+        return slice_c_name(t.elem)
     if t.kind == "ptr":
         return c_type(t.elem) + "*"
     if t.kind == "array":

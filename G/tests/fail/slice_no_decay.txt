@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: tham số 1 của 'takes_ptr' cần '*int' nhưng nhận 'mut slice<int>'

@@ -1049,6 +1049,15 @@ class Checker:
             pts = tuple(self.resolve(p) for p in (ty.fn_params or []))
             rt = self.resolve(ty.fn_ret) if ty.fn_ret is not None else T.VOID
             g = T.GType("func", params=pts, ret=rt)
+        elif getattr(ty, "slice_elem", None) is not None:
+            el = self.resolve(ty.slice_elem)
+            if el.kind == "void":
+                self.err("slice<void> không hợp lệ — slice cần kiểu phần tử "
+                         "có kích thước", ty)
+            if el.kind == "array" and el.n == "dyn":
+                self.err("slice<[]T> không hợp lệ — phần tử phải có kích thước "
+                         "biết trước", ty)
+            g = T.slice_of(el, mutable=getattr(ty, "slice_mut", False))
         else:
             base = ty.name
             if base in T.PRIMITIVES:
@@ -1220,6 +1229,49 @@ class Checker:
         # Trong C: *T, str, null và []T (mảng động) đều là con trỏ.
         return t.kind in ("ptr", "str", "null") or self._is_dyn_array(t)
 
+    def _same_elem(self, a: T.GType, b: T.GType) -> bool:
+        """Hai kiểu phần tử của slice có TRÙNG KHỚP không? Cố ý nghiêm ngặt
+        (không nới như assignable): slice<i64> và slice<i32> có bố cục bộ nhớ
+        khác nhau nên không thể hoán đổi."""
+        if a is None or b is None:
+            return True
+        if a.kind == "unknown" or b.kind == "unknown":
+            return True
+        if a.kind != b.kind:
+            return False
+        if a.kind in ("struct", "enum"):
+            return a.name == b.name
+        if a.kind in ("int", "float"):
+            return a.name == b.name and a.signed == b.signed
+        if a.kind in ("ptr", "array", "slice"):
+            return self._same_elem(a.elem, b.elem)
+        return True
+
+    def coerce(self, node, dst: T.GType, src: T.GType):
+        """Ghi nhận việc CHUYỂN NGẦM tại 'node' (mảng tĩnh -> slice).
+
+        Checker là nơi duy nhất biết kiểu ĐÍCH mong đợi, nên nó phải đánh dấu;
+        codegen chỉ đọc dấu đó. Nếu để codegen tự đoán, mỗi vị trí gọi hàm/gán/
+        return sẽ phải lặp lại logic suy luận đích — nguồn gốc của đúng loại lỗi
+        mà G-IR sinh ra để loại bỏ."""
+        if node is None or dst is None or src is None:
+            return
+        if dst.kind == "slice" and src.kind == "array" and isinstance(src.n, int):
+            if dst.mutable_slice:
+                # Không thể MƯỢN quyền ghi từ một mảng bất biến: 'mut slice<T>'
+                # cho phép hàm sửa dữ liệu, nên mảng gốc phải là 'let mut'.
+                if not self._array_is_mutable(node):
+                    nm = node.name if isinstance(node, A.Ident) else "mảng"
+                    self.err(
+                        f"không thể truyền '{nm}' (bất biến) cho tham số "
+                        f"'mut slice<{self.tyname(dst.elem)}>' — khai báo "
+                        f"'let mut' nếu hàm được phép sửa dữ liệu", node)
+                else:
+                    # Mảng bị sửa GIÁN TIẾP qua slice: tính là đã ghi, nếu không
+                    # sẽ cảnh báo nhầm "'mut' không bao giờ được gán lại".
+                    self._mark_written(node)
+            node.to_slice = (src.n, dst.mutable_slice)
+
     def assignable(self, dst: T.GType, src: T.GType) -> bool:
         """Có thể gán/chuyển 'src' cho nơi cần 'dst'? Nới lỏng kiểu C, chỉ
         từ chối các trường hợp rõ ràng sai (chuỗi<->số, struct lệch...)."""
@@ -1228,6 +1280,24 @@ class Checker:
         if dst.kind == "unknown" or src.kind in ("unknown", "null"):
             return True
         if dst.kind == "void":
+            return False
+        # ----- slice -----
+        if dst.kind == "slice":
+            # Mảng tĩnh [N]T tự chuyển thành slice<T> (mang theo N). Đây là điểm
+            # mấu chốt: độ dài KHÔNG bị mất như khi phân rã sang '*T'/'[]T'.
+            if src.kind == "array" and isinstance(src.n, int):
+                if not self._same_elem(dst.elem, src.elem):
+                    return False
+                return True
+            if src.kind == "slice":
+                if not self._same_elem(dst.elem, src.elem):
+                    return False
+                # 'mut slice' dùng được ở nơi cần slice chỉ đọc, không ngược lại.
+                return dst.mutable_slice <= src.mutable_slice
+            return False
+        if src.kind == "slice":
+            # Slice KHÔNG tự rã thành con trỏ trần: làm vậy là vứt bỏ độ dài,
+            # đúng thứ slice sinh ra để ngăn. Dùng '.ptr' nếu thật sự cần.
             return False
         # Mảng tĩnh phân rã thành con trỏ -> gán được cho *T hoặc []T.
         if self._ptrlike(dst) and (self._ptrlike(src) or self._is_static_array(src)):
@@ -2104,6 +2174,18 @@ class Checker:
                     self.err("không thể ghi vào phần tử của 'str' (chuỗi chỉ đọc) "
                              "— sao chép sang bộ đệm '[N]char' hoặc dùng "
                              "'*char' cấp phát riêng rồi ghi", stmt)
+                # Ghi qua SLICE: quyền ghi nằm ở KIỂU slice ('mut slice<T>'), không
+                # ở tính khả biến của biến giữ slice. 'xs[i] = v' sửa vùng nhớ
+                # được trỏ tới, không sửa chính handle (ptr+len) — nên không được
+                # đòi 'mut xs'.
+                if bt is not None and bt.kind == "slice":
+                    if not bt.mutable_slice:
+                        self.err(
+                            "không thể ghi qua slice CHỈ ĐỌC "
+                            f"('{self.tyname(bt)}') — khai báo tham số kiểu "
+                            f"'mut slice<{self.tyname(bt.elem)}>' nếu hàm cần "
+                            f"sửa dữ liệu", stmt)
+                    return
                 # index qua con trỏ / mảng động (đều là con trỏ heap) -> cho phép
                 if bt is not None and (bt.kind == "ptr"
                                        or self._is_dyn_array(bt)):
@@ -2426,6 +2508,28 @@ class Checker:
             return self.infer_struct_lit(e)
         return T.UNKNOWN
 
+    def _array_is_mutable(self, e) -> bool:
+        """Mảng gốc của biểu thức này có khả biến không? Quyết định slice tạo ra
+        là 'mut slice<T>' hay slice chỉ đọc — không thể mượn quyền ghi từ một
+        mảng 'let'."""
+        node = e
+        while True:
+            if isinstance(node, A.Ident):
+                info = self.lookup(node.name)
+                if info is not None:
+                    return bool(info[1])
+                g = self.globals.get(node.name)
+                return bool(g[1]) if g else False
+            if isinstance(node, (A.FieldAccess, A.Index)):
+                bt = getattr(node.base, "gtype", None)
+                if bt is not None and bt.kind == "ptr":
+                    return True          # qua con trỏ: luôn ghi được
+                node = node.base
+                continue
+            if isinstance(node, A.Unary) and node.op == "*":
+                return True
+            return False
+
     def infer_slice(self, e: A.Slice):
         """'s[lo..hi]' — lát cắt CHUỖI, trả về chuỗi mới (heap, kẹp biên lúc
         chạy). Mảng chưa hỗ trợ: G không có kiểu slice mang theo độ dài."""
@@ -2437,6 +2541,13 @@ class Checker:
             if not pt.is_integer() and pt.kind != "unknown":
                 self.err(f"cận của lát cắt phải là số nguyên, nhận "
                          f"'{self.tyname(pt)}'", e)
+        if bt.kind == "slice":
+            # Cắt lát một slice -> slice cùng kiểu phần tử (giữ tính khả biến).
+            return bt
+        if self._is_static_array(bt):
+            # 'a[lo..hi]' trên MẢNG TĨNH -> slice<T>. Đây là cách chính để tạo
+            # slice từ mảng khi chỉ cần một phần.
+            return T.slice_of(bt.elem, mutable=self._array_is_mutable(e.base))
         if bt.kind == "str" or (bt.kind == "ptr" and bt.elem
                                 and bt.elem.kind == "char"):
             if self.freestanding:
@@ -2444,12 +2555,6 @@ class Checker:
                          "nên không dùng được ở chế độ '--freestanding'", e)
                 return T.UNKNOWN
             return T.STR
-        if self._is_static_array(bt):
-            self.err(
-                f"chưa hỗ trợ lát cắt trên MẢNG ('{self.tyname(bt)}') — G chưa "
-                f"có kiểu slice mang theo độ dài; dùng con trỏ '&a[lo]' kèm số "
-                f"phần tử, hoặc vòng lặp sao chép", e)
-            return T.UNKNOWN
         self.err(f"không thể cắt lát giá trị kiểu '{self.tyname(bt)}' "
                  f"(chỉ áp dụng cho chuỗi)", e)
         return T.UNKNOWN
@@ -2771,6 +2876,8 @@ class Checker:
         it = self.infer(e.index)
         if not it.is_integer() and it.kind != "unknown":
             self.err(f"chỉ số mảng phải là số nguyên, nhận '{self.tyname(it)}'", e)
+        if bt.kind == "slice":
+            return bt.elem
         if bt.kind in ("array", "ptr"):
             # Chỉ số HẰNG trên mảng TĨNH: bắt vượt biên ngay lúc biên dịch (C chỉ
             # cảnh báo rồi đọc/ghi bộ nhớ lân cận — UB âm thầm).
@@ -3051,6 +3158,7 @@ class Checker:
                         f"nhưng nhận {len(e.args)}", e)
                 for i, at in enumerate(arg_types):
                     pt = self.resolve(m.params[i].type)
+                    self.coerce(e.args[i], pt, at)
                     if not self.assignable(pt, at):
                         self.err(
                             f"tham số {i + 1} của '{tn}.{mname}' cần "
@@ -3099,6 +3207,7 @@ class Checker:
                         f"nhưng nhận {len(e.args)}", e)
                 for i, at in enumerate(arg_types):
                     pt = self.resolve(m.params[i + 1].type)
+                    self.coerce(e.args[i], pt, at)
                     if not self.assignable(pt, at):
                         self.err(
                             f"tham số {i + 1} của '{sname}.{mname}' cần "
@@ -3138,6 +3247,7 @@ class Checker:
                     f"hàm '{e.func.name}' cần {len(fdef.params)} tham số "
                     f"nhưng nhận {len(e.args)}", e)
             for i, (at, pt) in enumerate(zip(arg_types, fdef.params)):
+                self.coerce(e.args[i], pt, at)
                 if not self.assignable(pt, at):
                     self.err(
                         f"tham số {i + 1} của '{e.func.name}' cần "
@@ -3151,6 +3261,7 @@ class Checker:
                     f"con trỏ hàm cần {len(ft.params)} tham số nhưng nhận "
                     f"{len(e.args)}", e)
             for i, (at, pt) in enumerate(zip(arg_types, ft.params)):
+                self.coerce(e.args[i], pt, at)
                 if not self.assignable(pt, at):
                     self.err(
                         f"tham số {i + 1} (qua con trỏ hàm) cần "
@@ -3367,8 +3478,11 @@ class Checker:
                 at = self.infer(e.args[0])
                 if self._is_dyn_array(at) or at.kind == "ptr":
                     self.err(
-                        "len() không dùng được cho con trỏ/[]T (không lưu độ dài) — "
-                        "hãy theo dõi độ dài riêng", e)
+                        "len() không dùng được cho con trỏ/[]T (không lưu độ dài) "
+                        "— dùng 'slice<T>' (mang theo độ dài), hoặc theo dõi độ "
+                        "dài riêng", e)
+                elif at.kind == "slice":
+                    return T.USIZE
                 elif at.kind not in ("array", "str") and at.kind != "unknown":
                     self.err(
                         f"len() cần mảng tĩnh hoặc chuỗi, nhận '{self.tyname(at)}'", e)

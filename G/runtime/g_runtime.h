@@ -578,6 +578,19 @@ static inline double g_clock_secs(void) {
 
 #endif /* G_FREESTANDING */
 
+/* ================= SLICE — con trỏ béo (ptr + len) ==================
+ * 'slice<T>' của G hạ thành một struct nhỏ { T* ptr; size_t len; } truyền theo
+ * GIÁ TRỊ. Khác '[]T' (con trỏ trần, mất độ dài) và khác '[N]T' (mảng tĩnh).
+ *
+ * Vì sao là struct chứ không phải hai tham số rời: để độ dài KHÔNG THỂ bị tách
+ * khỏi con trỏ. Đó chính là lỗi mà slice sinh ra để loại bỏ.
+ *
+ * Typedef cho từng kiểu phần tử do codegen phát (G_SLICE_DEF), vì C không có
+ * generic. Kiểm biên dùng chung g_bounds_fail với mảng tĩnh.
+ * Hoạt động cả ở chế độ freestanding (không cần libc). */
+#define G_SLICE_DEF(T, NAME) \
+    typedef struct NAME { T* ptr; size_t len; } NAME
+
 /* ---- Kiểm tra biên & chia 0 lúc chạy (kiểu Rust) ----
  * Codegen bọc 'a[i]' trên MẢNG TĨNH (cỡ biết lúc biên dịch) và '/', '%' số
  * nguyên bằng các macro này; -DG_NO_CHECKS (gc --no-checks) tắt hoàn toàn.
@@ -632,6 +645,29 @@ static inline char g_str_at_chk(const char* s, int i, const char* where) {
        (a) op _gb; })
 #define g_str_at_c(s, i, where) g_str_at_chk((s), (i), (where))
 #endif
+
+/* Chỉ số slice có kiểm biên: dùng ĐỘ DÀI MANG THEO trong chính slice, nên
+ * không thể "quên" truyền len như khi dùng con trỏ trần. */
+#ifdef G_NO_CHECKS
+#define g_sidx(s, i, where)      (i)
+#else
+#define g_sidx(s, i, where) \
+    ({ __auto_type _gsi = (i); \
+       if (__builtin_expect((unsigned long long)_gsi >= \
+                            (unsigned long long)((s).len), 0)) \
+           g_bounds_fail((long long)_gsi, (long long)((s).len), where); \
+       _gsi; })
+#endif
+
+/* Cắt lát một slice: s[lo..hi). Kẹp biên rồi báo lỗi nếu vượt — không bao giờ
+ * tạo ra slice trỏ ra ngoài vùng nhớ gốc. */
+#define g_sslice(SLICE_T, s, lo, hi, where) \
+    ({ __auto_type _gs = (s); \
+       long long _glo = (long long)(lo), _ghi = (long long)(hi); \
+       if (_glo < 0) _glo = 0; \
+       if (_ghi > (long long)_gs.len) _ghi = (long long)_gs.len; \
+       if (_ghi < _glo) _ghi = _glo; \
+       (SLICE_T){ _gs.ptr + _glo, (size_t)(_ghi - _glo) }; })
 
 
 #endif /* G_RUNTIME_H */
