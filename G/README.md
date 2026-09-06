@@ -566,6 +566,40 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.12.0 — 🏗️ G-IR, giao diện backend, fuzzing
+
+Bản này là bước **kiến trúc**, không phải bước tính năng ngôn ngữ. Xem
+[`ARCHITECTURE.md`](ARCHITECTURE.md) để biết audit đầy đủ và lộ trình.
+
+- 🏗️ **G-IR — biểu diễn trung gian** (`compiler/ir.py`, `irgen.py`): three-address
+  code trên CFG có basic block. Mọi cấu trúc điều khiển (`if/while/loop/for/
+  match/defer`) được hạ hẳn thành `jump`/`branch`/`switch`. Chạy thử bằng
+  `gc file.g --emit-ir`.
+- 🛡️ **Trình kiểm IR** (`irverify.py`): kiểm terminator, nhãn, block không thể
+  tới, dùng temp trước khi định nghĩa, định nghĩa lại temp, kiểu toán hạng.
+  `gc file.g --verify-ir`. **93/93** ví dụ + ca test (kể cả kernel freestanding)
+  hạ được sang IR và qua verifier — đây là bằng chứng IR phủ hết ngôn ngữ.
+- 🔌 **Giao diện backend** (`backend.py`): `AstBackend` / `IRBackend` + registry.
+  `--backend=c` (mặc định, đọc AST) hoặc `--backend=ir`. Backend C hiện tại
+  **không đổi** — chiến lược chuyển đổi giữ nó làm mặc định cho tới khi bản
+  đọc-từ-IR khớp 100% đầu ra (ARCHITECTURE.md §3).
+- 🧪 **Fuzzing** (`tests/run_fuzz.py`): đột biến corpus thật + sinh token ngẫu
+  nhiên, chạy hết lexer→parser→checker→IR. Yêu cầu: không bao giờ crash bằng
+  exception Python, không treo. Đã chạy **80 000 vòng / 8 hạt giống, 0 crash**.
+- 🐛 **Ba lỗi do fuzzing tìm ra:**
+  - nguồn kết thúc giữa một ký tự (`'` cuối file) → `IndexError` làm **crash**
+    trình biên dịch thay vì báo lỗi từ vựng;
+  - nguồn kết thúc giữa `\x`/`\u{` → **treo vô hạn** (`"" in "0123..."` là
+    `True` trong Python);
+  - `v() && true` với `v()` trả `void` **lọt qua checker** — nhánh `&&`/`||`
+    trả `bool` mà không kiểm toán hạng nào cả.
+- 🧪 **Unit test IR** (`tests/test_ir.py`, 21 ca): kiểm **ngữ nghĩa** hạ mã, không
+  chỉ tính hợp lệ — defer chốt giá trị trả về trước khi chạy, defer LIFO và
+  được nhân bản ở mọi lối ra, `match` hằng thành `switch`, mảng dùng `memcpy`,
+  `for mut` ghi qua `elemaddr`, `&&` đoản mạch thật. Cộng 6 ca kiểm rằng
+  **verifier thật sự bắt lỗi** (tự dựng IR hỏng rồi khẳng định nó bị từ chối).
+- 🧪 **Bộ test: 215 ca** (+5 ca hồi quy cho các lỗi fuzzing tìm ra).
+
 ## Mới trong 0.11.0 — 🧩 Destructuring, lát cắt chuỗi, hệ thống cảnh báo
 
 - ✨ **Destructuring struct**: `let P{x, y} = p` rút trích trường ra biến cùng

@@ -2515,6 +2515,19 @@ class Checker:
         op = e.op
         unk = lt.kind == "unknown" or rt.kind == "unknown"
         if op in ("&&", "||"):
+            # Toán hạng của '&&'/'||' phải dùng được như điều kiện. Trước đây
+            # nhánh này trả BOOL mà KHÔNG kiểm gì cả, nên 'v() && true' với v()
+            # trả void vẫn lọt qua checker rồi vỡ ở tầng dưới.
+            for side, node in ((lt, e.left), (rt, e.right)):
+                if side.kind == "void":
+                    self.err(
+                        f"toán hạng của '{op}' không thể là giá trị kiểu 'void' "
+                        f"— hàm không trả về giá trị", node)
+                elif side.kind in ("struct", "array"):
+                    self.err(
+                        f"toán hạng của '{op}' không thể là "
+                        f"'{self.tyname(side)}' — cần giá trị dùng được làm "
+                        f"điều kiện (bool/số/con trỏ)", node)
             return T.BOOL
         if op in ("==", "!=", "<", ">", "<=", ">="):
             eq_op = op in ("==", "!=")

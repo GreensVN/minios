@@ -202,6 +202,35 @@ user's `let mut log = 0` becomes `static int log;`, colliding with `log()` and
 surfacing a raw C error. Add to this set whenever the runtime pulls in a new
 library.
 
+### The IR is the architectural seam
+
+`compiler/ir.py` + `irgen.py` + `irverify.py` + `backend.py` exist because the
+checker↔codegen contract used to be ~37 dynamic attributes stuck onto AST nodes
+and read back with `getattr` defaults — a second backend would silently miscompile
+by forgetting one. Read `ARCHITECTURE.md` before touching them.
+
+Key point for contributors: **the C backend still lowers straight from the AST.**
+The IR runs in parallel and is verified by `tests/run_ir.sh`, but nothing ships
+through it yet. That is deliberate (ARCHITECTURE.md §3) — it keeps regression
+risk at zero while proving the IR covers the language.
+
+When you add a language feature you must extend `irgen.py` too, or
+`tests/run_ir.sh` goes red. That is the point: it stops the IR from rotting.
+
+Dead-code regions: `IRGen._dead` is set when every path has already exited (all
+match arms return, infinite `loop` with no `break`). In a dead region `gen_stmt`
+returns immediately — emitting IR for unreachable statements adds no semantics
+and creates orphan blocks the verifier then flags.
+
+### Fuzzing
+
+`tests/run_fuzz.py` mutates the real corpus and generates random token soup, then
+asserts the compiler either reports a *controlled* error (`LexError`/`ParseError`/
+`CheckError`/`IRGenError`) or produces verifiable IR. An `AttributeError`,
+`IndexError`, or a hang is a bug. Two of its finds were in `lexer.advance()`
+returning `""` at EOF: `"" in "0123..."` is `True` in Python, so the hex-escape
+loops spun forever. Watch for that idiom.
+
 ### Sanitizer runs are a separate suite
 
 `tests/run_asan.sh` rebuilds every example/case with

@@ -64,6 +64,11 @@ class Lexer:
         return self.src[j] if j < len(self.src) else ""
 
     def advance(self):
+        # Ở CUỐI NGUỒN trả chuỗi rỗng thay vì IndexError. Nguồn bị cắt cụt giữa
+        # một literal (vd "'" ở ký tự cuối file) từng làm trình biên dịch CRASH
+        # bằng traceback Python thay vì báo lỗi từ vựng tử tế.
+        if self.i >= len(self.src):
+            return ""
         c = self.src[self.i]
         self.i += 1
         if c == "\n":
@@ -273,7 +278,7 @@ class Lexer:
             ch = self.read_escape()
         else:
             ch = self.advance()
-        if self.peek() != "'":
+        if ch == "" or self.peek() != "'":
             self.error("ký tự không được đóng")
         self.advance()
         self.add("char", ch, line, col)
@@ -282,7 +287,10 @@ class Lexer:
         c = self.advance()
         if c == "x":  # \xNN hex (đúng 2 chữ số)
             h = ""
-            while len(h) < 2 and self.peek() in "0123456789abcdefABCDEF":
+            # CHÚ Ý: '"" in "0123..."' là True trong Python, nên phải kiểm
+            # peek() khác rỗng — nếu không, nguồn kết thúc giữa '\x' sẽ khiến
+            # vòng lặp chạy vô hạn (treo trình biên dịch).
+            while len(h) < 2 and self.peek() and self.peek() in "0123456789abcdefABCDEF":
                 h += self.advance()
             if not h:
                 self.error("escape \\x cần ít nhất một chữ số hex")
@@ -292,7 +300,7 @@ class Lexer:
                 self.error("escape \\u cần dạng \\u{XXXX}")
             self.advance()  # {
             h = ""
-            while self.peek() in "0123456789abcdefABCDEF":
+            while self.peek() and self.peek() in "0123456789abcdefABCDEF":
                 h += self.advance()
             if self.peek() != "}":
                 self.error("escape \\u{...} thiếu '}'")

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: toán hạng của '&&' không thể là 'P' — cần giá trị dùng được làm điều kiện (bool/số/con trỏ)
