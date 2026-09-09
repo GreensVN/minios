@@ -216,6 +216,89 @@ def _backend_names():
     return B.available()
 
 
+def build_llvm(args, extra, llvm_ir, prog, tgt):
+    """Dịch LLVM IR -> object -> chương trình chạy được.
+
+    Runtime của G là header C toàn 'static inline', nên object LLVM cần một
+    shim C nhỏ cung cấp các ký hiệu mà mã sinh ra tham chiếu (g_panic,
+    g_bounds_fail, g_get_stream...)."""
+    if args.emit_c or args.output and args.output.endswith(".ll"):
+        out = args.output or "out.ll"
+        with open(out, "w") as f:
+            f.write(llvm_ir)
+        print(f"gc: đã ghi LLVM IR vào {out}")
+        return 0
+    try:
+        import llvmlite.binding as llvm
+    except ImportError:
+        print("gc: \033[1;31mlỗi\033[0m: backend llvm cần gói 'llvmlite' "
+              "(pip install llvmlite)", file=sys.stderr)
+        return 1
+    llvm.initialize_native_target()
+    llvm.initialize_native_asmprinter()
+    try:
+        mod = llvm.parse_assembly(llvm_ir)
+        mod.verify()
+    except RuntimeError as e:
+        print("gc: \033[1;31mLLVM IR không hợp lệ\033[0m (lỗi nội bộ của G):",
+              file=sys.stderr)
+        print(str(e)[:2000], file=sys.stderr)
+        return 1
+    # reloc='pic' + codemodel='default': object mặc định của llvmlite dùng
+    # relocation tuyệt đối, khiến linker cảnh báo/ từ chối khi tạo PIE.
+    tm = llvm.Target.from_default_triple().create_target_machine(
+        reloc="pic", codemodel="default")
+    with tempfile.TemporaryDirectory() as d:
+        obj = os.path.join(d, "g.o")
+        with open(obj, "wb") as f:
+            f.write(tm.emit_object(mod))
+        if args.emit_asm:
+            out = args.output or "out.s"
+            with open(out, "w") as f:
+                f.write(tm.emit_assembly(mod))
+            print(f"gc: đã xuất assembly -> {out}")
+            return 0
+        shim = os.path.join(d, "shim.c")
+        with open(shim, "w") as f:
+            f.write(_LLVM_SHIM)
+        if args.compile_obj:
+            out = args.output or "out.o"
+            shutil.copy(obj, out)
+            print(f"gc: đã tạo đối tượng -> {out}")
+            return 0
+        out = args.output or "a.out"
+        cc = find_cc(args.cc)
+        cmd = [cc, obj, shim, "-I", RUNTIME_DIR, "-o", out, "-lm", "-w"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print("gc: \033[1;31mlỗi liên kết\033[0m (backend llvm):",
+                  file=sys.stderr)
+            print(r.stderr[:2000], file=sys.stderr)
+            return 1
+        print(f"gc: \033[32mđã biên dịch\033[0m -> {out}")
+        if args.run:
+            return subprocess.run([os.path.abspath(out)]).returncode
+    return 0
+
+
+#: Shim C cho backend LLVM: runtime của G là header 'static inline' nên object
+#: LLVM không thấy được. Vài hàm ngoài-dòng ở đây là đủ.
+_LLVM_SHIM = """
+#include "g_runtime.h"
+void* g_get_stream(int which) { return which ? (void*)stderr : (void*)stdout; }
+/* Runtime của G toàn 'static inline' -> object LLVM không thấy. Xuất ra
+   ngoài dòng những thứ mã sinh ra tham chiếu. */
+int g_ll_popcount(unsigned long long v) { return __builtin_popcountll(v); }
+int g_ll_clz(unsigned long long v) { return v ? __builtin_clzll(v) : 64; }
+int g_ll_ctz(unsigned long long v) { return v ? __builtin_ctzll(v) : 64; }
+unsigned long long g_ll_bswap(unsigned long long v) { return __builtin_bswap64(v); }
+unsigned long long g_ll_rotl(unsigned long long v, unsigned n) { return g_rotl64(v, n); }
+unsigned long long g_ll_rotr(unsigned long long v, unsigned n) { return g_rotr64(v, n); }
+void* g_ll_calloc(unsigned long long n) { return calloc((size_t)n, 1); }
+void  g_ll_free(void* p) { free(p); }
+"""
+
+
 def run_interp(main_path, freestanding=False, target=None, opt=False):
     """Chạy chương trình bằng trình thông dịch IR (hiện thực THAM CHIẾU)."""
     from . import interp as _in
@@ -531,6 +614,10 @@ def main(argv):
                 print(f"gc: \033[1;31mlỗi backend {args.backend}:\033[0m {e}",
                       file=sys.stderr)
                 return 1
+            # Backend LLVM: mã sinh ra là LLVM IR, không phải C. Dịch sang
+            # object bằng llvmlite rồi để linker hệ thống ghép với runtime.
+            if args.backend == "llvm":
+                return build_llvm(args, extra, code, prog, tgt)
             result = {"c": code, "has_main": has_main(prog), "prog": prog}
             args._target = tgt
             if args.emit_c:

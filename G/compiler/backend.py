@@ -104,6 +104,10 @@ class CBackend(AstBackend):
 def _load_ir_backends():
     """Nạp các backend đọc-từ-IR (import muộn để tránh vòng phụ thuộc)."""
     from . import backend_c_ir      # noqa: F401  (tự đăng ký khi import)
+    try:
+        from . import backend_llvm   # noqa: F401
+    except Exception:
+        pass                         # thiếu llvmlite -> chỉ mất backend llvm
 
 
 @register
