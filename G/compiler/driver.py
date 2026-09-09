@@ -213,6 +213,20 @@ def _backend_names():
     return B.available()
 
 
+def run_interp(main_path, freestanding=False, target=None):
+    """Chạy chương trình bằng trình thông dịch IR (hiện thực THAM CHIẾU)."""
+    from . import interp as _in
+    mod, _ = build_ir(main_path, freestanding, target)
+    try:
+        return _in.run(mod)
+    except _in.GPanic as e:
+        print(f"\033[1;31mG panic:\033[0m {e.msg}", file=sys.stderr)
+        return 101
+    except _in.InterpError as e:
+        print(f"gc: \033[1;33mthông dịch:\033[0m {e}", file=sys.stderr)
+        return 3
+
+
 def emit_ir(main_path, freestanding=False, target=None):
     mod, _ = build_ir(main_path, freestanding, target)
     print(str(mod))
@@ -441,6 +455,9 @@ def main(argv):
                          + " (mặc định: máy hiện tại)")
     ap.add_argument("--list-targets", action="store_true",
                     help="liệt kê target và năng lực phần cứng của chúng")
+    ap.add_argument("--interp", action="store_true",
+                    help="chạy chương trình bằng trình thông dịch G-IR "
+                         "(hiện thực tham chiếu, không qua C)")
     ap.add_argument("--emit-ir", action="store_true",
                     help="xuất G-IR dạng văn bản (biểu diễn trung gian)")
     ap.add_argument("--verify-ir", action="store_true",
@@ -519,6 +536,8 @@ def main(argv):
                     print(code)
                 return 0
             return build_native(args, extra, result)
+        if args.interp:
+            return run_interp(args.input, args.freestanding, tgt)
         if args.emit_ir:
             return emit_ir(args.input, args.freestanding, tgt)
         if args.verify_ir:
