@@ -352,6 +352,25 @@ The memory model itself is written down in `docs/MEMORY.md`, including what G
 does **not** guarantee (use-after-free, double-free, leaks, aliasing). Keep that
 list honest: it is what stops users assuming Rust-level safety.
 
+### LLVM backend
+
+`compiler/backend_llvm.py` emits **text** LLVM IR (not the builder API) so
+`--emit-llvm` output is reviewable and we are not pinned to an llvmlite version.
+It translates ~30 IR opcodes and knows nothing about G's surface language —
+that is exactly what building the IR first bought us.
+
+Two traps specific to LLVM, both of which bit me:
+- LLVM types must match *exactly*. `store double …, float*` and
+  `store i64 …, i32*` are accepted by the parser but produce wrong values;
+  insert `fptrunc`/`trunc`/`sext` explicitly.
+- LLVM does **not** apply C's default argument promotions. Variadic `printf`
+  needs `float`→`double` and narrow ints→`i32` inserted by hand (`_va_promote`).
+
+The runtime is a header of `static inline` functions, invisible to an LLVM
+object, so `driver._LLVM_SHIM` re-exports the handful of symbols generated code
+references (`g_bounds_fail_ext`, `g_panic_ext`, `g_get_stream`, …). Add to that
+shim when you lower a new intrinsic.
+
 ### The interpreter is the third implementation
 
 `compiler/interp.py` runs G-IR directly in Python. It exists because both C

@@ -566,6 +566,32 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.25.0 — 🦙 Backend LLVM
+
+- 🦙 **`--backend=llvm`**: G → G-IR → **LLVM IR** → object → chương trình chạy
+  được (qua `llvmlite`). `--emit-llvm` (dùng `--emit-c`) xuất LLVM IR dạng văn
+  bản để đọc/kiểm bằng mắt.
+- 📊 **44/97 ca cho đầu ra GIỐNG HỆT backend C, 0 khác**
+  (`tests/run_llvm_diff.sh`). 53 ca còn lại bị **TỪ CHỐI tường minh** (intrinsic
+  in ấn/format phức tạp, `asm`) — không ca nào sinh mã sai.
+- ⚙️ Đây là **lợi tức của Giai đoạn A/B**: backend dịch ~30 opcode IR và **không
+  biết gì** về cú pháp G, generic, trait hay `try`. Sinh LLVM IR dạng **văn bản**
+  (không dùng API builder) nên xem được bằng mắt và không khoá vào một phiên bản
+  API llvmlite.
+- 🐛 **Lỗi tìm ra khi dựng backend** (đều là lỗi dịch, đã sửa):
+  - `store <ô mảng>, <con trỏ mảng>` cất con trỏ vào chỗ đáng lẽ là mảng →
+    duyệt mảng literal đọc ra rác;
+  - hàm khởi tạo global **không chạy** (LLVM cần `llvm.global_ctors`);
+  - hằng số thực đi qua đường chuỗi; nay mã hoá hex nên không mất chính xác,
+    và hằng `f32` mang đúng kiểu (trước đó `store double …, float*` in ra 0);
+  - object dùng relocation tuyệt đối → linker từ chối khi tạo PIE;
+  - `printf` là hàm biến-đối-số: LLVM **không** tự thăng cấp `float`→`double`
+    và số hẹp→`int`; thiếu bước này `%g` đọc sai 4 byte;
+  - `try` ở nhánh lỗi để `val` **chưa khởi tạo** — backend C tự zero còn
+    `alloca` của LLVM cho bộ nhớ rác (lỗi này ảnh hưởng CẢ backend tương lai).
+- 🧪 **Bộ test: 248 ca** + backend-diff 106 + llvm-diff 44 + opt-diff 83
+  + interp-diff 75 + target 21 + panic 4 + IR 102 + IR-unit 25 + layout 11.
+
 ## Mới trong 0.24.0 — 🔬 Trình thông dịch tham chiếu & Trình tối ưu IR
 
 - 🔬 **Trình thông dịch G-IR** (`--interp`): chạy IR trực tiếp bằng Python,

@@ -16,7 +16,7 @@ from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.24.0"
+VERSION = "0.25.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -296,6 +296,12 @@ unsigned long long g_ll_rotl(unsigned long long v, unsigned n) { return g_rotl64
 unsigned long long g_ll_rotr(unsigned long long v, unsigned n) { return g_rotr64(v, n); }
 void* g_ll_calloc(unsigned long long n) { return calloc((size_t)n, 1); }
 void  g_ll_free(void* p) { free(p); }
+/* Kiểm biên/chia-0: runtime khai báo _Noreturn static inline nên phải bọc. */
+void g_bounds_fail_ext(long long i, long long n, const char* w) {
+    g_bounds_fail(i, n, w);
+}
+void g_div_zero_fail_ext(const char* w) { g_div_zero_fail(w); }
+void g_panic_ext(const char* m) { g_panic(m); }
 """
 
 

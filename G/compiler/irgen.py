@@ -1322,6 +1322,18 @@ class IRGen:
                 rty = T.GType("struct", name=rs)
                 rslot = self.emit_val("alloca", [], ty=T.GType("ptr", elem=rty),
                                       node=e, hint="tf")
+                # Ô mới cấp KHÔNG được coi là đã zero: backend C dùng compound
+                # literal (tự zero) còn 'alloca' của LLVM cho bộ nhớ RÁC. Ghi 0
+                # tường minh cho mọi trường không phải 'ok'/'err'.
+                for fn_, ft_ in (self._struct_fields(rs) or []):
+                    if fn_ in ("ok", "err"):
+                        continue
+                    zp = self.emit_val(
+                        "fieldaddr",
+                        [rslot, I.Value("const", const=fn_, type=T.STR)],
+                        ty=T.GType("ptr", elem=ft_), node=e, hint="tz",
+                        struct=rs, field=fn_)
+                    self.emit("store", [zp, I.undef(ft_)], node=e)
                 # Kiểu của 'err' phải là kiểu THẬT: dùng T.UNKNOWN thì backend
                 # sinh 'int' và sao chép sai kích thước (segfault với 'str').
                 ety = self._struct_field_type(vt.name, "err") or T.STR

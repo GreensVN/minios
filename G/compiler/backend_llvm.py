@@ -33,14 +33,18 @@ from . import types as T
 from .backend import IRBackend, BackendError, register
 
 
-def _fp(x) -> str:
-    """Hằng số thực của LLVM: dùng dạng hex 64-bit để KHÔNG mất chính xác khi
-    làm tròn qua văn bản (LLVM đòi hằng double phải biểu diễn được chính xác)."""
+def _fp(x, bits=64) -> str:
+    """Hằng số thực của LLVM dạng hex — tránh mất chính xác khi qua văn bản.
+
+    Với 'float' (32-bit), LLVM vẫn dùng hằng hex 64-bit nhưng giá trị PHẢI biểu
+    diễn được chính xác ở 32-bit; làm tròn qua struct trước rồi mới in."""
     import struct
     try:
         f = float(x)
     except (TypeError, ValueError):
         f = 0.0
+    if bits < 64:
+        f = struct.unpack(">f", struct.pack(">f", f))[0]
     return "0x" + struct.pack(">d", f).hex().upper()
 
 
@@ -210,7 +214,7 @@ class LLVMBackend(IRBackend):
                 return str(ord(c) if len(c) == 1 else 0)
             # Hằng SỐ THỰC được lưu nguyên văn dạng chuỗi để giữ đúng chữ số.
             if ty is not None and ty.kind == "float":
-                return _fp(c)
+                return _fp(c, ty.bits or 64)
             if ty is not None and ty.kind in ("int", "enum", "bool"):
                 try:
                     return str(int(c, 0))
@@ -218,7 +222,8 @@ class LLVMBackend(IRBackend):
                     return "0"
             return self.strref(c)
         if isinstance(c, float):
-            return _fp(c)
+            t = v.type if isinstance(v, I.Value) else None
+            return _fp(c, (t.bits or 64) if t is not None else 64)
         return str(c)
 
     def strref(self, s):
@@ -324,6 +329,13 @@ class LLVMBackend(IRBackend):
             return
         if op == "store":
             pt = A[0].type
+            # Hằng số thực phải mang ĐÚNG kiểu của ô: 'store double ..., float*'
+            # là lệch kiểu (LLVM nhận nhưng giá trị hỏng -> in ra 0).
+            if (pt is not None and pt.kind == "ptr" and pt.elem is not None
+                    and pt.elem.kind == "float" and A[1].kind == "const"):
+                self.w(f"  store {self.ty(pt.elem)} {self.cval(A[1])}, "
+                       f"{self.tv(A[0], env)}")
+                return
             # 'store <ô mảng>, <con trỏ mảng>': trong bố cục C mảng nằm TẠI CHỖ,
             # không có "ô chứa con trỏ mảng". Phải SAO CHÉP nội dung, nếu không
             # ô nhận giữ một con trỏ và mọi lần đọc sau lấy ra rác.
@@ -332,6 +344,20 @@ class LLVMBackend(IRBackend):
                     and A[1].type is not None
                     and A[1].type.kind in ("ptr", "array")):
                 self._memcpy(A[0], A[1], pt.elem, env)
+                return
+            # Bề rộng lệch (vd 'store i64 <len>, i32*'): LLVM đòi khớp tuyệt
+            # đối, còn IR cho phép nới. Chèn trunc/sext cho đúng.
+            vt, st_ = A[1].type, (pt.elem if pt is not None
+                                  and pt.kind == "ptr" else None)
+            if (vt is not None and st_ is not None
+                    and vt.kind in ("int", "char", "bool", "enum")
+                    and st_.kind in ("int", "char", "bool", "enum")
+                    and self._bits(vt) != self._bits(st_)):
+                r = self.tmp("sc")
+                op = ("trunc" if self._bits(vt) > self._bits(st_)
+                      else ("zext" if not vt.signed else "sext"))
+                self.w(f"  {r} = {op} {self.tv(A[1], env)} to {self.ty(st_)}")
+                self.w(f"  store {self.ty(st_)} {r}, {self.tv(A[0], env)}")
                 return
             self.w(f"  store {self.tv(A[1], env)}, {self.tv(A[0], env)}")
             return
@@ -430,8 +456,8 @@ class LLVMBackend(IRBackend):
             self._check(ins, A, env)
             return
         if op == "panic":
-            self._decl("g_panic", "declare void @g_panic(i8*)")
-            self.w(f"  call void @g_panic({self.tv(A[0], env)})")
+            self._decl("g_panic", "declare void @g_panic_ext(i8*)")
+            self.w(f"  call void @g_panic_ext({self.tv(A[0], env)})")
             self.w("  unreachable")
             return
         if op == "intrinsic":
@@ -440,6 +466,22 @@ class LLVMBackend(IRBackend):
         raise BackendError(f"lệnh IR chưa hỗ trợ trong backend llvm: '{op}'")
 
     # ------------------------------------------------------------------
+    def _va_promote(self, v, env):
+        """Ép đối số cho hàm biến-đối-số theo quy tắc thăng cấp mặc định của C."""
+        t = v.type
+        if t is None:
+            return self.tv(v, env)
+        if t.kind == "float" and (t.bits or 64) < 64:
+            r = self.tmp("fp")
+            self.w(f"  {r} = fpext {self.tv(v, env)} to double")
+            return f"double {r}"
+        if t.kind in ("int", "char", "bool", "enum") and self._bits(t) < 32:
+            r = self.tmp("ip")
+            op = "zext" if (t.kind == "bool" or not t.signed) else "sext"
+            self.w(f"  {r} = {op} {self.tv(v, env)} to i32")
+            return f"i32 {r}"
+        return self.tv(v, env)
+
     def _memcpy(self, dst, src, elem_ty, env):
         n = self._sizeof(elem_ty)
         self.decls["memcpy"] = ("declare void @llvm.memcpy.p0i8.p0i8.i64"
@@ -546,7 +588,13 @@ class LLVMBackend(IRBackend):
             self._decl("printf", "declare i32 @printf(i8*, ...)")
             self._decl("fprintf", "declare i32 @fprintf(i8*, i8*, ...)")
             self._decl("g_stream", "declare i8* @g_get_stream(i32)")
-            args = ", ".join(self.tv(x, env) for x in A)
+            # printf là hàm BIẾN ĐỐI SỐ: C tự thăng cấp float->double và số hẹp
+            # -> int. LLVM KHÔNG tự làm, nên phải ép tường minh, nếu không '%g'
+            # đọc 4 byte float như 8 byte double (in ra 0) và '%d' đọc rác.
+            parts = [self.tv(A[0], env)]
+            for x in A[1:]:
+                parts.append(self._va_promote(x, env))
+            args = ", ".join(parts)
             if stream == "stderr":
                 sp = self.tmp("st")
                 self.w(f"  {sp} = call i8* @g_get_stream(i32 1)")
@@ -567,8 +615,9 @@ class LLVMBackend(IRBackend):
         if kind == "null":
             return
         self._decl("g_bounds_fail",
-                   "declare void @g_bounds_fail(i64, i64, i8*)")
-        self._decl("g_div_zero_fail", "declare void @g_div_zero_fail(i8*)")
+                   "declare void @g_bounds_fail_ext(i64, i64, i8*)")
+        self._decl("g_div_zero_fail",
+                   "declare void @g_div_zero_fail_ext(i8*)")
         where = self.strref(f"{ins.line}:{ins.col}")
         ok, bad = f"chk_ok{self._next()}", f"chk_bad{self._n}"
         if kind in ("bounds", "slice_bounds"):
@@ -589,7 +638,7 @@ class LLVMBackend(IRBackend):
                 i64i, i64n = iw, ln
             self.w(f"  br i1 {c}, label %{ok}, label %{bad}")
             self.w(f"{bad}:")
-            self.w(f"  call void @g_bounds_fail(i64 {i64i}, i64 {i64n}, "
+            self.w(f"  call void @g_bounds_fail_ext(i64 {i64i}, i64 {i64n}, "
                    f"i8* {where})")
             self.w("  unreachable")
             self.w(f"{ok}:")
@@ -599,7 +648,7 @@ class LLVMBackend(IRBackend):
             self.w(f"  {c} = icmp ne {self.tv(A[0], env)}, 0")
             self.w(f"  br i1 {c}, label %{ok}, label %{bad}")
             self.w(f"{bad}:")
-            self.w(f"  call void @g_div_zero_fail(i8* {where})")
+            self.w(f"  call void @g_div_zero_fail_ext(i8* {where})")
             self.w("  unreachable")
             self.w(f"{ok}:")
             return
