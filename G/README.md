@@ -566,6 +566,34 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.24.0 — 🔬 Trình thông dịch tham chiếu & Trình tối ưu IR
+
+- 🔬 **Trình thông dịch G-IR** (`--interp`): chạy IR trực tiếp bằng Python,
+  **không qua C**. Vì sao cần: hai backend C **cùng đọc một IR** — nếu tầng hạ
+  mã hiểu sai ngữ nghĩa thì cả hai sai GIỐNG NHAU và bộ so khớp cũ vẫn xanh.
+  Đây là hiện thực **thứ ba, độc lập**, phá được điểm mù đó.
+  - Bộ nhớ mô hình hoá bằng ô có địa chỉ, nên **use-after-free, double-free và
+    vượt biên bị BẮT** thay vì thành hành vi không xác định.
+  - `tests/run_interp_diff.sh`: **75 khớp**, 14 chưa mô phỏng (asm, intrinsic
+    OS, vài hàm libc — báo rõ, không đoán).
+- ⚡ **Trình tối ưu IR** (`--opt-ir`) — đặt trên IR nên **mọi backend** hưởng
+  chung (C hôm nay, LLVM/WASM mai sau):
+  - `mem2reg` — bỏ ô nhớ vô hướng, thay load/store bằng temp (pass tác động lớn
+    nhất: IR sinh ra ở dạng địa chỉ nên phần lớn lệnh là load/store);
+  - `const-fold`, `copy-prop`, `dce`, `simplify-cfg`.
+  - **Giảm 16,4% số lệnh** trên 97 chương trình (73 964 → 61 846).
+- ✅ **Tiêu chí đúng, không phải cảm tính**: `tests/run_opt_diff.sh` chạy mỗi
+  chương trình TRƯỚC và SAU tối ưu bằng trình thông dịch rồi so từng byte —
+  **83 khớp, 0 khác**. Trình thông dịch được viết TRƯỚC trình tối ưu chính vì
+  cần một tiên đề độc lập.
+- 🐛 **`mem2reg` từng làm sai `-w` với `w: u32`** (in 4294967295 thay vì -1):
+  giá trị cất vào mang kiểu nguồn còn `load` mang kiểu đích, chênh lệch đó
+  chính là phép mở rộng dấu mà backend sinh ra. Nay chỉ quảng bá khi kiểu KHỚP.
+  Đáng chú ý: **trình thông dịch KHÔNG bắt được lỗi này** — chỉ backend C thấy.
+  Vì vậy cả hai đường kiểm đều cần thiết.
+- 🧪 **Bộ test: 248 ca** + backend-diff 106 + interp-diff 75 + opt-diff 83
+  + target 21 + panic 4 + IR 102 + IR-unit 25 + layout 11 + ASan 97.
+
 ## Mới trong 0.23.0 — 📦 Struct generic & `Result<T,E>` + `try`
 
 - 📦 **Struct generic**: `struct Pair<A, B> { a: A, b: B }`, dùng

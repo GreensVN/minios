@@ -16,7 +16,7 @@ from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.23.0"
+VERSION = "0.24.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -156,7 +156,7 @@ def compile_to_c(main_path, freestanding=False, no_warnings=False,
     return {"c": c_code, "has_main": has_main(prog), "prog": prog}
 
 
-def build_ir(main_path, freestanding=False, target=None):
+def build_ir(main_path, freestanding=False, target=None, optimize=False):
     """Chạy tới hết checker rồi HẠ sang G-IR. Trả về (ir.Module, prog).
 
     Tách riêng khỏi compile_to_c: đường sinh mã C mặc định KHÔNG đi qua IR trong
@@ -188,6 +188,9 @@ def build_ir(main_path, freestanding=False, target=None):
                     enum_values=ck.enums, target=ck.target).generate()
     except IRGenError as e:
         raise GError(main_path, main_src, 0, 0, str(e), "hạ mã IR")
+    if optimize:
+        from . import iropt
+        iropt.optimize(mod)
     return mod, prog
 
 
@@ -213,10 +216,10 @@ def _backend_names():
     return B.available()
 
 
-def run_interp(main_path, freestanding=False, target=None):
+def run_interp(main_path, freestanding=False, target=None, opt=False):
     """Chạy chương trình bằng trình thông dịch IR (hiện thực THAM CHIẾU)."""
     from . import interp as _in
-    mod, _ = build_ir(main_path, freestanding, target)
+    mod, _ = build_ir(main_path, freestanding, target, opt)
     try:
         return _in.run(mod)
     except _in.GPanic as e:
@@ -227,15 +230,15 @@ def run_interp(main_path, freestanding=False, target=None):
         return 3
 
 
-def emit_ir(main_path, freestanding=False, target=None):
-    mod, _ = build_ir(main_path, freestanding, target)
+def emit_ir(main_path, freestanding=False, target=None, opt=False):
+    mod, _ = build_ir(main_path, freestanding, target, opt)
     print(str(mod))
     return 0
 
 
-def verify_ir(main_path, freestanding=False, target=None):
+def verify_ir(main_path, freestanding=False, target=None, opt=False):
     from . import irverify
-    mod, _ = build_ir(main_path, freestanding, target)
+    mod, _ = build_ir(main_path, freestanding, target, opt)
     errs = irverify.verify(mod)
     if errs:
         for e in errs[:20]:
@@ -455,6 +458,8 @@ def main(argv):
                          + " (mặc định: máy hiện tại)")
     ap.add_argument("--list-targets", action="store_true",
                     help="liệt kê target và năng lực phần cứng của chúng")
+    ap.add_argument("--opt-ir", action="store_true",
+                    help="chạy các pass tối ưu trên G-IR trước khi sinh mã")
     ap.add_argument("--interp", action="store_true",
                     help="chạy chương trình bằng trình thông dịch G-IR "
                          "(hiện thực tham chiếu, không qua C)")
@@ -509,11 +514,12 @@ def main(argv):
             print(f"gc: {e}", file=sys.stderr)
             return 1
         if args.backend == "ir":
-            return emit_ir(args.input, args.freestanding, tgt)
+            return emit_ir(args.input, args.freestanding, tgt, args.opt_ir)
         if _B.get(args.backend).consumes == "ir":
             # Backend đọc-từ-IR: chạy checker -> hạ IR -> verify -> sinh mã.
             from . import irverify
-            mod, prog = build_ir(args.input, args.freestanding, tgt)
+            mod, prog = build_ir(args.input, args.freestanding, tgt,
+                                 args.opt_ir)
             errs = irverify.verify(mod)
             if errs:
                 print(f"gc: \033[1;31mIR không hợp lệ:\033[0m {errs[0]}",
@@ -537,11 +543,11 @@ def main(argv):
                 return 0
             return build_native(args, extra, result)
         if args.interp:
-            return run_interp(args.input, args.freestanding, tgt)
+            return run_interp(args.input, args.freestanding, tgt, args.opt_ir)
         if args.emit_ir:
-            return emit_ir(args.input, args.freestanding, tgt)
+            return emit_ir(args.input, args.freestanding, tgt, args.opt_ir)
         if args.verify_ir:
-            return verify_ir(args.input, args.freestanding, tgt)
+            return verify_ir(args.input, args.freestanding, tgt, args.opt_ir)
         if args.check:
             compile_to_c(args.input, args.freestanding, args.no_warnings,
                          args.warnings_as_errors, tgt)  # chạy tới hết checker

@@ -352,6 +352,33 @@ The memory model itself is written down in `docs/MEMORY.md`, including what G
 does **not** guarantee (use-after-free, double-free, leaks, aliasing). Keep that
 list honest: it is what stops users assuming Rust-level safety.
 
+### The interpreter is the third implementation
+
+`compiler/interp.py` runs G-IR directly in Python. It exists because both C
+backends consume the *same* IR: a misunderstanding in `irgen.py` makes them
+wrong identically and `run_backend_diff.sh` stays green. `run_interp_diff.sh`
+breaks that blind spot.
+
+Memory is modelled as addressable `Cell`s, so use-after-free / double-free /
+out-of-bounds raise instead of being UB — a real advantage over running C.
+
+Arrays follow C's **flat** layout: one contiguous cell, and `elemaddr` scales
+the index by row size only when its *result type* is a pointer-to-array. Decide
+that from the IR type, never by inspecting what happens to sit in the slot — I
+tried the value-based heuristic and it broke `[N]*T`.
+
+### The optimizer must not change behaviour
+
+`compiler/iropt.py` + `tests/run_opt_diff.sh`: every program runs before and
+after optimization under the interpreter and the outputs are compared byte for
+byte. That is why the interpreter was written *first*.
+
+But note: run the optimized IR through the **C backend too**. `mem2reg` once
+broke `-w` on a `u32` (printing 4294967295 instead of -1) and the interpreter
+did **not** notice — only the C backend did. A stored value carries the source
+type while the `load` carries the destination type, and that difference *is* the
+widening the backend emits. Promote only when the types match.
+
 ### Two C backends, on purpose
 
 **Status: they now agree on 101/101 cases (0 differing, 0 unsupported),
