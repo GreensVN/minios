@@ -19,6 +19,18 @@ from . import types as T
 _RUNTIME_DEFINED = {"memcpy", "memmove", "memset", "memcmp", "strlen"}
 
 
+def _attr_str(node, name):
+    """Giá trị chuỗi của thuộc tính '@name("...")' trên một node, hoặc None."""
+    for a in (getattr(node, "attrs", None) or []):
+        if getattr(a, "name", "") != name:
+            continue
+        av = (getattr(a, "args", None) or [None])[0]
+        v = getattr(av, "value", None)
+        if isinstance(v, str):
+            return v
+    return None
+
+
 # Ánh xạ tên kiểu G -> C (cho khai báo theo cú pháp)
 TYPE_MAP = {
     "int": "int", "i8": "int8_t", "i16": "int16_t", "i32": "int32_t", "i64": "int64_t",
@@ -48,6 +60,7 @@ class Codegen:
         self.slice_print_fns = {}    # tên typedef slice -> tên hàm in
         self.slice_print_decls = []  # thân các hàm in slice
         self.arena_decls = []        # biến GArena cần khai báo trong hàm
+        self.sym_aliases = {}        # tên hàm G -> ký hiệu '@symbol("...")'
         self.slice_typedefs = {}     # kiểu phần tử C -> tên typedef slice
         self.slice_decls = []        # các dòng 'G_SLICE_DEF(T, GSlice_T);'
         self.fnptr_typedefs = {}     # khoá chữ ký C -> tên typedef con trỏ hàm
@@ -436,6 +449,11 @@ class Codegen:
         self.w("")
 
         struct_defs = {}
+        for it in self.prog.items:
+            if isinstance(it, A.Function):
+                sym = _attr_str(it, "symbol")
+                if sym:
+                    self.sym_aliases[it.name] = sym
         self.const_names = {it.name for it in self.prog.items
                             if isinstance(it, A.GlobalVar) and it.is_const}
         for it in self.prog.items:
@@ -787,6 +805,11 @@ class Codegen:
     def mangle(self, fn: A.Function) -> str:
         if fn.recv:
             return f"{self.cn(fn.recv)}__{fn.name}"
+        # '@symbol("tên_thật")': ký hiệu ở thư viện khác tên hàm trong G (vd
+        # tên C có tiền tố, hoặc tên không hợp lệ làm định danh G).
+        sym = _attr_str(fn, "symbol")
+        if sym:
+            return sym
         if fn.name == "main" or fn.is_extern:
             return fn.name          # điểm vào / ký hiệu ngoài: giữ nguyên tên
         return self.cn(fn.name)
@@ -1503,6 +1526,13 @@ class Codegen:
         if isinstance(e, A.NullLit):
             return "NULL"
         if isinstance(e, A.Ident):
+            # Hàm khai báo '@symbol("tên_thật")': mọi chỗ DÙNG phải phát tên
+            # ký hiệu, không phải tên G (nếu không sẽ lỗi liên kết).
+            # '@symbol' thắng cả 'c_name' do checker đặt: checker không biết
+            # về ký hiệu ngoài, nó chỉ làm sạch tên cho C.
+            sym = self.sym_aliases.get(e.name)
+            if sym is not None:
+                return sym
             nm = getattr(e, "c_name", "") or self.cn(e.name)
             # Biến phần tử của 'for mut x in arr' được hạ thành CON TRỎ tới phần
             # tử (để ghi xuyên vào mảng) — mọi lần dùng 'x' phải là '(*x)'.
@@ -1872,6 +1902,9 @@ class Codegen:
                 n = self.gen_expr(e.args[b + 2])
                 return (f"(({ct}*)g_a_realloc({a}, (void*)({p}), "
                         f"(size_t)({n}), sizeof({ct})))")
+            if name in ("dl_open", "dl_sym", "dl_close", "dl_error"):
+                args = ", ".join(self.gen_expr(a) for a in e.args)
+                return f"g_{name}({args})"
             if name == "heap_allocator":
                 return "g_heap_allocator()"
             if name == "arena_allocator":

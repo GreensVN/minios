@@ -121,6 +121,7 @@ class IRGen:
         self._enum_values = enum_values or {}
         self._target = target
         self._layout = None
+        self._sym_alias = {}       # tên hàm G -> ký hiệu '@symbol("...")'
         self.mod = I.Module(name=module_name)
         self._n = 0
         self.fn = None            # I.Func đang sinh
@@ -263,6 +264,11 @@ class IRGen:
             if isinstance(it, A.GlobalVar):
                 self.gen_global(it)
 
+        for it in self.prog.items:
+            if isinstance(it, A.Function):
+                sym = self._attr_str(it, "symbol")
+                if sym:
+                    self._sym_alias[it.name] = sym
         for it in self.prog.items:
             if isinstance(it, A.Function):
                 self.gen_func(it)
@@ -457,8 +463,24 @@ class IRGen:
     # ------------------------------------------------------------------
     # hàm
     # ------------------------------------------------------------------
+    @staticmethod
+    def _attr_str(node, want):
+        for a in (getattr(node, "attrs", None) or []):
+            if getattr(a, "name", "") != want:
+                continue
+            av = (getattr(a, "args", None) or [None])[0]
+            v = getattr(av, "value", None)
+            if isinstance(v, str):
+                return v
+        return None
+
     def gen_func(self, fn: A.Function, recv=None):
-        name = f"{recv}__{fn.name}" if recv else fn.name
+        # '@symbol("tên_thật")': dùng tên ký hiệu ngay trong IR để MỌI backend
+        # phát đúng tên khi khai báo và khi gọi.
+        sym = self._attr_str(fn, "symbol")
+        if sym:
+            self._sym_alias[fn.name] = sym
+        name = sym if sym else (f"{recv}__{fn.name}" if recv else fn.name)
         params = []
         # Method TĨNH ('fn of(x, y)' trong impl) KHÔNG có 'self' — chỉ thêm
         # tham số self khi hàm thật sự khai báo nó. Trước đây mọi hàm trong impl
@@ -2083,6 +2105,12 @@ class IRGen:
             vals = [self.gen_expr(a) for a in e.args]
             return self.emit_val("intrinsic", vals, ty=T.VOID, node=e,
                                  hint="fr", name="free", with_alloc=in_form)
+        if fname in ("dl_open", "dl_sym", "dl_close", "dl_error"):
+            # Ánh xạ sang ký hiệu runtime NGAY TRONG IR để mọi backend dùng
+            # chung một tên (backend C có hàm inline, LLVM có shim ngoài dòng).
+            vals = [self.gen_expr(a) for a in e.args]
+            return self.emit_val("intrinsic", vals, ty=ty, node=e, hint="dl",
+                                 name=fname)
         if fname == "heap_allocator":
             return self.emit_val("intrinsic", [], ty=ty, node=e, hint="ha",
                                  name="heap_allocator")
@@ -2152,7 +2180,7 @@ class IRGen:
             if found is None:
                 args = [self.gen_expr(a) for a in e.args]
                 return self.emit_val("call", args, ty=ty, node=e, hint="c",
-                                     callee=fname)
+                                     callee=self._sym_alias.get(fname, fname))
 
         # gọi qua con trỏ hàm
         fp = self.gen_expr(e.func)

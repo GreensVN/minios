@@ -53,6 +53,8 @@ BUILTINS = {"print", "println", "eprint", "eprintln", "printf", "format",
             "g_alloc", "g_free", "g_realloc", "unreachable", "todo",
             # cấp phát qua ALLOCATOR (0.20.0). 'g_alloc' là bí danh cũ của 'alloc'.
             "alloc", "free", "realloc",
+            # FFI ĐỘNG: nạp thư viện lúc chạy (xem docs/FFI.md).
+            "dl_open", "dl_sym", "dl_close", "dl_error",
             "alloc_in", "free_in", "realloc_in",
             "heap_allocator", "arena_allocator",
             "typeof", "swap", "dbg",
@@ -205,6 +207,10 @@ _HOSTED_ONLY = {
     "free": "cấp phát mặc định dùng heap — dùng 'free_in(a, p)'",
     "realloc": "cấp phát mặc định dùng heap — dùng 'realloc_in(a, p, T, n)'",
     "heap_allocator": "allocator heap cần libc — dùng arena_allocator(buf)",
+    "dl_open": "FFI động cần bộ nạp thư viện của HĐH",
+    "dl_sym": "FFI động cần bộ nạp thư viện của HĐH",
+    "dl_close": "FFI động cần bộ nạp thư viện của HĐH",
+    "dl_error": "FFI động cần bộ nạp thư viện của HĐH",
     "dbg": "in ấn cần stdio",
     "assert_eq": "báo lỗi cần stdio", "assert_ne": "báo lỗi cần stdio",
     "check_eq": "báo lỗi cần stdio", "check_ne": "báo lỗi cần stdio",
@@ -361,10 +367,22 @@ class Checker:
         "inline":    ({"fn"}, 0, None),
         "used":      ({"fn", "global"}, 0, None),
         "section":   ({"fn", "global"}, 1, "str"),
+        # FFI: '@link("m")' trên 'extern fn' -> tự thêm '-lm' khi liên kết.
+        # Nhờ vậy ràng buộc thư viện nằm NGAY CẠNH khai báo, không phải nhớ
+        # truyền cờ ở dòng lệnh mỗi lần build.
+        "link":      ({"fn", "global"}, 1, "str"),
+        # '@symbol("tên_thật")' — tên ký hiệu ở thư viện khác tên hàm G.
+        "symbol":    ({"fn", "global"}, 1, "str"),
     }
 
     def validate_attrs(self, attrs, kind, node):
         seen = {}
+        for a in attrs:
+            if a.name in ("link", "symbol") and kind == "fn":
+                if not getattr(node, "is_extern", False):
+                    self.err(
+                        f"'@{a.name}' chỉ dùng cho khai báo 'extern fn' "
+                        f"(hàm định nghĩa ở thư viện ngoài)", a)
         for a in attrs:
             if a.name in seen:
                 self.err(f"thuộc tính '@{a.name}' bị lặp lại", a)
@@ -4098,6 +4116,34 @@ class Checker:
             if not nt.is_integer() and nt.kind != "unknown":
                 self.err(f"{name}(...): số lượng phải là số nguyên", e)
             return T.ptr_of(elem)
+        # ---- FFI động ----
+        if name == "dl_open":
+            if len(e.args) != 1:
+                self.err("dl_open(đường_dẫn) cần đúng 1 tham số", e)
+            elif self.infer(e.args[0]).kind not in ("str", "unknown"):
+                self.err("dl_open(đường_dẫn): tham số phải là chuỗi", e)
+            return T.ptr_of(T.U8)
+        if name == "dl_sym":
+            if len(e.args) != 2:
+                self.err("dl_sym(handle, tên) cần đúng 2 tham số", e)
+            else:
+                ht = self.infer(e.args[0])
+                if not (ht.is_pointerish() or ht.kind == "unknown"):
+                    self.err("dl_sym(handle, tên): handle phải là con trỏ "
+                             "(kết quả của dl_open)", e)
+                if self.infer(e.args[1]).kind not in ("str", "unknown"):
+                    self.err("dl_sym(handle, tên): tên ký hiệu phải là chuỗi", e)
+            return T.ptr_of(T.U8)
+        if name == "dl_close":
+            if len(e.args) != 1:
+                self.err("dl_close(handle) cần đúng 1 tham số", e)
+            elif e.args:
+                self.infer(e.args[0])
+            return T.INT
+        if name == "dl_error":
+            if e.args:
+                self.err("dl_error() không nhận tham số", e)
+            return T.STR
         if name == "heap_allocator":
             if e.args:
                 self.err("heap_allocator() không nhận tham số", e)

@@ -933,6 +933,10 @@ class CIRBackend(IRBackend):
         if name == "str_at_checked":
             self.w(f"{d} = g_str_at_c({a[0]}, {a[1]}, {self._where(ins)});")
             return
+        if name in ("dl_open", "dl_sym", "dl_close", "dl_error"):
+            call = f"g_{name}({', '.join(a)})"
+            self.w(f"{d} = {call};" if d else f"{call};")
+            return
         if name == "slice_ptr":
             self.w(f"{d} = ({a[0]}).ptr;")
             return

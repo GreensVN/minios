@@ -16,7 +16,7 @@ from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.25.0"
+VERSION = "0.26.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -268,7 +268,9 @@ def build_llvm(args, extra, llvm_ir, prog, tgt):
             return 0
         out = args.output or "a.out"
         cc = find_cc(args.cc)
-        cmd = [cc, obj, shim, "-I", RUNTIME_DIR, "-o", out, "-lm", "-w"]
+        cmd = ([cc, obj, shim, "-I", RUNTIME_DIR, "-o", out, "-lm", "-ldl",
+                "-w"]
+               + link_flags(args, prog))
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             print("gc: \033[1;31mlỗi liên kết\033[0m (backend llvm):",
@@ -302,6 +304,11 @@ void g_bounds_fail_ext(long long i, long long n, const char* w) {
 }
 void g_div_zero_fail_ext(const char* w) { g_div_zero_fail(w); }
 void g_panic_ext(const char* m) { g_panic(m); }
+/* FFI động: runtime khai báo static inline nên object LLVM không thấy. */
+void* g_dl_open_ext(const char* p) { return g_dl_open(p); }
+void* g_dl_sym_ext(void* h, const char* n) { return g_dl_sym(h, n); }
+int   g_dl_close_ext(void* h) { return g_dl_close(h); }
+const char* g_dl_error_ext(void) { return g_dl_error(); }
 """
 
 
@@ -398,6 +405,46 @@ def find_cc(preferred=None):
     return "cc"
 
 
+def collect_link_libs(prog):
+    """Thư viện khai báo bằng '@link("x")' trong nguồn.
+
+    Đặt ràng buộc thư viện NGAY CẠNH khai báo extern giúp một module tự mô tả
+    phụ thuộc của nó — người dùng module không phải nhớ thêm cờ khi build."""
+    libs, dirs = [], []
+    for it in getattr(prog, "items", []):
+        for a in (getattr(it, "attrs", None) or []):
+            if getattr(a, "name", "") != "link":
+                continue
+            av = (getattr(a, "args", None) or [None])[0]
+            v = getattr(av, "value", None)
+            if not isinstance(v, str) or not v:
+                continue
+            # '@link("dir:name")' cho phép kèm thư mục tìm kiếm.
+            if ":" in v:
+                d, _, nm = v.partition(":")
+                if d and d not in dirs:
+                    dirs.append(d)
+                v = nm
+            if v and v not in libs:
+                libs.append(v)
+    return libs, dirs
+
+
+def link_flags(args, prog=None):
+    """Cờ '-L'/'-l' gộp từ dòng lệnh và '@link' trong nguồn."""
+    libs = list(getattr(args, "lib", []) or [])
+    dirs = list(getattr(args, "libdir", []) or [])
+    if prog is not None:
+        plibs, pdirs = collect_link_libs(prog)
+        for d in pdirs:
+            if d not in dirs:
+                dirs.append(d)
+        for l in plibs:
+            if l not in libs:
+                libs.append(l)
+    return [f"-L{d}" for d in dirs] + [f"-l{l}" for l in libs]
+
+
 def _cc_common_flags(args):
     """Cờ cc dùng chung cho mọi chế độ biên dịch native (exe/obj/asm)."""
     flags = [f"-O{args.O}", "-I", RUNTIME_DIR, "-std=gnu11", "-w"]
@@ -461,7 +508,10 @@ def build_native(args, extra, result):
     cmd += extra
     if mode == "exe":
         # Liên kết: freestanding bỏ libc; hosted cần libm cho lib/std (toán f64).
-        cmd += ["-nostdlib"] if args.freestanding else ["-lm"]
+        # '-ldl' cho FFI động (dlopen). glibc mới đã gộp vào libc nên cờ này
+        # vô hại ở đó; các hệ khác vẫn cần.
+        cmd += (["-nostdlib"] if args.freestanding else ["-lm", "-ldl"])
+        cmd += link_flags(args, result.get("prog"))
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     finally:
@@ -547,6 +597,13 @@ def main(argv):
                          + " (mặc định: máy hiện tại)")
     ap.add_argument("--list-targets", action="store_true",
                     help="liệt kê target và năng lực phần cứng của chúng")
+    ap.add_argument("-l", "--lib", action="append", default=[],
+                    metavar="TÊN",
+                    help="liên kết thư viện ngoài (như '-lm' của cc); lặp lại "
+                         "được. Cũng có thể khai báo bằng '@link(\"m\")'")
+    ap.add_argument("-L", "--libdir", action="append", default=[],
+                    metavar="THƯ_MỤC",
+                    help="thư mục tìm thư viện khi liên kết")
     ap.add_argument("--opt-ir", action="store_true",
                     help="chạy các pass tối ưu trên G-IR trước khi sinh mã")
     ap.add_argument("--interp", action="store_true",

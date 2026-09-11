@@ -352,6 +352,25 @@ The memory model itself is written down in `docs/MEMORY.md`, including what G
 does **not** guarantee (use-after-free, double-free, leaks, aliasing). Keep that
 list honest: it is what stops users assuming Rust-level safety.
 
+### FFI, and where the G-Core boundary sits
+
+Three mechanisms, all over the C ABI: `extern fn` + `-l`, `@link`/`@symbol`
+attributes, and runtime `dl_open`/`dl_sym`. `@symbol` must be honoured at
+*every* use site, not just the prototype — it is applied in `irgen` (so all
+backends inherit it) and in `codegen.sym_aliases` for the AST backend.
+
+`tools/gbind.py` generates bindings from C headers and lives **outside the
+compiler on purpose**. That is the G-Core/G-Ext line: put a C binding generator
+in the core and tomorrow you owe Python, CUDA and JNI generators too. As an
+external tool it only uses what the compiler already exposes, so a generator for
+another ecosystem needs zero compiler changes.
+
+gbind deliberately skips anything it cannot map with confidence (varargs,
+function-pointer parameters, unmapped types) and records why. A *wrong* binding
+corrupts the ABI at runtime far from the cause; a *missing* one is a compile
+error. `tests/ffi/run_ffi.sh` asserts the skipping, so "helpfully" emitting
+varargs bindings would fail the suite.
+
 ### LLVM backend
 
 `compiler/backend_llvm.py` emits **text** LLVM IR (not the builder API) so

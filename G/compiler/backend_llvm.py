@@ -736,6 +736,10 @@ _RUNTIME_INTRINSICS = {
     "memmove": ("memmove", "ptr"),
     "memset": ("memset", "ptr"),
     "memcmp": ("memcmp", "int"),
+    "dl_open": ("g_dl_open_ext", "ptr"),
+    "dl_sym": ("g_dl_sym_ext", "ptr"),
+    "dl_close": ("g_dl_close_ext", "int"),
+    "dl_error": ("g_dl_error_ext", "ptr"),
 }
 
 register(LLVMBackend)

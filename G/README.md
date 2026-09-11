@@ -566,6 +566,42 @@ let x = a +
 
 Một nền tảng vững để mở rộng tiếp. 🚀
 
+## Mới trong 0.26.0 — 🔌 FFI phổ quát & G-Ext
+
+Xem [`docs/FFI.md`](docs/FFI.md).
+
+- 🔌 **Ba cơ chế FFI**, đều qua **C ABI** (mẫu số chung của hầu hết ngôn ngữ):
+  - `extern fn` + `-L/-l` — thư viện luôn có mặt;
+  - **`@link("m")`** đặt phụ thuộc **ngay cạnh khai báo**, kèm dạng
+    `@link("thư_mục:tên")`; người dùng module không phải nhớ thêm cờ;
+  - **`@symbol("tên_thật")`** khi ký hiệu trong thư viện khác tên hàm G;
+  - **`dl_open`/`dl_sym`/`dl_close`/`dl_error`** — nạp thư viện **lúc chạy**
+    (plugin, thư viện tuỳ chọn).
+  ```g
+  @link("m") extern fn sqrt(x: f64) -> f64
+  let h = dl_open("./libplugin.so")
+  let f = dl_sym(h, "process") as fn(int) -> int
+  ```
+- ⚠️ **FFI động là ranh giới KHÔNG AN TOÀN** và được ghi rõ như vậy: G không
+  kiểm được chữ ký của ký hiệu nạp lúc chạy. Có thư viện lúc liên kết thì
+  **hãy dùng `extern fn`** — nó được kiểm kiểu.
+- 🧰 **`tools/gbind.py`** — sinh `extern fn` từ header C:
+  ```sh
+  python3 tools/gbind.py /usr/include/zlib.h --link z -o zlib.g
+  ```
+  Nó **cố ý bỏ sót**: hàm biến-đối-số, con trỏ hàm trong tham số, kiểu chưa ánh
+  xạ — kèm lý do trong chú thích. *Một binding SAI nguy hiểm hơn nhiều so với
+  một binding thiếu.*
+- 🧩 **Ranh giới G-Core / G-Ext**: bộ sinh binding nằm **NGOÀI** compiler. Nếu
+  nhét binding C vào core thì mai phải nhét Python, CUDA, JNI… Ở dạng công cụ
+  ngoài, nó chỉ dùng thứ compiler đã công khai, nên **bộ sinh cho hệ sinh thái
+  khác viết được mà không đụng compiler**.
+- 🧪 **`tests/ffi/run_ffi.sh`**: dựng thư viện C thật, gọi bằng **cả ba cơ chế
+  trên cả ba backend** (c, c-ir, llvm) — **11/11 pass**; có cả khẳng định gbind
+  *bỏ qua* hàm biến-đối-số.
+- 🧪 **Bộ test: 248 ca** + backend-diff 106 + llvm-diff 44 + opt-diff 83
+  + FFI 11 + target 21 + panic 4 + IR 102 + IR-unit 25 + layout 11.
+
 ## Mới trong 0.25.0 — 🦙 Backend LLVM
 
 - 🦙 **`--backend=llvm`**: G → G-IR → **LLVM IR** → object → chương trình chạy

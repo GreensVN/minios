@@ -591,6 +591,52 @@ static inline double g_clock_secs(void) {
 
 #endif /* G_FREESTANDING */
 
+/* ================= FFI ĐỘNG (nạp thư viện lúc CHẠY) ================
+ * 'extern fn' là FFI TĨNH: ký hiệu phải có lúc liên kết. Đôi khi không đủ —
+ * plugin, thư viện tuỳ chọn, hay ABI chỉ biết lúc chạy. Bộ này bọc dlopen/dlsym.
+ *
+ * CỐ Ý tối giản và KHÔNG an toàn kiểu: G không thể kiểm chữ ký của một ký hiệu
+ * nạp lúc chạy, nên người dùng phải tự ép con trỏ hàm cho đúng. Đây là ranh
+ * giới 'unsafe' — được ghi rõ trong docs/FFI.md thay vì giả vờ an toàn.
+ *
+ * Chỉ có ở chế độ HOSTED: freestanding không có bộ nạp động. */
+#ifndef G_FREESTANDING
+static inline void* g_dl_open(const char* path) {
+#ifdef _WIN32
+    (void)path; return NULL;      /* Windows: cần LoadLibraryA, chưa hỗ trợ */
+#else
+    extern void* dlopen(const char*, int);
+    /* 2 = RTLD_NOW, 256 = RTLD_GLOBAL trên glibc/musl/macOS */
+    return dlopen(path, 2);
+#endif
+}
+static inline void* g_dl_sym(void* h, const char* name) {
+#ifdef _WIN32
+    (void)h; (void)name; return NULL;
+#else
+    extern void* dlsym(void*, const char*);
+    return dlsym(h, name);
+#endif
+}
+static inline int g_dl_close(void* h) {
+#ifdef _WIN32
+    (void)h; return 0;
+#else
+    extern int dlclose(void*);
+    return h ? dlclose(h) : 0;
+#endif
+}
+static inline const char* g_dl_error(void) {
+#ifdef _WIN32
+    return "FFI động chưa hỗ trợ trên Windows";
+#else
+    extern char* dlerror(void);
+    const char* e = dlerror();
+    return e ? e : "";
+#endif
+}
+#endif /* !G_FREESTANDING */
+
 /* ================= ALLOCATOR — bảng hàm thay thế được ==============
  * 'alloc/free/realloc' của G đi qua struct này thay vì gọi thẳng malloc, nên
  * cùng một đoạn mã chạy được ở hosted (libc), kernel (arena tự cấp), và
