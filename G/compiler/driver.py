@@ -4,6 +4,7 @@ G Language - Driver: điều phối toàn bộ pipeline biên dịch.
 """
 
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from .checker import Checker, CheckError, CheckErrors
 from .codegen import Codegen, CodegenError
 from . import ast_nodes as A
 
-VERSION = "0.7.0"
+VERSION = "0.26.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -35,9 +36,11 @@ class GError(Exception):
 
 
 # ---------- chẩn đoán lỗi đẹp ----------
-def render_diag(filename, source, line, col, msg, phase):
+def render_diag(filename, source, line, col, msg, phase, kind="lỗi"):
     RED = "\033[1;31m"; BOLD = "\033[1m"; CYAN = "\033[36m"; RST = "\033[0m"
-    head = f"{BOLD}{filename}:{line}:{col}:{RST} {RED}lỗi {phase}:{RST} {msg}"
+    if kind != "lỗi":
+        RED = "\033[1;33m"        # cảnh báo: vàng
+    head = f"{BOLD}{filename}:{line}:{col}:{RST} {RED}{kind} {phase}:{RST} {msg}"
     lines = (source or "").splitlines()
     body = ""
     if 1 <= line <= len(lines):
@@ -86,9 +89,11 @@ def load_program(path, sources, visited):
     prog, _ = parse_file(path, sources)
     items = []
     for imp in prog.imports:
+        # (tên, dòng, cột) — dạng chuỗi trần vẫn được chấp nhận để tương thích.
+        imp, iline, icol = imp if isinstance(imp, tuple) else (imp, 1, 1)
         ipath = resolve_import(imp, path, sources)
         if ipath is None:
-            raise GError(path, sources[ap][1], 1, 1,
+            raise GError(path, sources[ap][1], iline, icol,
                          f"không tìm thấy module để import: '{imp}'", "module")
         items.extend(load_program(ipath, sources, visited))
     # Gắn file nguồn vào từng khai báo để chẩn đoán đa module đúng file/dòng.
@@ -112,7 +117,8 @@ def has_main(prog):
                for it in prog.items)
 
 
-def compile_to_c(main_path):
+def compile_to_c(main_path, freestanding=False, no_warnings=False,
+                 warnings_as_errors=False, target=None):
     """Trả về dict {c, has_main}. Báo lỗi đúng file nguồn (kể cả module import)."""
     sources = {}
     main_ap = os.path.abspath(main_path)
@@ -121,8 +127,9 @@ def compile_to_c(main_path):
     def _to_gerror(e):
         fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
         return GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
+    ck = Checker(prog, freestanding=freestanding, target=target)
     try:
-        Checker(prog).check()
+        ck.check()
     except CheckErrors as e:
         errs = [_to_gerror(x) for x in e.errors]
         first = errs[0]
@@ -130,11 +137,223 @@ def compile_to_c(main_path):
         raise first
     except CheckError as e:
         raise _to_gerror(e)
+    # Cảnh báo (không chặn biên dịch): in sau khi checker chạy xong sạch.
+    if ck.warnings and not no_warnings:
+        for msg, wline, wcol, wfile in ck.warnings:
+            wpath, wsrc = sources.get(wfile or main_ap, (main_path, main_src))
+            kind = "lỗi" if warnings_as_errors else "cảnh báo"
+            print(render_diag(wpath, wsrc, wline, wcol, msg, "kiểu/ngữ nghĩa",
+                              kind=kind), file=sys.stderr)
+        if warnings_as_errors:
+            n = len(ck.warnings)
+            print(f"gc: \033[1;31m{n} cảnh báo bị coi là lỗi\033[0m (-W)",
+                  file=sys.stderr)
+            sys.exit(1)
     try:
         c_code = Codegen(prog).generate()
     except CodegenError as e:
         raise GError(main_path, main_src, 0, 0, str(e), "sinh mã")
-    return {"c": c_code, "has_main": has_main(prog)}
+    return {"c": c_code, "has_main": has_main(prog), "prog": prog}
+
+
+def build_ir(main_path, freestanding=False, target=None, optimize=False):
+    """Chạy tới hết checker rồi HẠ sang G-IR. Trả về (ir.Module, prog).
+
+    Tách riêng khỏi compile_to_c: đường sinh mã C mặc định KHÔNG đi qua IR trong
+    giai đoạn chuyển đổi (xem ARCHITECTURE.md §3), nên hai đường độc lập nhau.
+    """
+    from .irgen import IRGen, IRGenError
+    sources = {}
+    main_ap = os.path.abspath(main_path)
+    prog = build_program(main_path, sources)
+    main_src = sources[main_ap][1]
+
+    def _to_gerror(e):
+        fpath, fsrc = sources.get(e.file or main_ap, (main_path, main_src))
+        return GError(fpath, fsrc, e.line, e.col, e.msg, "kiểu/ngữ nghĩa")
+
+    ck = Checker(prog, freestanding=freestanding, target=target)
+    try:
+        ck.check()
+    except CheckErrors as e:
+        errs = [_to_gerror(x) for x in e.errors]
+        first = errs[0]
+        first.more = errs[1:]
+        raise first
+    except CheckError as e:
+        raise _to_gerror(e)
+
+    try:
+        mod = IRGen(prog, module_name=os.path.basename(main_path),
+                    enum_values=ck.enums, target=ck.target).generate()
+    except IRGenError as e:
+        raise GError(main_path, main_src, 0, 0, str(e), "hạ mã IR")
+    if optimize:
+        from . import iropt
+        iropt.optimize(mod)
+    return mod, prog
+
+
+def _target_names():
+    from . import target as _t
+    return _t.available()
+
+
+def list_targets():
+    from . import target as _t
+    cur = _t.default_target()
+    print("Target khả dụng (★ = mặc định trên máy này):")
+    for name in _t.available():
+        tg = _t.TARGETS[name]
+        mark = "★" if tg.name == cur.name else " "
+        caps = ", ".join(sorted(tg.caps)) or "(không có năng lực phần cứng thô)"
+        print(f" {mark} {name:<16} {tg.arch:<9} {tg.ptr_bits}-bit  {caps}")
+    return 0
+
+
+def _backend_names():
+    from . import backend as B
+    return B.available()
+
+
+def build_llvm(args, extra, llvm_ir, prog, tgt):
+    """Dịch LLVM IR -> object -> chương trình chạy được.
+
+    Runtime của G là header C toàn 'static inline', nên object LLVM cần một
+    shim C nhỏ cung cấp các ký hiệu mà mã sinh ra tham chiếu (g_panic,
+    g_bounds_fail, g_get_stream...)."""
+    if args.emit_c or args.output and args.output.endswith(".ll"):
+        out = args.output or "out.ll"
+        with open(out, "w") as f:
+            f.write(llvm_ir)
+        print(f"gc: đã ghi LLVM IR vào {out}")
+        return 0
+    try:
+        import llvmlite.binding as llvm
+    except ImportError:
+        print("gc: \033[1;31mlỗi\033[0m: backend llvm cần gói 'llvmlite' "
+              "(pip install llvmlite)", file=sys.stderr)
+        return 1
+    llvm.initialize_native_target()
+    llvm.initialize_native_asmprinter()
+    try:
+        mod = llvm.parse_assembly(llvm_ir)
+        mod.verify()
+    except RuntimeError as e:
+        print("gc: \033[1;31mLLVM IR không hợp lệ\033[0m (lỗi nội bộ của G):",
+              file=sys.stderr)
+        print(str(e)[:2000], file=sys.stderr)
+        return 1
+    # reloc='pic' + codemodel='default': object mặc định của llvmlite dùng
+    # relocation tuyệt đối, khiến linker cảnh báo/ từ chối khi tạo PIE.
+    tm = llvm.Target.from_default_triple().create_target_machine(
+        reloc="pic", codemodel="default")
+    with tempfile.TemporaryDirectory() as d:
+        obj = os.path.join(d, "g.o")
+        with open(obj, "wb") as f:
+            f.write(tm.emit_object(mod))
+        if args.emit_asm:
+            out = args.output or "out.s"
+            with open(out, "w") as f:
+                f.write(tm.emit_assembly(mod))
+            print(f"gc: đã xuất assembly -> {out}")
+            return 0
+        shim = os.path.join(d, "shim.c")
+        with open(shim, "w") as f:
+            f.write(_llvm_shim())
+        if args.compile_obj:
+            out = args.output or "out.o"
+            shutil.copy(obj, out)
+            print(f"gc: đã tạo đối tượng -> {out}")
+            return 0
+        out = args.output or "a.out"
+        cc = find_cc(args.cc)
+        cmd = ([cc, obj, shim, "-I", RUNTIME_DIR, "-o", out, "-lm", "-ldl",
+                "-w"]
+               + link_flags(args, prog))
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print("gc: \033[1;31mlỗi liên kết\033[0m (backend llvm):",
+                  file=sys.stderr)
+            print(r.stderr[:2000], file=sys.stderr)
+            return 1
+        print(f"gc: \033[32mđã biên dịch\033[0m -> {out}")
+        if args.run:
+            return subprocess.run([os.path.abspath(out)]).returncode
+    return 0
+
+
+#: Shim C cho backend LLVM: runtime của G là header 'static inline' nên object
+#: LLVM không thấy được. Vài hàm ngoài-dòng ở đây là đủ.
+def _llvm_shim() -> str:
+    """Shim C cho backend LLVM.
+
+    Runtime của G là header toàn 'static inline' nên object LLVM KHÔNG thấy các
+    ký hiệu đó. Thay vì chép tay danh sách hàm (chắc chắn sẽ trôi lệch mỗi lần
+    runtime đổi), ta biên dịch CHÍNH header ấy ở chế độ 'G_RUNTIME_OUTLINE' —
+    macro G_INL khi đó rỗng nên mọi hàm được phát ra ngoài-dòng. Một nguồn duy
+    nhất, không có danh sách song song.
+    """
+    return """
+#define G_RUNTIME_OUTLINE 1
+#include "g_runtime.h"
+/* Vài thứ mã sinh ra gọi bằng tên riêng (hàm _Noreturn không bọc trực tiếp
+   được, và stdout/stderr là macro nên phải lấy qua hàm). */
+void* g_get_stream(int which) { return which ? (void*)stderr : (void*)stdout; }
+void g_panic_ext(const char* m) { g_panic(m); }
+void g_bounds_fail_ext(long long i, long long n, const char* w)
+    { g_bounds_fail(i, n, w); }
+void g_div_zero_fail_ext(const char* w) { g_div_zero_fail(w); }
+void* g_dl_open_ext(const char* p) { return g_dl_open(p); }
+void* g_dl_sym_ext(void* h, const char* n) { return g_dl_sym(h, n); }
+int   g_dl_close_ext(void* h) { return g_dl_close(h); }
+const char* g_dl_error_ext(void) { return g_dl_error(); }
+int g_ll_popcount(unsigned long long v) { return __builtin_popcountll(v); }
+int g_ll_clz(unsigned long long v) { return v ? __builtin_clzll(v) : 64; }
+int g_ll_ctz(unsigned long long v) { return v ? __builtin_ctzll(v) : 64; }
+unsigned long long g_ll_bswap(unsigned long long v) { return __builtin_bswap64(v); }
+unsigned long long g_ll_rotl(unsigned long long v, unsigned n) { return g_rotl64(v, n); }
+unsigned long long g_ll_rotr(unsigned long long v, unsigned n) { return g_rotr64(v, n); }
+void* g_ll_calloc(unsigned long long n) { return calloc((size_t)n, 1); }
+void  g_ll_free(void* p) { free(p); }
+"""
+
+
+def run_interp(main_path, freestanding=False, target=None, opt=False):
+    """Chạy chương trình bằng trình thông dịch IR (hiện thực THAM CHIẾU)."""
+    from . import interp as _in
+    mod, _ = build_ir(main_path, freestanding, target, opt)
+    try:
+        return _in.run(mod)
+    except _in.GPanic as e:
+        print(f"\033[1;31mG panic:\033[0m {e.msg}", file=sys.stderr)
+        return 101
+    except _in.InterpError as e:
+        print(f"gc: \033[1;33mthông dịch:\033[0m {e}", file=sys.stderr)
+        return 3
+
+
+def emit_ir(main_path, freestanding=False, target=None, opt=False):
+    mod, _ = build_ir(main_path, freestanding, target, opt)
+    print(str(mod))
+    return 0
+
+
+def verify_ir(main_path, freestanding=False, target=None, opt=False):
+    from . import irverify
+    mod, _ = build_ir(main_path, freestanding, target, opt)
+    errs = irverify.verify(mod)
+    if errs:
+        for e in errs[:20]:
+            print(f"gc: \033[1;31mIR không hợp lệ:\033[0m {e}", file=sys.stderr)
+        if len(errs) > 20:
+            print(f"gc: ... và {len(errs) - 20} lỗi IR nữa", file=sys.stderr)
+        return 1
+    nf = len(mod.funcs)
+    nb = sum(len(f.blocks) for f in mod.funcs)
+    ni = sum(len(b.instrs) for f in mod.funcs for b in f.blocks)
+    print(f"gc: \033[32mIR hợp lệ\033[0m — {nf} hàm, {nb} block, {ni} lệnh")
+    return 0
 
 
 def dump_tokens(main_path):
@@ -193,15 +412,65 @@ def find_cc(preferred=None):
     return "cc"
 
 
+def collect_link_libs(prog):
+    """Thư viện khai báo bằng '@link("x")' trong nguồn.
+
+    Đặt ràng buộc thư viện NGAY CẠNH khai báo extern giúp một module tự mô tả
+    phụ thuộc của nó — người dùng module không phải nhớ thêm cờ khi build."""
+    libs, dirs = [], []
+    for it in getattr(prog, "items", []):
+        for a in (getattr(it, "attrs", None) or []):
+            if getattr(a, "name", "") != "link":
+                continue
+            av = (getattr(a, "args", None) or [None])[0]
+            v = getattr(av, "value", None)
+            if not isinstance(v, str) or not v:
+                continue
+            # '@link("dir:name")' cho phép kèm thư mục tìm kiếm.
+            if ":" in v:
+                d, _, nm = v.partition(":")
+                if d and d not in dirs:
+                    dirs.append(d)
+                v = nm
+            if v and v not in libs:
+                libs.append(v)
+    return libs, dirs
+
+
+def link_flags(args, prog=None):
+    """Cờ '-L'/'-l' gộp từ dòng lệnh và '@link' trong nguồn."""
+    libs = list(getattr(args, "lib", []) or [])
+    dirs = list(getattr(args, "libdir", []) or [])
+    if prog is not None:
+        plibs, pdirs = collect_link_libs(prog)
+        for d in pdirs:
+            if d not in dirs:
+                dirs.append(d)
+        for l in plibs:
+            if l not in libs:
+                libs.append(l)
+    return [f"-L{d}" for d in dirs] + [f"-l{l}" for l in libs]
+
+
 def _cc_common_flags(args):
     """Cờ cc dùng chung cho mọi chế độ biên dịch native (exe/obj/asm)."""
     flags = [f"-O{args.O}", "-I", RUNTIME_DIR, "-std=gnu11", "-w"]
+    if args.no_checks:
+        flags.append("-DG_NO_CHECKS")   # tắt kiểm tra biên mảng/chia 0 lúc chạy
     if args.freestanding:
         # Không phụ thuộc libc/môi trường lưu trữ — dùng cho kernel/firmware.
         # Tắt bảo vệ stack & PIC vì kernel tự quản lý mọi thứ; bật runtime
         # freestanding (memcpy/memset tự cài, panic = dừng CPU).
         flags += ["-ffreestanding", "-fno-stack-protector", "-fno-pic",
                   "-DG_FREESTANDING"]
+    # Cross-compile: chỉ thêm '--target=' khi target KHÁC máy hiện tại (gcc bản
+    # thường không hiểu cờ này; clang thì có). Người dùng vẫn có thể chỉ định
+    # trình biên dịch chéo qua '--cc'.
+    tgt = getattr(args, "_target", None)
+    if tgt is not None:
+        from . import target as _t
+        if tgt.name != _t.default_target().name and tgt.triple:
+            flags.append(f"--target={tgt.triple}")
     return flags
 
 
@@ -246,7 +515,10 @@ def build_native(args, extra, result):
     cmd += extra
     if mode == "exe":
         # Liên kết: freestanding bỏ libc; hosted cần libm cho lib/std (toán f64).
-        cmd += ["-nostdlib"] if args.freestanding else ["-lm"]
+        # '-ldl' cho FFI động (dlopen). glibc mới đã gộp vào libc nên cờ này
+        # vô hại ở đó; các hệ khác vẫn cần.
+        cmd += (["-nostdlib"] if args.freestanding else ["-lm", "-ldl"])
+        cmd += link_flags(args, result.get("prog"))
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     finally:
@@ -254,8 +526,33 @@ def build_native(args, extra, result):
             os.unlink(c_path)
 
     if proc.returncode != 0:
-        print("gc: lỗi biên dịch C backend (đây thường là lỗi nội bộ của G):",
-              file=sys.stderr)
+        # 'extern fn' khai báo hàm libc với chữ ký lệch header (vd 'srand(int)'
+        # thay vì 'u32', 'puts(*char)' thay vì 'str') -> gcc 'conflicting types'.
+        # Đây là lỗi của mã G, không phải lỗi nội bộ — giải thích cho rõ.
+        m = re.search(r"conflicting types for [‘'](\w+)[’']", proc.stderr)
+        if m:
+            print(f"gc: \033[31mlỗi\033[0m: 'extern fn {m.group(1)}' có chữ ký khác "
+                  f"với khai báo trong header thư viện C — sửa kiểu tham số/kiểu "
+                  f"trả về cho khớp (xem 'note: previous declaration' bên dưới; "
+                  f"'str' = const char*, 'u32' = unsigned int, 'usize' = size_t):",
+                  file=sys.stderr)
+        elif ("--target=" in proc.stderr
+              or "unrecognized command-line option" in proc.stderr):
+            # Cross-compile thất bại vì TOOLCHAIN, không phải lỗi của G.
+            tg = getattr(args, "_target", None)
+            triple = getattr(tg, "triple", "?") if tg else "?"
+            print(f"gc: \033[31mlỗi\033[0m: trình biên dịch C '{cc}' không "
+                  f"biên dịch chéo được sang '{tg}'.\n"
+                  f"    Cần một toolchain cho {triple}, ví dụ:\n"
+                  f"      gc ... --target={tg} --cc={triple}-gcc\n"
+                  f"      gc ... --target={tg} --cc=clang\n"
+                  f"    (gcc bản thường không hiểu '--target='; clang thì có.)",
+                  file=sys.stderr)
+            print(proc.stderr, file=sys.stderr)
+            return 1
+        else:
+            print("gc: lỗi biên dịch C backend (đây thường là lỗi nội bộ của G):",
+                  file=sys.stderr)
         print(proc.stderr, file=sys.stderr)
         return 1
 
@@ -276,7 +573,8 @@ def build_native(args, extra, result):
 def main(argv):
     import argparse
     ap = argparse.ArgumentParser(prog="gc", description="Trình biên dịch ngôn ngữ G")
-    ap.add_argument("input", help="file nguồn .g")
+    # nargs="?" để '--list-targets' / '--version' dùng được mà không cần file.
+    ap.add_argument("input", nargs="?", help="file nguồn .g")
     ap.add_argument("-o", "--output", help="tên file thực thi đầu ra")
     ap.add_argument("--emit-c", action="store_true", help="xuất mã C, không biên dịch")
     ap.add_argument("--keep-c", action="store_true", help="giữ lại file .c trung gian")
@@ -285,6 +583,10 @@ def main(argv):
     ap.add_argument("--tokens", action="store_true", help="in danh sách token")
     ap.add_argument("--ast", action="store_true", help="in cây cú pháp AST")
     ap.add_argument("--cc", default=None, help="trình biên dịch C (mặc định tự dò)")
+    ap.add_argument("-w", "--no-warnings", action="store_true",
+                    help="tắt cảnh báo (vd biến khai báo mà không dùng)")
+    ap.add_argument("-W", "--warnings-as-errors", action="store_true",
+                    help="coi cảnh báo là lỗi (dừng biên dịch)")
     ap.add_argument("--freestanding", action="store_true",
                     help="chế độ không libc (kernel/firmware): -ffreestanding "
                          "-nostdlib, không cần 'main', runtime tự cài memcpy/panic")
@@ -294,10 +596,53 @@ def main(argv):
     ap.add_argument("-S", "--emit-asm", action="store_true",
                     help="xuất mã assembly .s của chương trình")
     ap.add_argument("-O", default="2", help="mức tối ưu (0,1,2,3,s,g), mặc định 2")
+    ap.add_argument("--no-checks", action="store_true",
+                    help="tắt kiểm tra lúc chạy (biên mảng tĩnh, chia cho 0) — "
+                         "nhanh hơn, nhưng lỗi trở thành hành vi không xác định")
+    ap.add_argument("--target", default=None,
+                    help="kiến trúc đích: " + ", ".join(_target_names())
+                         + " (mặc định: máy hiện tại)")
+    ap.add_argument("--list-targets", action="store_true",
+                    help="liệt kê target và năng lực phần cứng của chúng")
+    ap.add_argument("-l", "--lib", action="append", default=[],
+                    metavar="TÊN",
+                    help="liên kết thư viện ngoài (như '-lm' của cc); lặp lại "
+                         "được. Cũng có thể khai báo bằng '@link(\"m\")'")
+    ap.add_argument("-L", "--libdir", action="append", default=[],
+                    metavar="THƯ_MỤC",
+                    help="thư mục tìm thư viện khi liên kết")
+    ap.add_argument("--opt-ir", action="store_true",
+                    help="chạy các pass tối ưu trên G-IR trước khi sinh mã")
+    ap.add_argument("--interp", action="store_true",
+                    help="chạy chương trình bằng trình thông dịch G-IR "
+                         "(hiện thực tham chiếu, không qua C)")
+    ap.add_argument("--emit-ir", action="store_true",
+                    help="xuất G-IR dạng văn bản (biểu diễn trung gian)")
+    ap.add_argument("--verify-ir", action="store_true",
+                    help="hạ sang G-IR rồi chạy trình kiểm bất biến IR")
+    ap.add_argument("--backend", default="c",
+                    help="backend sinh mã: " + ", ".join(_backend_names()))
     ap.add_argument("--debug", action="store_true",
                     help="in traceback đầy đủ khi gặp lỗi nội bộ")
     ap.add_argument("--version", action="version", version=f"gc (ngôn ngữ G) {VERSION}")
     args, extra = ap.parse_known_args(argv)
+
+    if args.list_targets:
+        return list_targets()
+
+    if not args.input:
+        ap.print_usage(sys.stderr)
+        print("gc: thiếu file nguồn .g", file=sys.stderr)
+        return 1
+
+    # Phân giải target một lần rồi truyền xuống checker/backend.
+    from . import target as _t
+    try:
+        tgt = _t.get(args.target)
+    except KeyError:
+        print(f"gc: target không tồn tại: '{args.target}' — có: "
+              f"{', '.join(_t.available())}", file=sys.stderr)
+        return 1
 
     if not os.path.exists(args.input):
         print(f"gc: không tìm thấy file: {args.input}", file=sys.stderr)
@@ -314,11 +659,59 @@ def main(argv):
         if args.ast:
             dump_ast(args.input)
             return 0
+        # Backend phải tồn tại — trước đây '--backend=nope' bị bỏ qua âm thầm.
+        from . import backend as _B
+        try:
+            _B.get(args.backend)
+        except _B.BackendError as e:
+            print(f"gc: {e}", file=sys.stderr)
+            return 1
+        if args.backend == "ir":
+            return emit_ir(args.input, args.freestanding, tgt, args.opt_ir)
+        if _B.get(args.backend).consumes == "ir":
+            # Backend đọc-từ-IR: chạy checker -> hạ IR -> verify -> sinh mã.
+            from . import irverify
+            mod, prog = build_ir(args.input, args.freestanding, tgt,
+                                 args.opt_ir)
+            errs = irverify.verify(mod)
+            if errs:
+                print(f"gc: \033[1;31mIR không hợp lệ:\033[0m {errs[0]}",
+                      file=sys.stderr)
+                return 1
+            try:
+                code = _B.get(args.backend).emit(mod)
+            except _B.BackendError as e:
+                print(f"gc: \033[1;31mlỗi backend {args.backend}:\033[0m {e}",
+                      file=sys.stderr)
+                return 1
+            # Backend LLVM: mã sinh ra là LLVM IR, không phải C. Dịch sang
+            # object bằng llvmlite rồi để linker hệ thống ghép với runtime.
+            if args.backend == "llvm":
+                return build_llvm(args, extra, code, prog, tgt)
+            result = {"c": code, "has_main": has_main(prog), "prog": prog}
+            args._target = tgt
+            if args.emit_c:
+                if args.output:
+                    with open(args.output, "w") as f:
+                        f.write(code)
+                    print(f"gc: đã ghi mã C vào {args.output}")
+                else:
+                    print(code)
+                return 0
+            return build_native(args, extra, result)
+        if args.interp:
+            return run_interp(args.input, args.freestanding, tgt, args.opt_ir)
+        if args.emit_ir:
+            return emit_ir(args.input, args.freestanding, tgt, args.opt_ir)
+        if args.verify_ir:
+            return verify_ir(args.input, args.freestanding, tgt, args.opt_ir)
         if args.check:
-            compile_to_c(args.input)  # chạy tới hết checker
+            compile_to_c(args.input, args.freestanding, args.no_warnings,
+                         args.warnings_as_errors, tgt)  # chạy tới hết checker
             print(f"gc: \033[32mOK\033[0m — không phát hiện lỗi kiểu trong {args.input}")
             return 0
-        result = compile_to_c(args.input)
+        result = compile_to_c(args.input, args.freestanding, args.no_warnings,
+                              args.warnings_as_errors, tgt)
     except GError as e:
         print(render_diag(e.filename, e.source, e.line, e.col, e.msg, e.phase),
               file=sys.stderr)
@@ -353,4 +746,5 @@ def main(argv):
             print(result["c"])
         return 0
 
+    args._target = tgt
     return build_native(args, extra, result)

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: ràng buộc output asm "r" phải bắt đầu bằng '=' (ghi) hoặc '+' (đọc-ghi)

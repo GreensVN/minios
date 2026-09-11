@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không suy được kiểu cho T của 'mk' — chỉ định tường minh: 'mk<T>(...)'

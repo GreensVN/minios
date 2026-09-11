@@ -149,6 +149,468 @@ subset (let/assign/if/while/for/return + arithmetic, with a step budget). It fol
 sizes (`[CAP*2+1]int`), enum values, and `sizeof`/`alignof` of types into compile-time
 constants. Anything outside the supported subset returns `None` (treated as non-constant).
 
+### Runtime checks
+
+Codegen wraps dynamic indexing of **static arrays** in `g_idx(i, n, "file:line:col")` and
+integer `/`, `%`, `/=`, `%=` with a non-constant divisor in `g_chk_div(...)` (both macros in
+`runtime/g_runtime.h`; they panic with a location). Constant indices/divisors are checked
+statically by the checker instead (`_is_const_expr` in codegen decides). `--no-checks` defines
+`G_NO_CHECKS` which turns both macros into identity. Pointers/`[]T` carry no length and are
+never checked. In freestanding mode the failure path halts the CPU.
+
+### Static checks that guard the C backend
+
+The checker deliberately rejects things C would accept (or only warn about) because the
+generated C would be wrong or produce confusing gcc errors. Notable ones, so you don't
+"fix" them as false positives: global initializers may only reference globals declared
+*earlier* (`_check_global_init_order` — runtime ctor runs in declaration order); duplicate
+`extern`/definition with a differing signature (`_sig_text` compare in `collect_funcs`);
+`extern fn` names in `_RUNTIME_DEFINED` (codegen) get **no** prototype because
+`g_runtime.h`/libc already defines them; writing through `str` (`const char*`);
+`return &local` / `return &local.field` / `return &local_arr[i]` (`_check_return_local_addr`);
+`bool` only compares with `bool`; format keys must be in `_FMT_KEYS` and flags must match
+`_FMT_FLAGS_RE`; `match` on `bool` must be exhaustive and constant patterns covered by an
+earlier range arm are errors; `@naked` bodies must be pure `asm { }` with no return type.
+Array literals in expression position (call args, `[1,2][i]`) lower to C99 compound
+literals; inside struct literals / `let` / globals they stay as bare `{ ... }` initializers.
+
+### Expression forms lowered in the parser/codegen
+
+`if`/`match` in *expression* position are separate from their statement forms.
+`if c { a } else { b }` is desugared by the parser straight into `A.Ternary`
+(so it reuses all `?:` checking/codegen); `match` becomes `A.MatchExpr`, checked
+by `infer_match_expr` (which sets `is_expr` and reuses `check_match` for
+exhaustiveness/dead-arm/binding checks) and emitted by `gen_match_expr` as a GNU
+statement-expression. Both require every branch to yield a value: `else` is
+mandatory and `match` must be exhaustive. `[v; N]` array literals carry a
+`repeat` field that the *checker* expands into N copies of the element before
+any inference runs, so everything downstream sees a plain `ArrayLit`.
+
+### `defer` and the return value
+
+`gen_stmt`'s `A.Return` branch evaluates the return expression into an
+`__auto_type` temp *before* flushing defers, whenever any enclosing scope has a
+pending defer. Zig/Go semantics: the returned value is snapshotted, so a defer
+that mutates a global cannot change what the caller sees. The temp is skipped
+when there are no defers, keeping the generated C clean.
+
+### Reserved C names include all of libm
+
+The driver always links `-lm`, so every `<math.h>` symbol (plus its `f`/`l`
+suffixed variants) is in `Checker.C_RESERVED` and gets renamed. Miss one and a
+user's `let mut log = 0` becomes `static int log;`, colliding with `log()` and
+surfacing a raw C error. Add to this set whenever the runtime pulls in a new
+library.
+
+### Layout is computed in G, not delegated to C
+
+`compiler/layout.py` computes `sizeof`/`alignof`/field offsets per target. The C
+backend still emits `sizeof(T)` in generated code — `layout.py` is a *second*
+source of truth, needed because (a) `static_assert` must fail at the G level
+with a G diagnostic, (b) future LLVM/WASM backends have no C to ask, and (c) you
+must be able to ask "what is this struct's layout on wasm32?" while running on
+x86.
+
+A second source of truth is only worth having if it agrees with the first, so
+`tests/test_layout.py` compiles a C probe that prints `sizeof`/`_Alignof`/
+`offsetof` and asserts G's numbers match exactly. If you change layout rules,
+that test is the arbiter — not your intuition. (When writing `abi_layout.g` I
+predicted `sizeof(Nest) == 12`; C said 16 and C was right.)
+
+`usize`/`isize` follow `Target.ptr_bits` via `types.sized_primitives()` and
+`types.int_bounds()`. Never hardcode 64 for them again.
+
+Note `Attr` stores arguments in `.args` (a list of AST nodes), not `.arg` —
+reading `.arg` silently yields `None`, which is how `@align(N)` was being
+ignored.
+
+### Target capabilities, not architecture names
+
+`compiler/target.py` maps each OS-dev intrinsic to a *capability*
+(`INTRINSIC_CAPS`), and each `Target` declares the set it has. `Checker.
+_check_target_cap` rejects anything the target lacks. Adding an architecture is
+one entry in `TARGETS` — no checker or codegen changes.
+
+Use capabilities rather than `if arch == "x86"`: `rdtsc` and `outb` are both
+x86 instructions, but a cycle counter *has* an equivalent on aarch64
+(`cntvct_el0`) while port I/O simply does not exist. Lumping them under "x86"
+would wrongly block `rdtsc` on ARM.
+
+The runtime half matters just as much: the non-x86 `#else` block used to define
+every x86 intrinsic as a silent no-op, so an `outb`-based driver compiled clean
+and did nothing. Now it implements what genuinely has an equivalent and
+**omits** what does not — a link error beats a silent no-op. Never add a no-op
+stub there to "make it compile".
+
+### Slices are fat pointers, and the checker owns the coercion
+
+`slice<T>` is `GType(kind="slice", elem=T, mutable_slice=bool)`, lowered to a C
+struct `{ T* ptr; size_t len; }` (`G_SLICE_DEF` in the runtime), one typedef per
+element type since C has no generics.
+
+Two rules that must not be relaxed:
+- a slice never decays to `*T` (`assignable` returns False) — decaying throws
+  away the length, which is the entire reason slices exist;
+- write permission lives in the *type* (`mut slice<T>`), not in the mutability
+  of the variable holding it. `_check_lvalue_mutable` special-cases slices:
+  `xs[i] = v` mutates the pointee, so it must not demand `mut xs`.
+
+Array→slice coercion is decided in **one place**: `Checker.coerce()`, which tags
+the node with `to_slice=(n, mutable)`. `Codegen.gen_expr` and `IRGen.gen_expr`
+each honour that tag at a single entry point. Do not scatter the "is the target
+a slice?" question across call/assign/return sites — that duplication is exactly
+what the IR work was meant to eliminate. `coerce()` also rejects borrowing write
+access from an immutable array and calls `_mark_written` (otherwise the
+unused-`mut` warning fires falsely).
+
+Printing: a slice's length is only known at runtime, so unlike static arrays it
+cannot use a compile-time format string. `_slice_print_fn` emits one printer per
+element type. Those printers dereference struct fields, so they are spliced in
+**after** struct definitions (`slice_print_at`), while the typedefs go earlier
+(`fnptr_at`) because signatures need them.
+
+### Result is not built in
+
+`Result<T,E>` is an ordinary generic struct declared in user code, plus the
+`try` postfix operator. Nothing in the compiler knows the name `Result` — `try`
+only requires a struct with `ok`/`val`/`err` fields (`_is_result_like`). Keep it
+that way: a hardcoded Result would force every backend and the IR to learn it.
+
+`try` is a postfix keyword rather than `?` because `?` is already G's ternary;
+overloading it would be genuinely ambiguous inside `a ? b : c`.
+
+### Generic structs instantiate inside resolve()
+
+`struct P<A,B>` templates live in `Checker.generic_structs` and are stamped by
+`_instantiate_struct` from **within `resolve()`**. That placement is deliberate:
+every type position goes through `resolve`, so parameters, fields, locals and
+return types all work without per-site handling. `impl` blocks for the template
+are cloned at the same time, with the impl's own type params *and*
+template-name -> instance-name in the substitution map.
+
+Codegen must read `ty.resolved` for the concrete struct name; `t.name` is still
+the template name and does not exist in C.
+
+### Traits are compile-time bounds, not vtables
+
+`trait X { ... }` declares signatures only; `impl X for T { ... }` records
+`trait_impls[T] |= {X}`. A bound `fn f<T: X>` is verified in `_check_bounds`
+at the moment the generic is *instantiated*, so the error appears at the call
+site with a concrete type name and a suggested `impl`.
+
+Like generics, this required **zero changes to G-IR or either backend** —
+traits never exist at runtime. If you ever add dynamic dispatch, that is a
+genuinely different feature (a fat pointer + vtable); do not smuggle it in here.
+
+`_BUILTIN_TRAITS` (Ord/Eq/Show/Num) are predicates over `GType` describing
+capabilities the *language* already gives primitives, so `max2<T: Ord>(3, 7)`
+works without a hand-written `impl` for `int`.
+
+Watch out: `A.Function` gained `type_params`/`type_bounds` fields. Construct it
+with **keyword arguments** — positional construction silently shifted
+`is_extern` into `is_comptime`'s slot once, which mangled every `extern fn`
+name and produced link errors far from the cause.
+
+### Generics are monomorphized in the checker
+
+`fn f<T>(...)` templates are pulled out of `prog.items` by `collect_funcs` into
+`Checker.generic_funcs` — they are *not* ordinary functions and must never reach
+`check_function` untouched (`T` has no resolution). Each call site infers the
+type arguments (`_unify_tparam`), then `_instantiate_generic` deep-copies the
+template, substitutes the type nodes, appends the clone to `prog.items`, and
+checks it like any other function.
+
+Consequence worth understanding: **G-IR and both backends needed zero changes**
+for generics. They only ever see ordinary functions. Keep it that way — if you
+find yourself adding a "generic" concept to `irgen.py`, the substitution is
+leaking.
+
+Two guards matter: `_MAX_INSTANCES` and `_mono_depth` stop `fn f<T>() { f<*T>() }`
+from generating types forever, and the instance name is recorded *before*
+checking the body so recursive generics terminate.
+
+`f<int>(x)` is only treated as type arguments when `(` follows `>`
+(`_looks_like_call_type_args`); otherwise `a < b` would be swallowed.
+
+### Allocators are a struct vtable, not a trait
+
+`GAllocator` in `g_runtime.h` is `{ctx, alloc_fn, free_fn, realloc_fn}`.
+`alloc/free/realloc` route through it; the `_in` variants take one explicitly.
+This is a struct rather than a trait because G has no traits yet (roadmap #4) —
+the struct gives the capability now, works freestanding, and can be wrapped in a
+trait later without changing the ABI.
+
+`Allocator` is a *builtin* struct: it has no `A.StructDef`, so backends map it
+via `types.BUILTIN_STRUCT_C`. If you add another builtin struct, add it there or
+the C backend will emit an unknown type name.
+
+`arena_allocator(buf)` needs per-call state (the bump offset), so both backends
+hoist a `GArena` temp to function scope. Its `free` is deliberately a no-op —
+that is the point of an arena, not an oversight.
+
+The memory model itself is written down in `docs/MEMORY.md`, including what G
+does **not** guarantee (use-after-free, double-free, leaks, aliasing). Keep that
+list honest: it is what stops users assuming Rust-level safety.
+
+### FFI, and where the G-Core boundary sits
+
+Three mechanisms, all over the C ABI: `extern fn` + `-l`, `@link`/`@symbol`
+attributes, and runtime `dl_open`/`dl_sym`. `@symbol` must be honoured at
+*every* use site, not just the prototype — it is applied in `irgen` (so all
+backends inherit it) and in `codegen.sym_aliases` for the AST backend.
+
+`tools/gbind.py` generates bindings from C headers and lives **outside the
+compiler on purpose**. That is the G-Core/G-Ext line: put a C binding generator
+in the core and tomorrow you owe Python, CUDA and JNI generators too. As an
+external tool it only uses what the compiler already exposes, so a generator for
+another ecosystem needs zero compiler changes.
+
+gbind deliberately skips anything it cannot map with confidence (varargs,
+function-pointer parameters, unmapped types) and records why. A *wrong* binding
+corrupts the ABI at runtime far from the cause; a *missing* one is a compile
+error. `tests/ffi/run_ffi.sh` asserts the skipping, so "helpfully" emitting
+varargs bindings would fail the suite.
+
+### LLVM backend
+
+`compiler/backend_llvm.py` emits **text** LLVM IR (not the builder API) so
+`--emit-llvm` output is reviewable and we are not pinned to an llvmlite version.
+It translates ~30 IR opcodes and knows nothing about G's surface language —
+that is exactly what building the IR first bought us.
+
+Two traps specific to LLVM, both of which bit me:
+- LLVM types must match *exactly*. `store double …, float*` and
+  `store i64 …, i32*` are accepted by the parser but produce wrong values;
+  insert `fptrunc`/`trunc`/`sext` explicitly.
+- LLVM does **not** apply C's default argument promotions. Variadic `printf`
+  needs `float`→`double` and narrow ints→`i32` inserted by hand (`_va_promote`).
+
+The runtime is a header of `static inline` functions, invisible to an LLVM
+object, so `driver._LLVM_SHIM` re-exports the handful of symbols generated code
+references (`g_bounds_fail_ext`, `g_panic_ext`, `g_get_stream`, …). Add to that
+shim when you lower a new intrinsic.
+
+### The interpreter is the third implementation
+
+`compiler/interp.py` runs G-IR directly in Python. It exists because both C
+backends consume the *same* IR: a misunderstanding in `irgen.py` makes them
+wrong identically and `run_backend_diff.sh` stays green. `run_interp_diff.sh`
+breaks that blind spot.
+
+Memory is modelled as addressable `Cell`s, so use-after-free / double-free /
+out-of-bounds raise instead of being UB — a real advantage over running C.
+
+Arrays follow C's **flat** layout: one contiguous cell, and `elemaddr` scales
+the index by row size only when its *result type* is a pointer-to-array. Decide
+that from the IR type, never by inspecting what happens to sit in the slot — I
+tried the value-based heuristic and it broke `[N]*T`.
+
+### The optimizer must not change behaviour
+
+`compiler/iropt.py` + `tests/run_opt_diff.sh`: every program runs before and
+after optimization under the interpreter and the outputs are compared byte for
+byte. That is why the interpreter was written *first*.
+
+But note: run the optimized IR through the **C backend too**. `mem2reg` once
+broke `-w` on a `u32` (printing 4294967295 instead of -1) and the interpreter
+did **not** notice — only the C backend did. A stored value carries the source
+type while the `load` carries the destination type, and that difference *is* the
+widening the backend emits. Promote only when the types match.
+
+### Two C backends, on purpose
+
+**Status: they now agree on 101/101 cases (0 differing, 0 unsupported),
+including freestanding compilation and runtime panics.** Phase B's exit
+criterion is met; flipping the default is Phase C and has not been done yet,
+deliberately — the differential harness is the cheapest safety net available
+and it only works while both backends exist.
+
+A lesson worth keeping: the harness originally covered only `examples/` and
+`tests/cases/` and reported "93/93 matching" while extended `asm`, `s.at()`
+bounds checks, and freestanding mode were all still broken. Widening it to
+`tests/freestanding/` and `tests/panic/` exposed three more bugs immediately.
+A differential harness is only as strong as its input set — if you add a test
+*category*, add it here too.
+
+`--backend=c` (default) lowers from the AST; `--backend=c-ir`
+(`backend_c_ir.py`) lowers from G-IR. They coexist during the migration because
+the AST one passes 225 tests and replacing it piecewise would create an
+unverifiable half-state. `tests/run_backend_diff.sh` runs both over every
+example and diffs stdout+exit code — that is the only evidence that switching
+does not change behaviour. Do not flip the default until "chưa hỗ trợ" is 0.
+
+Every divergence it found was a bug in the *IR lowering*, not in the new
+backend — i.e. bugs that would have hit LLVM/WASM too. When you add a language
+feature, run this script; a silent miscompile shows up here and nowhere else.
+
+Two C-specific traps the IR backend must respect: a pointer-to-array is
+`T (*p)[N]`, never `T**` (use `decl_of`, not `c_type`); and printf is
+variadic, so float args need an explicit `(double)` cast (`_va_promote`).
+
+### The IR is the architectural seam
+
+`compiler/ir.py` + `irgen.py` + `irverify.py` + `backend.py` exist because the
+checker↔codegen contract used to be ~37 dynamic attributes stuck onto AST nodes
+and read back with `getattr` defaults — a second backend would silently miscompile
+by forgetting one. Read `ARCHITECTURE.md` before touching them.
+
+Key point for contributors: **the C backend still lowers straight from the AST.**
+The IR runs in parallel and is verified by `tests/run_ir.sh`, but nothing ships
+through it yet. That is deliberate (ARCHITECTURE.md §3) — it keeps regression
+risk at zero while proving the IR covers the language.
+
+When you add a language feature you must extend `irgen.py` too, or
+`tests/run_ir.sh` goes red. That is the point: it stops the IR from rotting.
+
+Dead-code regions: `IRGen._dead` is set when every path has already exited (all
+match arms return, infinite `loop` with no `break`). In a dead region `gen_stmt`
+returns immediately — emitting IR for unreachable statements adds no semantics
+and creates orphan blocks the verifier then flags.
+
+### Fuzzing
+
+`tests/run_fuzz.py` mutates the real corpus and generates random token soup, then
+asserts the compiler either reports a *controlled* error (`LexError`/`ParseError`/
+`CheckError`/`IRGenError`) or produces verifiable IR. An `AttributeError`,
+`IndexError`, or a hang is a bug. Two of its finds were in `lexer.advance()`
+returning `""` at EOF: `"" in "0123..."` is `True` in Python, so the hex-escape
+loops spun forever. Watch for that idiom.
+
+### Sanitizer runs are a separate suite
+
+`tests/run_asan.sh` rebuilds every example/case with
+`-fsanitize=address,undefined` and runs it — this is what proves the runtime's
+bounds clamping is real. Leaks are off by default (`LEAKS=1` enables them)
+because heap strings need a manual `g_free` and many examples skip it for
+brevity; the memory-ownership rules are documented in README.
+
+### Warnings
+
+`Checker.warnings` collects non-fatal diagnostics; `driver` prints them in
+yellow after a clean check, and `-w`/`-W` suppress them / turn them into errors.
+Unused-variable detection lives in `Checker.pop()`: `_decl_nodes` maps a scope
+entry to its declaring node, `_used_names` records reads (set in `lookup`), and
+`_assigned_cnames` records writes. Anything that can write *indirectly* must
+call `_mark_written` — `&x`, a self-mutating method receiver, `for mut x in a`,
+and `_check_lvalue_mutable` (which marks up front, because its
+"write-through-pointer" branches return early). Constant folding also has to
+call `_used_names.add`, since a `const` used only as an array size never goes
+through `lookup`. The `tests/warn/` category asserts the exact *count* of
+warnings, so a false positive fails the suite.
+
+### Destructuring desugars in the parser
+
+`let P{x, y} = v` becomes an `A.Multi` holding a hidden `Let` for `v` (tagged
+`destructure_of`) plus one `Let` per binding reading a field off it — so `v` is
+evaluated once. `parse_block` flattens `A.Multi` immediately, meaning no later
+pass needs to know it exists, and the bindings land in the *enclosing* scope
+(an `A.Block` would have created a new one). The hidden temp is exempt from the
+unused-variable warning.
+
+### String slices allocate
+
+`s[a..b]` is `A.Slice` -> `g_str_slice`, which clamps both bounds, so
+out-of-range indices give a short/empty string instead of reading past the
+buffer. It allocates, hence it is rejected under `--freestanding`. Arrays are
+deliberately *not* sliceable: G has no length-carrying slice type.
+
+### Arrays are values, and C fights you on it
+
+Two places must copy explicitly or C silently shares memory: `gen_let` emits a
+real array plus `memcpy` for `let b = a` (never `__auto_type`), and `gen_fn`
+copies `mut` array parameters into a local buffer in the prologue while
+`fn_signature` renames the incoming pointer to `<name>__src`.
+
+### `mut` on parameters is real
+
+`Param.mutable` is set by the parser and passed to `declare()` in
+`check_function`, so a parameter without `mut` is an immutable binding just like
+a `let`. `self` is force-mutable (whether the *receiver* may be mutated is a
+separate check in `_require_mutable_receiver`). `_is_param` exists only to pick
+the right hint: parameters are fixed with `mut x: T`, not `let mut`.
+
+### Struct literals must be complete
+
+`infer_struct_lit` requires every field of a non-empty struct to be present.
+C's designated-initializer syntax zero-fills anything omitted, so without this
+check adding a field to a struct silently gives every existing literal a 0 for
+it. `struct_order` supplies declaration order for the error message.
+
+### `Program.imports` carries positions
+
+Imports are `(name, line, col)` tuples, not bare strings; `load_program` uses
+them so a bad import points at its own line. `driver` still accepts a bare
+string for compatibility. Relatedly, `Parser.error(msg, show_token=False)`
+suppresses the `(gặp <token>)` suffix — use it whenever the message already
+names the fix, since the suffix reports the token *after* the mistake.
+
+### The checker knows about `--freestanding`
+
+`Checker(prog, freestanding=...)` is threaded from `driver.compile_to_c`. When
+set, `_HOSTED_ONLY` built-ins (anything needing stdio or the heap) and
+`_HEAP_STR_METHODS` are rejected with a G-level diagnostic. Without this the
+program type-checked fine and then died inside the C backend with errors like
+`'stdout' undeclared`, which is unreadable for a G user. If you add a built-in
+that calls libc, add it to `_HOSTED_ONLY` too. `tests/fail_fs/` covers this: each
+case must pass `--check` hosted and fail `--freestanding --check`.
+
+### Printing a whole array
+
+`_gtype_print_frag` (codegen) is the single generic "print one value of GType
+`gt`" entry point: struct → expand fields, static array → `_gtype_array_frag`
+(recursive, capped at `_PRINT_ARRAY_MAX`), enum → variant name, else a printf
+spec. `build_format`, `gen_print` and `dbg` all route arrays through it. One
+subtlety: arrays must **not** be hoisted into an `__auto_type` temp (that decays
+to a pointer and loses the size), so `gen_print` passes the array expression
+through unmaterialized — safe because arrays are always stable lvalues here.
+The checker only rejects `void` and *dynamic* arrays from format position.
+
+### `::` is an alias for `.` on type paths
+
+`parse_postfix` accepts `Ident :: name` and builds the same `A.FieldAccess` the
+`.` form does, tagged `via_path`. The parser rejects a non-`Ident` base; the
+checker rejects `via_path` when the base isn't a struct/enum type name. So
+`Color::Red` and `Counter::new()` work, `p::x` gets a "use `p.x`" error.
+
+### `for mut x in arr` binds by reference
+
+Unlike the read-only `for x in arr` (which copies each element), `for mut x`
+lowers `x` to a **pointer** to the element so writes land in the array. The
+checker sets `by_ref` on the `ForEach` node and records the name in
+`_by_ref_vars`, which makes `infer_ident` tag every `A.Ident` with
+`by_ref_elem`; codegen then emits `(*x)` for those. Exception: when the element
+is itself an array (iterating rows of a 2-D array) the row already decays to a
+pointer, so `by_ref_deref` is cleared and no extra `*` is added. Arrays are the
+only writable iterable — `for mut` over a `str` or an array literal is an error.
+
+### Value-typed arrays can't come out of expressions
+
+Functions may not return arrays by value, and for the same reason `match`/`?:`
+in expression position reject array-typed arms: C decays both branches to a
+pointer, so G's copy semantics would silently become sharing (and an array
+literal arm would dangle). Keep these two checks in sync if you add another
+value-producing construct.
+
+### `str` has built-in methods
+
+`s.len()`, `s.upper()`, `s.sub(a, b)` etc. are pure syntax sugar: `_STR_METHODS`
+in the checker maps a method name to a runtime C function, the receiver becomes
+the first argument, and `gen_call` emits `g_str_*(recv, args...)`. They are NOT
+real methods — you cannot define new ones on `str` via `impl`. Wrapper functions
+(`g_str_len_i`, `g_substr_i`, ...) exist purely to return the exact G-declared
+type without callers casting.
+
+### Generated C must stay warning-free
+
+The generated C compiles clean under `-Wall -Wextra` and the test runner assumes
+that. Three deliberate choices keep it that way, so don't "simplify" them:
+immutable *arrays* get no C `const` (a `const T[]` decaying into a `T*` parameter
+warns even though G already proved immutability statically); `&x` on a `let`
+scalar/struct casts away `const` (G permits writing through such pointers);
+and the `for i in a..b` upper bound is cast to the loop variable's type rather
+than `__auto_type` (otherwise `size_t` counters vs `int` bounds trip
+`-Wsign-compare`).
+
 ### C backend is GCC/Clang-specific, not portable C
 
 Generated code is compiled with `-std=gnu11` and uses extensions deliberately:

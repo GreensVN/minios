@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể gán cho 'i' (bất biến — dùng 'let mut'; biến đếm 'for i in a..b' không sửa được — sao chép ra 'let mut j = i')

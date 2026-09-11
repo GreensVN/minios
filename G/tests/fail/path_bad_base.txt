@@ -1,0 +1,1 @@
+lỗi cú pháp: '::' chỉ dùng sau tên một kiểu (vd 'Color::Red', 'Counter::new()') — truy cập trường/method của một giá trị dùng '.'

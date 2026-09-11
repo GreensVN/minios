@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể truyền 'a' (bất biến) cho tham số 'mut slice<int>' — khai báo 'let mut' nếu hàm được phép sửa dữ liệu

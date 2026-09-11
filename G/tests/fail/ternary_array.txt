@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: biểu thức điều kiện không thể cho một MẢNG theo giá trị ('[3]int') — C sẽ phân rã thành con trỏ và mất ngữ nghĩa sao chép; hãy khai báo mảng rồi gán trong 'if' dạng câu lệnh, hoặc bọc mảng trong struct

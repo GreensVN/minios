@@ -1,0 +1,3 @@
+const A: int = B + 1
+const B: int = A + 1
+fn main() -> int { return A + B }

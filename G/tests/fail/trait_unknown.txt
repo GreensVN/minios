@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: ràng buộc 'T: Nope' của 'f' tham chiếu trait không tồn tại: 'Nope'

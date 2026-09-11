@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'C' không phải biến thể của enum 'E' (sẽ bị hiểu là binding bắt mọi giá trị) — có phải 'A'?

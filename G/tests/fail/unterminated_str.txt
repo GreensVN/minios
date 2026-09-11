@@ -1,0 +1,1 @@
+lỗi từ vựng: chuỗi không được đóng trước khi xuống dòng — thiếu '"' (chuỗi nhiều dòng: dùng '\n' hoặc nối nhiều chuỗi)

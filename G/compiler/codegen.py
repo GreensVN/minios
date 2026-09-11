@@ -8,9 +8,27 @@ Nơi 5 ngôn ngữ hội tụ:
 Tận dụng thông tin kiểu để: print tự chọn định dạng, auto-deref con trỏ, gọi method.
 """
 
+import dataclasses
+import re
 from . import ast_nodes as A
 from .checker import Checker
 from . import types as T
+
+# Hàm mà runtime freestanding (g_runtime.h) TỰ định nghĩa — và libc hosted cũng
+# có. 'extern fn' trùng tên chúng không được phát nguyên mẫu (xem generate()).
+_RUNTIME_DEFINED = {"memcpy", "memmove", "memset", "memcmp", "strlen"}
+
+
+def _attr_str(node, name):
+    """Giá trị chuỗi của thuộc tính '@name("...")' trên một node, hoặc None."""
+    for a in (getattr(node, "attrs", None) or []):
+        if getattr(a, "name", "") != name:
+            continue
+        av = (getattr(a, "args", None) or [None])[0]
+        v = getattr(av, "value", None)
+        if isinstance(v, str):
+            return v
+    return None
 
 
 # Ánh xạ tên kiểu G -> C (cho khai báo theo cú pháp)
@@ -39,6 +57,12 @@ class Codegen:
         self.global_inits = []       # (tên, biểu_thức) cho global khởi tạo lúc chạy
         self.scope_stack = []   # ngăn xếp scope cho defer (LIFO, theo block)
         self._tmp = 0
+        self.slice_print_fns = {}    # tên typedef slice -> tên hàm in
+        self.slice_print_decls = []  # thân các hàm in slice
+        self.arena_decls = []        # biến GArena cần khai báo trong hàm
+        self.sym_aliases = {}        # tên hàm G -> ký hiệu '@symbol("...")'
+        self.slice_typedefs = {}     # kiểu phần tử C -> tên typedef slice
+        self.slice_decls = []        # các dòng 'G_SLICE_DEF(T, GSlice_T);'
         self.fnptr_typedefs = {}     # khoá chữ ký C -> tên typedef con trỏ hàm
         self.fnptr_decls = []        # các dòng 'typedef R (*_gfnN)(...);' theo thứ tự
 
@@ -65,11 +89,43 @@ class Codegen:
 
     def _c_base(self, t: A.Type) -> str:
         """Kiểu C của PHẦN TỬ trong cùng: tên kiểu + con trỏ-phần-tử ([N]*T)."""
-        if getattr(t, "is_fn", False):
+        if getattr(t, "slice_elem", None) is not None:
+            base = self._slice_typedef_ast(t)
+        elif getattr(t, "is_fn", False):
             base = self._fnptr_typedef(t)
         else:
-            base = TYPE_MAP.get(t.name) or self.cn(t.name)
+            # Kiểu GENERIC ('Pair<int,str>') được checker phân giải thành một
+            # struct cụ thể và ghi vào 'resolved' — dùng tên đó, vì t.name vẫn
+            # là tên KHUÔN và không tồn tại trong C.
+            rname = None
+            r = getattr(t, "resolved", None)
+            if r is not None and getattr(r, "kind", None) in ("struct", "enum"):
+                rname = r.name
+            base = (TYPE_MAP.get(t.name) or T.BUILTIN_STRUCT_C.get(t.name)
+                    or self.cn(rname or t.name))
         return base + "*" * getattr(t, "elem_ptr", 0)
+
+    def _slice_typedef_ast(self, t: A.Type) -> str:
+        """Đăng ký typedef slice cho một A.Type 'slice<T>'."""
+        elem_c = self._ctype_str(t.slice_elem)
+        return self._slice_typedef(elem_c)
+
+    def _slice_typedef(self, elem_c: str) -> str:
+        """Đăng ký (nếu chưa có) 'typedef struct { T* ptr; size_t len; }' cho
+        kiểu phần tử C này, trả về tên typedef. C không có generic nên mỗi kiểu
+        phần tử cần một struct riêng."""
+        name = self.slice_typedefs.get(elem_c)
+        if name is None:
+            ident = ("str" if elem_c == "const char*"
+                     else elem_c.replace("*", "p").replace(" ", "_"))
+            name = f"GSlice_{ident}"
+            self.slice_typedefs[elem_c] = name
+            self.slice_decls.append(f"G_SLICE_DEF({elem_c}, {name});")
+        return name
+
+    def _slice_typedef_gt(self, gt) -> str:
+        """Như trên nhưng nhận GType (dùng ở phía biểu thức)."""
+        return self._slice_typedef(T.c_type(gt.elem))
 
     def _ctype_str(self, t) -> str:
         """Chuỗi kiểu C ĐẦY ĐỦ cho ngữ cảnh kiểu trừu tượng (tham số typedef, cast):
@@ -187,6 +243,24 @@ class Codegen:
         thể quan sát tác dụng của mục khác."""
         return len(nodes) >= 2 and any(self._has_call(n) for n in nodes)
 
+    def _is_const_expr(self, e) -> bool:
+        """Biểu thức là hằng số nguyên đã biết (checker có thể đã gấp)? Dùng để
+        bỏ kiểm tra lúc chạy cho chỉ số/mẫu số hằng (checker đã kiểm tĩnh)."""
+        if getattr(e, "const_value", None) is not None:
+            return True
+        if isinstance(e, (A.IntLit, A.CharLit, A.BoolLit, A.SizeOf)):
+            return True
+        if isinstance(e, A.Ident):
+            return e.name in self.enum_variants or getattr(e, "is_enum_variant", False) \
+                or e.name in getattr(self, "const_names", set())
+        if isinstance(e, A.Unary) and e.op in ("-", "~"):
+            return self._is_const_expr(e.operand)
+        if isinstance(e, A.Binary):
+            return self._is_const_expr(e.left) and self._is_const_expr(e.right)
+        if isinstance(e, A.Cast):
+            return self._is_const_expr(e.expr)
+        return False
+
     def _is_const_init(self, e) -> bool:
         """Biểu thức có dùng được làm initializer tĩnh trong C không (hằng số
         biên dịch)? Literal, enum variant, sizeof, ép kiểu/toán tử trên hằng,
@@ -213,6 +287,13 @@ class Codegen:
         if isinstance(e, A.SizeOfExpr):
             return True
         return False
+
+    def checker_struct_order(self, sname):
+        """Thứ tự trường của một struct (để dựng compound literal đúng)."""
+        sdef = self.struct_defs.get(sname)
+        if sdef is not None:
+            return [f.name for f in sdef.fields]
+        return ["ok", "val", "err"]
 
     def gtype_of(self, e) -> T.GType:
         return getattr(e, "gtype", T.UNKNOWN)
@@ -349,6 +430,15 @@ class Codegen:
                     f"(uint64_t)({self.gen_expr(e.args[1])}))")
         raise CodegenError(f"intrinsic OS chưa hỗ trợ: {name}")
 
+    def _is_array_decl(self, st) -> bool:
+        """Khai báo 'let' này có kiểu MẢNG (theo chú thích hoặc theo giá trị)?"""
+        if getattr(st, "type", None) is not None and self._dims(st.type):
+            return True
+        if isinstance(getattr(st, "value", None), A.ArrayLit):
+            return True
+        gt = getattr(getattr(st, "value", None), "gtype", None)
+        return gt is not None and gt.kind == "array"
+
     def emit_var_decl(self, name, t: A.Type, init_c=None, const=False):
         return self.c_decl(name, t, init_c, const=const) + ";"
 
@@ -359,6 +449,13 @@ class Codegen:
         self.w("")
 
         struct_defs = {}
+        for it in self.prog.items:
+            if isinstance(it, A.Function):
+                sym = _attr_str(it, "symbol")
+                if sym:
+                    self.sym_aliases[it.name] = sym
+        self.const_names = {it.name for it in self.prog.items
+                            if isinstance(it, A.GlobalVar) and it.is_const}
         for it in self.prog.items:
             if isinstance(it, A.StructDef):
                 self.struct_names.add(it.name)
@@ -398,6 +495,10 @@ class Codegen:
         # sinh theo cùng thứ tự topo để eq của struct lồng có trước eq của struct cha.
         self.emit_struct_eq_fns(topo)
 
+        # Điểm chèn HÀM IN SLICE: phải SAU định nghĩa struct (chúng truy cập
+        # trường của struct), khác với typedef slice vốn chỉ cần khai báo tiến.
+        slice_print_at = len(self.out)
+
         # 2) biến toàn cục
         for it in self.prog.items:
             if isinstance(it, A.GlobalVar):
@@ -407,6 +508,12 @@ class Codegen:
         # 3) nguyên mẫu hàm + method
         for it in self.prog.items:
             if isinstance(it, A.Function):
+                if it.is_extern and it.name in _RUNTIME_DEFINED:
+                    # Runtime (hosted: libc header; freestanding: g_runtime.h)
+                    # đã định nghĩa các hàm này -> KHÔNG phát lại nguyên mẫu,
+                    # tránh 'conflicting types' khi chữ ký G khác chút ít
+                    # ('*u8' thay vì 'void*', 'usize' thay vì 'size_t'...).
+                    continue
                 self.w(self.fn_signature(it) + ";")
             elif isinstance(it, A.Impl):
                 for m in it.methods:
@@ -434,6 +541,18 @@ class Codegen:
         if self.fnptr_decls:
             block = ["// Con trỏ hàm (typedef sinh tự động cho kiểu fn(...)->R)."]
             block += self.fnptr_decls + [""]
+            self.out[fnptr_at:fnptr_at] = block
+        # Typedef slice (ptr+len) — chèn TRƯỚC typedef con trỏ hàm để một slice
+        # chứa con trỏ hàm vẫn hợp lệ.
+        # Hàm in slice trước (chỉ số lớn hơn), rồi typedef — chèn từ dưới lên để
+        # các chỉ số đã tính không bị dịch.
+        if self.slice_print_decls:
+            block = ["// In slice ('{}' trên slice<T>) — độ dài biết lúc chạy."]
+            block += self.slice_print_decls + [""]
+            self.out[slice_print_at:slice_print_at] = block
+        if self.slice_decls:
+            block = ["// Slice: con trỏ béo { T* ptr; size_t len; }."]
+            block += self.slice_decls + [""]
             self.out[fnptr_at:fnptr_at] = block
 
         return "\n".join(self.out)
@@ -574,6 +693,11 @@ class Codegen:
             if t.name == "char" and t.ptr == 1:        # *char -> so nội dung
                 return f"g_str_eq({l}, {r})"
             return f"(({l}) == ({r}))"                  # con trỏ khác -> địa chỉ
+        if getattr(t, "slice_elem", None) is not None:
+            # slice = { ptr, len }: so sánh BẰNG là cùng vùng nhớ + cùng độ dài
+            # (so danh tính, không so nội dung — nội dung dùng vòng lặp). C không
+            # cho '==' trên struct nên phải so từng thành phần.
+            return f"(({l}).ptr == ({r}).ptr && ({l}).len == ({r}).len)"
         if t.name in self.struct_defs:                 # struct lồng -> đệ quy
             return f"{self._struct_eq_fn(t.name)}({l}, {r})"
         if t.name == "str":
@@ -585,6 +709,8 @@ class Codegen:
         struct -> hàm _g_eq_T; chuỗi/'*char' -> g_str_eq; còn lại -> '=='."""
         if gt.kind == "struct" and gt.name in self.struct_defs:
             return f"{self._struct_eq_fn(gt.name)}({l}, {r})"
+        if gt.kind == "slice":
+            return f"(({l}).ptr == ({r}).ptr && ({l}).len == ({r}).len)"
         if self._is_stringy(gt):
             return f"g_str_eq({l}, {r})"
         return f"(({l}) == ({r}))"
@@ -602,6 +728,12 @@ class Codegen:
         vô hướng -> specifier theo kiểu. 'cexpr' phải ổn định (đã vật hoá)."""
         if gt.kind == "struct" and gt.name in self.struct_defs:
             return self._struct_print_fragment(gt.name, cexpr)
+        if gt.kind == "array" and isinstance(gt.n, int):
+            return self._gtype_array_frag(gt, cexpr)
+        if gt.kind == "slice":
+            # Độ dài slice chỉ biết LÚC CHẠY nên không thể dựng chuỗi định dạng
+            # tĩnh như mảng: phát một hàm in riêng cho từng kiểu phần tử.
+            return "%s", [f"{self._slice_print_fn(gt)}({cexpr})"]
         if gt.kind == "enum" and gt.name in self.enum_names:
             return "%s", [f"{self._enum_name_fn(gt.name)}({cexpr})"]
         if self._is_stringy(gt):
@@ -673,6 +805,11 @@ class Codegen:
     def mangle(self, fn: A.Function) -> str:
         if fn.recv:
             return f"{self.cn(fn.recv)}__{fn.name}"
+        # '@symbol("tên_thật")': ký hiệu ở thư viện khác tên hàm trong G (vd
+        # tên C có tiền tố, hoặc tên không hợp lệ làm định danh G).
+        sym = _attr_str(fn, "symbol")
+        if sym:
+            return sym
         if fn.name == "main" or fn.is_extern:
             return fn.name          # điểm vào / ký hiệu ngoài: giữ nguyên tên
         return self.cn(fn.name)
@@ -680,7 +817,15 @@ class Codegen:
     def fn_signature(self, fn: A.Function) -> str:
         parts = []
         for p in fn.params:
-            parts.append(self.c_decl(getattr(p, "c_name", "") or self.cn(p.name), p.type, decay_first=True))
+            pname = getattr(p, "c_name", "") or self.cn(p.name)
+            # Tham số MẢNG 'mut' được sao chép ra bộ đệm cục bộ trong prologue (xem
+            # gen_fn): tham số C thật đổi tên, còn tên gốc thuộc về bản sao.
+            if getattr(p, "mutable", False) and fn.body is not None:
+                dims = self._dims(p.type)
+                if dims and all(isinstance(d, int) for d in dims):
+                    p.arr_copy_from = pname + "__src"
+                    pname = p.arr_copy_from
+            parts.append(self.c_decl(pname, p.type, decay_first=True))
         params = ", ".join(parts) if parts else "void"
         ret = self.c_type(fn.ret)
         qual = ""
@@ -694,9 +839,33 @@ class Codegen:
         return f"{prefix}{ret} {self.mangle(fn)}({params})"
 
     def gen_fn(self, fn: A.Function):
+        self.cur_src_file = getattr(fn, "src_file", None) or getattr(self, "cur_src_file", None)
+        self._addr_taken = self._collect_addr_taken(fn.body or [])
         self.w(self.fn_signature(fn) + " {")
         self.scope_stack = []
-        self.gen_scoped_body(fn.body, is_loop=False)
+        # Tham số MẢNG khai báo 'mut': C truyền mảng dưới dạng con trỏ, nên ghi
+        # vào nó sẽ sửa mảng của NGƯỜI GỌI — trái ngữ nghĩa "tham số là bản sao"
+        # mà 'mut' trên tham số vô hướng vẫn giữ. Sao chép ra bộ đệm cục bộ.
+        prologue = []
+        # 'self' KHÔNG dùng trong thân (vd method trait trả hằng) -> C cảnh báo
+        # 'unused parameter'. Nó là tham số BẮT BUỘC của method nên không bỏ
+        # được; đánh dấu đã-dùng thay vì để cảnh báo rò ra người dùng.
+        if fn.recv and fn.params and fn.params[0].name == "self":
+            sname = getattr(fn.params[0], "c_name", "") or self.cn("self")
+            prologue.append(f"(void){sname};")
+        for prm in fn.params:
+            src = getattr(prm, "arr_copy_from", None)
+            if src is None:
+                continue
+            pname = getattr(prm, "c_name", "") or self.cn(prm.name)
+            prologue.append(self.c_decl(pname, prm.type, None, const=False) + ";")
+            prologue.append(f"memcpy({pname}, {src}, sizeof({pname}));")
+        # Vùng trạng thái cho mỗi 'arena_allocator(...)' trong hàm này.
+        at = len(self.out)
+        self.arena_decls = []
+        self.gen_scoped_body(fn.body, is_loop=False, prologue=prologue)
+        if self.arena_decls:
+            self.out[at:at] = [f"    GArena {v};" for v in self.arena_decls]
         # Hàm non-void mà checker đã chứng minh luôn-trả-về nhưng câu lệnh cuối
         # không phải 'return' tường minh (vd match enum vét cạn / if-else-diverge):
         # chèn __builtin_unreachable() để C không cảnh báo "control reaches end".
@@ -709,6 +878,31 @@ class Codegen:
         self.w("}")
 
     # ---------- quản lý scope & defer (kiểu Zig, theo block, LIFO) ----------
+    def _collect_addr_taken(self, node, out=None):
+        """Tên các biến bị lấy địa chỉ ('&x') ở BẤT KỲ đâu trong thân hàm.
+
+        Dùng để quyết định có gắn 'const' cho khai báo C hay không — xem gen_let."""
+        if out is None:
+            out = set()
+        if isinstance(node, list):
+            for x in node:
+                self._collect_addr_taken(x, out)
+            return out
+        if isinstance(node, A.Unary) and node.op == "&":
+            tgt = node.operand
+            while isinstance(tgt, (A.FieldAccess, A.Index)):
+                tgt = tgt.base
+            if isinstance(tgt, A.Ident):
+                out.add(tgt.name)
+        for f in getattr(node, "__dataclass_fields__", {}):
+            v = getattr(node, f, None)
+            if isinstance(v, (list, tuple)):
+                for x in v:
+                    self._collect_addr_taken(x, out)
+            elif hasattr(v, "__dataclass_fields__"):
+                self._collect_addr_taken(v, out)
+        return out
+
     def gen_scoped_body(self, body, is_loop=False, prologue=None):
         """Sinh thân một block: mở scope defer, (tuỳ chọn) prologue, các lệnh,
         rồi xả defer của scope này (nếu block không kết thúc bằng return/break/continue)."""
@@ -742,10 +936,21 @@ class Codegen:
         if isinstance(st, A.Let):
             self.gen_let(st)
         elif isinstance(st, A.Return):
-            self._emit_exit_defers("return")
+            # Giá trị trả về phải được TÍNH TRƯỚC khi chạy defer (như Zig/Go):
+            # 'defer n = 999; return n + 1' phải trả 1, không phải 1000. Vật hoá
+            # vào biến tạm khi hàm có defer đang chờ.
             if st.value is not None:
-                self.w(f"return {self.gen_expr(st.value)};")
+                val_c = self.gen_expr(st.value)
+                if any(f["defers"] for f in self.scope_stack):
+                    rv = self.tmp("_gret")
+                    self.w(f"__auto_type {rv} = ({val_c});")
+                    self._emit_exit_defers("return")
+                    self.w(f"return {rv};")
+                else:
+                    self._emit_exit_defers("return")
+                    self.w(f"return {val_c};")
             else:
+                self._emit_exit_defers("return")
                 self.w("return;")
         elif isinstance(st, A.If):
             self.gen_if(st)
@@ -803,11 +1008,40 @@ class Codegen:
                 else:
                     self.w(f"{tgt_c} = fmod({tgt_c}, {val_c});")
                 return
+        # '/=' và '%=' số nguyên với mẫu không hằng: kiểm chia 0 lúc chạy (như
+        # toán tử '/'/'%' hai ngôi). Đích được lượng giá một lần qua con trỏ.
+        if st.op in ("/=", "%="):
+            lt = self.gtype_of(st.target)
+            rt = self.gtype_of(st.value)
+            if lt.is_integer() and rt.is_integer() and not self._is_const_expr(st.value):
+                op = st.op[0]
+                w = self._where(st)
+                if self._is_addressable(st.target):
+                    p = self.tmp("_gp")
+                    ct = T.c_type(lt)
+                    self.w(f"{{ {ct}* {p} = &({tgt_c}); "
+                           f"*{p} = g_chk_div(*{p}, {op}, {val_c}, {w}); }}")
+                else:
+                    self.w(f"{tgt_c} = g_chk_div({tgt_c}, {op}, {val_c}, {w});")
+                return
         self.w(f"{tgt_c} {st.op} {val_c};")
 
     def gen_let(self, st: A.Let):
         const = not st.mutable
         name = getattr(st, "c_name", st.name)
+        # MẢNG bất biến: KHÔNG gắn 'const' ở C. Tính bất biến của G đã được checker
+        # bảo đảm tĩnh; còn ở C mảng phân rã thành 'const T*' khi truyền cho tham số
+        # 'T*' -> cảnh báo 'discards const qualifier' (và với '-Werror' là lỗi) dù mã
+        # G hoàn toàn hợp lệ. Vô hướng/struct/con trỏ vẫn giữ 'const'.
+        if const and self._is_array_decl(st):
+            const = False
+        # Biến 'let' bị LẤY ĐỊA CHỈ ở đâu đó trong hàm: KHÔNG gắn 'const' ở C.
+        # G cho phép ghi qua con trỏ tới một 'let' (checker chấp nhận '*p = v'),
+        # nhưng ở C ghi qua con trỏ đã bỏ 'const' của một đối tượng THẬT SỰ
+        # const là hành vi KHÔNG XÁC ĐỊNH: chương trình in 6 với -O0 và 5 với
+        # -O2. Bỏ 'const' làm cho ngữ nghĩa G thành hiện thực ở mọi mức tối ưu.
+        if const and st.name in getattr(self, "_addr_taken", ()):
+            const = False
         # ----- mảng literal (kể cả nhiều chiều): T name[..][..] = { ... } -----
         if isinstance(st.value, A.ArrayLit):
             init = self.gen_array_init(st.value)
@@ -819,6 +1053,19 @@ class Codegen:
                 ty = self._gtype_to_ctype_decl(gt)
                 self.w(self.c_decl(name, ty, init, const=const) + ";")
             return
+
+        # ----- 'let b = a' với a là MẢNG tĩnh: SAO CHÉP, không chia sẻ -----
+        # '__auto_type b = a' cho ra một CON TRỎ vào chính bộ nhớ của a (mảng phân
+        # rã), nên 'b[0] = 9' sửa luôn a — trái ngữ nghĩa giá trị của G. Khai báo
+        # một mảng thật rồi memcpy.
+        if st.value is not None and not isinstance(st.value, A.ArrayLit):
+            vgt = self.gtype_of(st.value)
+            if vgt is not None and vgt.kind == "array" and isinstance(vgt.n, int):
+                src = self.gen_expr(st.value)
+                ty = st.type if st.type is not None else self._gtype_to_ctype_decl(vgt)
+                self.w(self.c_decl(name, ty, None, const=False) + ";")
+                self.w(f"memcpy({name}, {src}, sizeof({name}));")
+                return
 
         init_c = self.gen_expr(st.value) if st.value is not None else None
         if st.type is not None:
@@ -985,7 +1232,10 @@ class Codegen:
         self.indent += 1
         end = self.tmp("_gend")
         start = self.gen_expr(st.start)
-        self.w(f"__auto_type {end} = ({self.gen_expr(st.end)});")
+        # Cận trên mang ĐÚNG kiểu của biến đếm: '__auto_type' giữ kiểu gốc của
+        # biểu thức ('int' khi biến đếm là 'size_t' -> gcc -Wsign-compare, và
+        # so sánh có dấu/không dấu có thể sai với giá trị lớn).
+        self.w(f"{ctype} {end} = ({ctype})({self.gen_expr(st.end)});")
         if st.step is None:
             cmp = "<=" if st.inclusive else "<"
             self.w(f"for ({ctype} {v} = {start}; {v} {cmp} {end}; {v}++) {{")
@@ -1071,9 +1321,27 @@ class Codegen:
                 else:
                     bound = f"sizeof({arr}) / sizeof(({arr})[0])"
                 self.w(f"for (size_t {i} = 0; {i} < {bound}; ++{i}) {{")
-                self.gen_scoped_body(st.body, is_loop=True,
-                                     prologue=[self._elem_decl(var, elem_type,
-                                                               f"({arr})[{i}]")])
+                if getattr(st, "by_ref", False) and elem_type.kind == "array":
+                    # Phần tử LẠI là mảng (duyệt hàng của mảng nhiều chiều): hàng
+                    # đã tự phân rã thành con trỏ tới phần tử đầu, nên ghi
+                    # 'row[i] = v' vốn đã xuyên vào mảng gốc — dùng khai báo
+                    # thường (con trỏ tới mảng), KHÔNG bọc thêm một tầng '*'.
+                    self.gen_scoped_body(st.body, is_loop=True,
+                                         prologue=[self._elem_decl(var, elem_type,
+                                                                   f"({arr})[{i}]")])
+                elif getattr(st, "by_ref", False):
+                    # 'for mut x in arr': x là THAM CHIẾU tới phần tử (như
+                    # 'iter_mut' của Rust) — sửa x phải ghi ngược vào mảng. Hạ
+                    # thành con trỏ + macro '#define x (*_p)' sẽ rối; thay vào đó
+                    # dùng biến con trỏ và cho checker đánh dấu mọi truy cập là
+                    # deref (xem 'by_ref' trong gen_expr/Ident).
+                    self.gen_scoped_body(
+                        st.body, is_loop=True,
+                        prologue=[f"{T.c_type(elem_type)}* {var} = &({arr})[{i}];"])
+                else:
+                    self.gen_scoped_body(st.body, is_loop=True,
+                                         prologue=[self._elem_decl(var, elem_type,
+                                                                   f"({arr})[{i}]")])
                 self.w("}")
 
     def gen_match(self, st: A.Match):
@@ -1145,6 +1413,63 @@ class Codegen:
         self.indent -= 1
         self.w("}")
 
+    def gen_match_expr(self, e: A.MatchExpr) -> str:
+        """'match' ở vị trí BIỂU THỨC -> statement-expression GNU:
+            ({ T _r; S _s = subj; if (p1) _r = v1; else if ... ; _r; })
+        Nhánh đầu khớp thắng (else-if nối tiếp); binding + guard được đặt trong
+        khối riêng. Checker đã bảo đảm vét cạn nên _r luôn được gán."""
+        subj_t = self.gtype_of(e.subject)
+        subj_c = self.gen_expr(e.subject)
+        if getattr(e, "deref_subject", False):
+            subj_t = subj_t.elem
+            subj_c = f"(*({subj_c}))"
+        is_str = subj_t.kind == "str" or (
+            subj_t.kind == "ptr" and subj_t.elem and subj_t.elem.kind == "char")
+        tmp = self.tmp("_gmx")
+        res = self.tmp("_gmr")
+        sub_ct = T.c_type(subj_t) if subj_t.kind != "unknown" else "__auto_type"
+        res_t = getattr(e, "result_type", None)
+        res_ct = T.c_type(res_t) if res_t is not None and res_t.kind != "unknown" \
+            else "__auto_type"
+
+        def cond_for(pats):
+            tests = []
+            for p in pats:
+                if isinstance(p, A.RangePat):
+                    lo, hi = self.gen_expr(p.lo), self.gen_expr(p.hi)
+                    up = "<=" if p.inclusive else "<"
+                    tests.append(f"({tmp} >= {lo} && {tmp} {up} {hi})")
+                elif is_str:
+                    tests.append(f"strcmp({tmp}, {self.gen_expr(p)}) == 0")
+                else:
+                    tests.append(f"{tmp} == {self.gen_expr(p)}")
+            return " || ".join(tests) if tests else "1"
+
+        bindings = getattr(e, "bindings", [None] * len(e.arms))
+        parts = [f"{{ {sub_ct} {tmp} = {subj_c}; {res_ct} {res};"]
+        for (pats, guard, value), bcname in zip(e.arms, bindings):
+            if bcname is not None:
+                # binding: cần một khối để đưa tên vào phạm vi cho guard + giá trị
+                g = "1" if guard is None else f"({self.gen_expr(guard)})"
+                parts.append(f" {{ {sub_ct} {bcname} = {tmp}; (void){bcname};"
+                             f" if ({g}) {{ {res} = {self.gen_expr(value)};"
+                             f" goto {res}_done; }} }}")
+                continue
+            pat_cond = "1" if pats is None else cond_for(pats)
+            if guard is None:
+                cond = pat_cond
+            elif pat_cond == "1":
+                cond = f"({self.gen_expr(guard)})"
+            else:
+                cond = f"({pat_cond}) && ({self.gen_expr(guard)})"
+            parts.append(f" if ({cond}) {{ {res} = {self.gen_expr(value)};"
+                         f" goto {res}_done; }}")
+        # Vét cạn đã được checker bảo đảm; nhánh này chỉ để C không cảnh báo
+        # 'may be used uninitialized' khi mọi test đều là runtime.
+        parts.append(f" {res} = ({res_ct}){{0}};")
+        parts.append(f" {res}_done: ; {res}; }}")
+        return "(" + "".join(parts) + ")"
+
     def _gen_arm_body(self, body, end_label) -> bool:
         """Sinh thân một nhánh match rồi nhảy tới nhãn cuối (nếu thân chưa tự
         thoát bằng return/break/continue) — bảo đảm chỉ nhánh khớp đầu tiên chạy.
@@ -1174,6 +1499,20 @@ class Codegen:
 
     # ---------- biểu thức ----------
     def gen_expr(self, e) -> str:
+        c = self._gen_expr_raw(e)
+        # Chuyển ngầm mảng tĩnh -> slice, do checker đánh dấu (xem Checker.coerce).
+        # Đặt ở MỘT chỗ duy nhất nên mọi ngữ cảnh (đối số, gán, return, phần tử
+        # mảng...) đều được xử lý giống nhau.
+        ts = getattr(e, "to_slice", None)
+        if ts is not None:
+            n, _mut = ts
+            gt = self.gtype_of(e)
+            elem_c = T.c_type(gt.elem) if gt.elem is not None else "void"
+            sname = self._slice_typedef(elem_c)
+            return f"(({sname}){{ {c}, (size_t){n} }})"
+        return c
+
+    def _gen_expr_raw(self, e) -> str:
         if isinstance(e, A.IntLit):
             return self._int_literal_c(e)
         if isinstance(e, A.FloatLit):
@@ -1187,21 +1526,44 @@ class Codegen:
         if isinstance(e, A.NullLit):
             return "NULL"
         if isinstance(e, A.Ident):
-            return getattr(e, "c_name", "") or self.cn(e.name)
+            # Hàm khai báo '@symbol("tên_thật")': mọi chỗ DÙNG phải phát tên
+            # ký hiệu, không phải tên G (nếu không sẽ lỗi liên kết).
+            # '@symbol' thắng cả 'c_name' do checker đặt: checker không biết
+            # về ký hiệu ngoài, nó chỉ làm sạch tên cho C.
+            sym = self.sym_aliases.get(e.name)
+            if sym is not None:
+                return sym
+            nm = getattr(e, "c_name", "") or self.cn(e.name)
+            # Biến phần tử của 'for mut x in arr' được hạ thành CON TRỎ tới phần
+            # tử (để ghi xuyên vào mảng) — mọi lần dùng 'x' phải là '(*x)'.
+            if getattr(e, "by_ref_elem", False):
+                return f"(*{nm})"
+            return nm
         if isinstance(e, A.Binary):
             lc = self.gen_expr(e.left)
             rc = self.gen_expr(e.right)
+            # Checker đã xác định cần tự deref (vd 'self == Red' với self: *Color).
+            if getattr(e, "deref_left", False):
+                lc = f"(*({lc}))"
+            if getattr(e, "deref_right", False):
+                rc = f"(*({rc}))"
             if getattr(e, "widen_i64", False):
                 # Checker xác định hằng này vượt 32-bit: ép toán hạng trái sang
                 # 64-bit để C tính trong 64-bit.
                 ct = T.c_type(self.gtype_of(e))
                 return f"((({ct})({lc})) {e.op} ({rc}))"
             # Modulo số thực: C cấm '%' trên double -> dùng fmod().
-            if e.op == "%":
+            if e.op in ("%", "/"):
                 lt = self.gtype_of(e.left)
                 rt = self.gtype_of(e.right)
                 if lt.kind == "float" or rt.kind == "float":
-                    return f"fmod({lc}, {rc})"
+                    if e.op == "%":
+                        return f"fmod({lc}, {rc})"
+                # Chia/lấy dư số NGUYÊN cho mẫu không hằng: kiểm 0 lúc chạy (C là
+                # UB — thường SIGFPE không lời giải thích). Hằng 0 checker đã bắt.
+                elif (lt.is_integer() and rt.is_integer()
+                        and not self._is_const_expr(e.right)):
+                    return f"g_chk_div({lc}, {e.op}, {rc}, {self._where(e)})"
             # So sánh BẰNG NỘI DUNG cho chuỗi: 'a == b' / 'a != b' trên str dùng
             # g_str_eq (an toàn null) thay vì so con trỏ — nhất quán với 'match'
             # chuỗi (strcmp) và tránh bẫy so địa chỉ literal.
@@ -1227,13 +1589,99 @@ class Codegen:
                     return f"(({T.c_type(rgt)})({lc}) << {rc})"
             return f"({lc} {e.op} {rc})"
         if isinstance(e, A.Unary):
+            if getattr(e, "widen_signed", False):
+                # '-w' với w: u32 -> C tính trong unsigned (4294967295); ép sang
+                # int64 TRƯỚC khi phủ định để ra -1 đúng như kiểu suy luận (i64).
+                return f"(-(int64_t)({self.gen_expr(e.operand)}))"
+            if e.op == "&":
+                # '&x' với x là biến 'let' (sinh 'T const x') cho 'const T*' ở C,
+                # nhưng G CHO PHÉP ghi qua con trỏ ('*p = v'). Ép bỏ 'const' để C
+                # không cảnh báo 'discards const qualifier'; tính bất biến của G
+                # đã được checker bảo đảm tĩnh.
+                # (chỉ con trỏ ĐƠN tới vô hướng/struct: '*[N]T' có kiểu C phức tạp
+                # 'T (*)[N]' mà T.c_type không diễn đạt được -> để nguyên)
+                gt = getattr(e, "gtype", None)
+                if (gt is not None and gt.kind == "ptr" and self._ptr_decl_ok(gt)
+                        and gt.elem is not None and gt.elem.kind != "array"):
+                    return f"(({T.c_type(gt)})&({self.gen_expr(e.operand)}))"
             return f"({e.op}{self.gen_expr(e.operand)})"
         if isinstance(e, A.Ternary):
             return f"({self.gen_expr(e.cond)} ? {self.gen_expr(e.then)} : {self.gen_expr(e.els)})"
+        if isinstance(e, A.MatchExpr):
+            return self.gen_match_expr(e)
         if isinstance(e, A.Call):
             return self.gen_call(e)
+        if isinstance(e, A.TryExpr):
+            # 'v try' -> ({ __auto_type t = v; if (!t.ok) return (R){0,0,t.err};
+            #              t.val; })  — lan truyền lỗi bằng return sớm.
+            rs = getattr(e, "ret_struct", None)
+            tv = self.tmp("_gtry")
+            inner = self.gen_expr(e.expr)
+            if rs is None:
+                return f"({inner}).val"
+            rc = self.cn(rs)
+            order = self.checker_struct_order(rs)
+            parts = []
+            for f in order:
+                if f == "ok":
+                    parts.append(".ok = false")
+                elif f == "err":
+                    parts.append(f".err = {tv}.err")
+                # Các trường còn lại (vd 'val') BỎ QUA: designated initializer
+                # của C tự zero chúng. Ghi '= {0}' tường minh sẽ cảnh báo
+                # "braces around scalar initializer" khi trường là vô hướng.
+            fail = f"(({rc}){{ {', '.join(parts)} }})"
+            return (f"({{ __auto_type {tv} = ({inner}); "
+                    f"if (!{tv}.ok) return {fail}; {tv}.val; }})")
+        if isinstance(e, A.Slice):
+            bt = self.gtype_of(e.base)
+            rt = self.gtype_of(e)
+            if rt.kind == "slice":
+                # Mảng tĩnh / slice -> slice. Dựng { ptr+lo, hi-lo } qua macro có
+                # kẹp biên; độ dài đi CÙNG con trỏ nên không thể tách rời.
+                sname = self._slice_typedef_gt(rt)
+                src = self.gen_expr(e.base)
+                if bt.kind == "array":
+                    n = bt.n if isinstance(bt.n, int) else 0
+                    src = f"(({sname}){{ {src}, (size_t){n} }})"
+                lo = self.gen_expr(e.lo) if e.lo is not None else "0"
+                if e.hi is not None:
+                    hi = f"(long long)({self.gen_expr(e.hi)})"
+                    if e.inclusive:
+                        hi = f"({hi} + 1)"
+                else:
+                    hi = "0x7fffffffffffffffLL"     # tới hết (macro sẽ kẹp)
+                return (f"g_sslice({sname}, {src}, (long long)({lo}), {hi}, "
+                        f"{self._where(e)})")
+            # s[lo..hi] -> g_str_slice(s, lo, hi); cận khuyết = 0 / độ dài chuỗi.
+            # Chuỗi nguồn vật hoá MỘT lần (có thể là lời gọi hàm).
+            base = self.gen_expr(e.base)
+            sv = self.tmp("_gsl")
+            lo = self.gen_expr(e.lo) if e.lo is not None else "0"
+            if e.hi is not None:
+                hi = f"(long long)({self.gen_expr(e.hi)})"
+                if e.inclusive:
+                    hi = f"({hi} + 1)"
+            else:
+                hi = f"(long long)g_str_len_i({sv})"
+            return (f"({{ const char* {sv} = ({base}); "
+                    f"g_str_slice({sv}, (long long)({lo}), {hi}); }})")
         if isinstance(e, A.Index):
-            return f"{self.gen_expr(e.base)}[{self.gen_expr(e.index)}]"
+            base_c = self.gen_expr(e.base)
+            idx_c = self.gen_expr(e.index)
+            # Kiểm tra biên LÚC CHẠY cho mảng TĨNH (cỡ biết lúc biên dịch) khi chỉ
+            # số không phải hằng (hằng đã được checker bắt). Con trỏ/[]T không có
+            # độ dài -> không kiểm. Tắt bằng --no-checks.
+            bt = self.gtype_of(e.base)
+            if bt.kind == "slice":
+                # Kiểm biên bằng ĐỘ DÀI MANG THEO — luôn có, kể cả khi slice đã
+                # đi qua nhiều lời gọi hàm.
+                return (f"({base_c}).ptr[g_sidx(({base_c}), {idx_c}, "
+                        f"{self._where(e)})]")
+            if (bt.kind == "array" and isinstance(bt.n, int)
+                    and not self._is_const_expr(e.index)):
+                return f"{base_c}[g_idx({idx_c}, {bt.n}, {self._where(e)})]"
+            return f"{base_c}[{idx_c}]"
         if isinstance(e, A.FieldAccess):
             ev = getattr(e, "enum_variant", None)
             if ev is not None:                       # Enum.Variant
@@ -1251,7 +1699,15 @@ class Codegen:
         if isinstance(e, A.SizeOfExpr):
             return f"sizeof({self.gen_expr(e.expr)})"
         if isinstance(e, A.ArrayLit):
-            return "{ " + ", ".join(self.gen_expr(x) for x in e.elements) + " }"
+            # Mảng literal ở vị trí BIỂU THỨC (đối số hàm, 'return [..]', toán
+            # hạng...): '{ ... }' trần chỉ hợp lệ trong khai báo -> phát compound
+            # literal C99 '((T[N]){ ... })' theo kiểu checker đã suy luận.
+            gt = getattr(e, "gtype", None)
+            init = self.gen_array_init(e)
+            if gt is not None and gt.kind == "array" and e.elements:
+                ty = self._gtype_to_ctype_decl(gt)
+                return f"(({self.c_decl('', ty)}){init})"
+            return init
         if isinstance(e, A.StructLit):
             return self.gen_struct_lit(e)
         raise CodegenError(f"biểu thức chưa hỗ trợ: {e}")
@@ -1280,11 +1736,26 @@ class Codegen:
         return t.kind == "str" or (
             t.kind == "ptr" and t.elem is not None and t.elem.kind == "char")
 
+    def _where(self, node) -> str:
+        """Chuỗi C literal 'file:dòng:cột' cho thông điệp panic lúc chạy."""
+        f = getattr(self, "cur_src_file", None) or "?"
+        f = f.replace("\\", "/").split("/")[-1]
+        return f'"{f}:{getattr(node, "line", 0)}:{getattr(node, "col", 0)}"'
+
     def gen_call(self, e: A.Call):
         # method TĨNH: Type.name(args) -> Type__name(args)
         if getattr(e, "is_static_method", False):
             arg_c = [self.gen_expr(a) for a in e.args]
             return f"{self.cn(e.struct)}__{e.method}({', '.join(arg_c)})"
+        # method DỰNG SẴN của 'str': 's.upper()' -> g_str_upper(s) (receiver là
+        # tham số đầu). Chỉ là đường cú pháp cho hàm runtime.
+        if getattr(e, "is_str_method", False):
+            args = [self.gen_expr(e.recv)] + [self.gen_expr(a) for a in e.args]
+            # 's.at(i)' đi qua macro có kiểm biên (tắt cùng '--no-checks' như
+            # 'a[i]'), thay vì trả '\0' âm thầm khi i ngoài chuỗi.
+            if e.str_c_fn == "g_str_at":
+                return f"g_str_at_c({', '.join(args)}, {self._where(e)})"
+            return f"{e.str_c_fn}({', '.join(args)})"
         # method call (đã phân giải trong checker)
         if getattr(e, "is_method", False):
             recv_c = self.gen_expr(e.recv)
@@ -1356,8 +1827,16 @@ class Codegen:
                 tv = self.tmp("_gdbg")
                 line = getattr(e, "line", 0)
                 gt = self.gtype_of(arg)
-                if gt.kind == "struct" and gt.name in self.struct_defs:
-                    frag, cargs = self._struct_print_fragment(gt.name, tv)
+                if gt.kind == "array" and isinstance(gt.n, int):
+                    # Mảng: không vật hoá (sẽ phân rã thành con trỏ) — dùng thẳng
+                    # biểu thức, vốn là một lvalue ổn định.
+                    frag, cargs = self._gtype_print_frag(gt, f"({ce})")
+                    fmt = self.c_string(f"[dbg dòng {line}] {frag}\n")
+                    tail = (", " + ", ".join(cargs)) if cargs else ""
+                    return f"({{ fprintf(stderr, {fmt}{tail}); {ce}; }})"
+                if (gt.kind == "struct" and gt.name in self.struct_defs
+                        or gt.kind == "slice"):
+                    frag, cargs = self._gtype_print_frag(gt, tv)
                     fmt = self.c_string(f"[dbg dòng {line}] {frag}\n")
                     tail = (", " + ", ".join(cargs)) if cargs else ""
                 else:
@@ -1401,6 +1880,41 @@ class Codegen:
                             f"{tx} < {tl} ? {tl} : ({tx} > {th} ? {th} : {tx}); }})")
                 return (f"(({cx}) < ({cl}) ? ({cl}) : "
                         f"(({cx}) > ({ch}) ? ({ch}) : ({cx})))")
+            # ---- allocator (0.20.0) ----
+            if name in ("alloc", "alloc_in"):
+                in_form = name == "alloc_in"
+                b = 1 if in_form else 0
+                a = self.gen_expr(e.args[0]) if in_form else "g_heap_allocator()"
+                ct = self._type_expr_to_c(e.args[b])
+                n = self.gen_expr(e.args[b + 1])
+                return (f"(({ct}*)g_a_alloc({a}, (size_t)({n}), sizeof({ct})))")
+            if name in ("free", "free_in"):
+                in_form = name == "free_in"
+                a = self.gen_expr(e.args[0]) if in_form else "g_heap_allocator()"
+                p = self.gen_expr(e.args[1 if in_form else 0])
+                return f"g_a_free({a}, (void*)({p}))"
+            if name in ("realloc", "realloc_in"):
+                in_form = name == "realloc_in"
+                b = 1 if in_form else 0
+                a = self.gen_expr(e.args[0]) if in_form else "g_heap_allocator()"
+                p = self.gen_expr(e.args[b])
+                ct = self._type_expr_to_c(e.args[b + 1])
+                n = self.gen_expr(e.args[b + 2])
+                return (f"(({ct}*)g_a_realloc({a}, (void*)({p}), "
+                        f"(size_t)({n}), sizeof({ct})))")
+            if name in ("dl_open", "dl_sym", "dl_close", "dl_error"):
+                args = ", ".join(self.gen_expr(a) for a in e.args)
+                return f"g_{name}({args})"
+            if name == "heap_allocator":
+                return "g_heap_allocator()"
+            if name == "arena_allocator":
+                # Arena giữ TRẠNG THÁI (offset) nên cần một GArena sống cùng
+                # scope; dùng biến tạm ở phạm vi hàm.
+                buf = self.gen_expr(e.args[0])
+                av = self.tmp("_gar")
+                self.arena_decls.append(av)
+                return (f"({av} = (GArena){{ (unsigned char*)({buf}).ptr, "
+                        f"({buf}).len, 0 }}, g_arena_allocator(&{av}))")
             if name in ("g_alloc", "g_realloc"):
                 # Vị trí đối-số-kiểu: g_alloc(T, n) -> 0; g_realloc(p, T, n) -> 1.
                 type_idx = 0 if name == "g_alloc" else 1
@@ -1451,6 +1965,8 @@ class Codegen:
         if gt.kind == "array" and gt.n not in (None, "dyn"):
             return str(gt.n)
         c = self.gen_expr(arg)
+        if gt.kind == "slice":
+            return f"({c}).len"          # độ dài mang theo trong chính slice
         if gt.kind == "str":
             return f"strlen({c})"
         return f"(sizeof({c}) / sizeof(({c})[0]))"
@@ -1540,6 +2056,12 @@ class Codegen:
             decls = []
             temps = []
             for a in value_args:
+                # Mảng KHÔNG vật hoá được: '__auto_type t = a' phân rã thành con
+                # trỏ và mất cỡ. Mảng luôn là lvalue ổn định (không hàm nào trả
+                # mảng theo giá trị) nên dùng thẳng biểu thức là an toàn.
+                if self.gtype_of(a).kind == "array":
+                    temps.append(self.gen_expr(a))
+                    continue
                 tv = self.tmp("_gpa")
                 decls.append(f"__auto_type {tv} = ({self.gen_expr(a)});")
                 temps.append(tv)
@@ -1659,11 +2181,39 @@ class Codegen:
             if key in ("", "v") and flags and flags[-1] in self._FMT_TYPE_CHARS:
                 key, flags = flags[-1], flags[:-1]
             spec, carg = self._fmt_placeholder(key, arg, ce)
+            # '{:08b}' trên số: đệm số 0 bằng chính bề rộng nhị phân (printf
+            # không đệm '0' cho %s). Các cờ khác (căn lề/width) vẫn qua %s.
+            if key == "b" and carg is not None and carg.startswith("g_bin_str("):
+                m = re.match(r"^[<>^]?0(\d+)$", flags)
+                if m:
+                    carg = carg[:carg.rfind(",")] + f", {m.group(1)})"
+                    flags = ""
+            # '^' = CĂN GIỮA (Rust): printf không có — kết xuất giá trị ra chuỗi
+            # rồi đệm hai bên bằng g_center(). Trước đây '^' bị bỏ qua âm thầm và
+            # in ra căn phải.
+            m = re.match(r"^\^(.*)$", flags)
+            if m and carg is not None:
+                rest = m.group(1)
+                mw = re.match(r"^[+ ]?#?0?(\d+)(\.\d+)?$", rest)
+                if mw:
+                    width = mw.group(1)
+                    inner = self._apply_fmt_flags(spec, rest.replace(width, "", 1))
+                    return "%s", f"g_center(g_fmt1({self.c_string(inner)}, {carg}), {width})"
             return self._apply_fmt_flags(spec, flags), carg
         if ce is None:
             ce = self.gen_expr(arg) if arg is not None else None
-        # bool tường minh -> in true/false
+        # '{b}': bool -> true/false; SỐ NGUYÊN -> nhị phân (kiểu Rust '{:b}').
+        # Trước đây '{:b}' trên 5 in ra 'true' — âm thầm sai nghĩa.
         if key == "b":
+            gt = self.gtype_of(arg) if arg is not None else T.UNKNOWN
+            if gt.kind in ("int", "char", "enum"):
+                if ce is None:
+                    return "%s", None
+                # Số âm: in bù hai theo đúng bề rộng kiểu; không âm: tối giản.
+                bits = gt.bits if gt.kind == "int" else (8 if gt.kind == "char" else 32)
+                signed = gt.signed if gt.kind == "int" else True
+                width = f"(({ce}) < 0 ? {bits} : 0)" if signed else "0"
+                return "%s", f"g_bin_str((uint64_t)({ce}), {width})"
             if ce is not None:
                 return "%s", f"(({ce}) ? \"true\" : \"false\")"
             return "%s", None
@@ -1707,6 +2257,58 @@ class Codegen:
             "%g": "double", "%c": "int", "%p": "void*",
         }.get(spec)   # %s -> None (không ép)
 
+    def _slice_print_fn(self, gt: T.GType) -> str:
+        """Đăng ký (nếu chưa có) hàm in cho 'slice<T>', trả về tên hàm.
+
+        In ra '[a, b, c]' vào bộ đệm xoay vòng tĩnh (không cần g_free), cắt bớt
+        sau _PRINT_ARRAY_MAX phần tử — giống cách in mảng tĩnh."""
+        sname = self._slice_typedef_gt(gt)
+        fn = self.slice_print_fns.get(sname)
+        if fn is not None:
+            return fn
+        fn = f"_gslprint_{sname}"
+        self.slice_print_fns[sname] = fn
+        frag, cargs = self._gtype_print_frag(gt.elem, "s.ptr[i]")
+        args = (", " + ", ".join(cargs)) if cargs else ""
+        cap = self._PRINT_ARRAY_MAX
+        self.slice_print_decls += [
+            f"static const char* {fn}({sname} s) {{",
+            "    static char bufs[4][512]; static unsigned bi = 0;",
+            "    char* b = bufs[bi++ & 3]; size_t off = 0;",
+            "    off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, \"[\");",
+            f"    size_t shown = s.len < {cap} ? s.len : {cap};",
+            "    for (size_t i = 0; i < shown; i++) {",
+            "        if (i) off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, \", \");",
+            f'        off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off, "{frag}"{args});',
+            "    }",
+            "    if (shown < s.len)",
+            "        off += (size_t)snprintf(b + off, sizeof(bufs[0]) - off,",
+            '                                ", ... (%zu phần tử)", s.len);',
+            "    snprintf(b + off, sizeof(bufs[0]) - off, \"]\");",
+            "    return b;",
+            "}",
+        ]
+        return fn
+
+    def _gtype_array_frag(self, gt: T.GType, cexpr):
+        """(đoạn_fmt, [c_args]) cho một MẢNG cỡ tĩnh: '[v0, v1, ...]'. Đệ quy cho
+        mảng nhiều chiều và cho phần tử struct/enum. Cắt bớt sau _PRINT_ARRAY_MAX
+        phần tử để chuỗi định dạng C không phình vô hạn."""
+        n = gt.n
+        parts = ["["]
+        cargs = []
+        shown = min(n, self._PRINT_ARRAY_MAX)
+        for i in range(shown):
+            if i:
+                parts.append(", ")
+            frag, fa = self._gtype_print_frag(gt.elem, f"({cexpr})[{i}]")
+            parts.append(frag)
+            cargs += fa
+        if shown < n:
+            parts.append(f", ... ({n} phần tử)")
+        parts.append("]")
+        return "".join(parts), cargs
+
     def _struct_print_fragment(self, sname, base):
         """(đoạn_fmt, [c_args]) để in một struct dạng 'Tên { f: v, ... }'. 'base'
         là biểu thức C của giá trị struct (ổn định, không tác dụng phụ — đã vật
@@ -1727,12 +2329,47 @@ class Codegen:
         parts.append(" }")
         return "".join(parts), cargs
 
+    # Số phần tử tối đa được BUNG khi in một trường mảng của struct; dài hơn thì
+    # in phần đầu rồi '...' (giữ chuỗi định dạng C ở kích thước hợp lý).
+    _PRINT_ARRAY_MAX = 8
+
     def _field_print_frag(self, t: A.Type, fexpr):
         """(đoạn_fmt, [c_args]) cho MỘT trường khi in struct, dựa trên A.Type."""
-        if self._dims(t):
-            return "[…]", []                       # mảng theo giá trị: nhãn rút gọn
+        dims = self._dims(t)
+        if dims:
+            # Mảng cỡ TĨNH: bung thành '[a, b, c]' (đệ quy cho mảng nhiều chiều)
+            # thay vì nhãn '[…]' vô nghĩa. Cỡ động ('dyn') vẫn là nhãn rút gọn.
+            if all(isinstance(d, int) for d in dims):
+                return self._array_print_frag(t, dims, fexpr)
+            return "[…]", []
         if getattr(t, "is_fn", False):
             return "<fn>", []
+        return self._scalar_print_frag(t, fexpr)
+
+    def _array_print_frag(self, t: A.Type, dims, fexpr):
+        """Bung một trường mảng cỡ tĩnh thành '[v0, v1, ...]' (đệ quy nhiều chiều)."""
+        n = dims[0]
+        inner = dataclasses.replace(t, dims=(list(dims[1:]) or None),
+                                    array=(dims[1] if len(dims) > 1 else None))
+        parts = ["["]
+        cargs = []
+        shown = min(n, self._PRINT_ARRAY_MAX)
+        for i in range(shown):
+            if i:
+                parts.append(", ")
+            if len(dims) > 1:
+                frag, fa = self._array_print_frag(inner, dims[1:], f"({fexpr})[{i}]")
+            else:
+                frag, fa = self._scalar_print_frag(t, f"({fexpr})[{i}]")
+            parts.append(frag)
+            cargs += fa
+        if shown < n:
+            parts.append(f", ... ({n} phần tử)")
+        parts.append("]")
+        return "".join(parts), cargs
+
+    def _scalar_print_frag(self, t: A.Type, fexpr):
+        """(đoạn_fmt, [c_args]) cho một giá trị KHÔNG phải mảng (phần tử/trường)."""
         if t.ptr > 0 or getattr(t, "elem_ptr", 0) > 0:
             if t.name == "char" and t.ptr == 1:    # *char -> chuỗi
                 return "%s", [f"({fexpr})"]
@@ -1781,10 +2418,12 @@ class Codegen:
                 # ổn định: dùng biến tạm (ce) nếu có, nếu không thì biểu thức trực
                 # tiếp (gen_print đã vật hoá struct nên nhánh None chỉ gặp tên trần).
                 gt = self.gtype_of(arg) if arg is not None else T.UNKNOWN
-                if (gt.kind == "struct" and gt.name in self.struct_defs
+                if ((gt.kind == "struct" and gt.name in self.struct_defs
+                     or gt.kind == "array" and isinstance(gt.n, int)
+                     or gt.kind == "slice")
                         and key.partition(":")[0] in ("", "v")):
                     base = ce if ce is not None else self.gen_expr(arg)
-                    frag, sargs = self._struct_print_fragment(gt.name, base)
+                    frag, sargs = self._gtype_print_frag(gt, base)
                     result.append(frag)
                     c_args.extend(sargs)
                     i = j + 1
@@ -1805,7 +2444,11 @@ class Codegen:
     def gen_struct_lit(self, e: A.StructLit):
         if not e.fields:
             return f"(({self.cn(e.name)}){{0}})"   # struct rỗng / khởi tạo zero
-        parts = [f".{self.cn(name)} = {self.gen_expr(val)}" for name, val in e.fields]
+        parts = []
+        for name, val in e.fields:
+            # Trường mảng: initializer '{..}' trần (compound literal không hợp lệ ở đây)
+            vc = self.gen_array_init(val) if isinstance(val, A.ArrayLit) else self.gen_expr(val)
+            parts.append(f".{self.cn(name)} = {vc}")
         return f"(({self.cn(e.name)}){{ {', '.join(parts)} }})"
 
     # ---------- literal helpers ----------

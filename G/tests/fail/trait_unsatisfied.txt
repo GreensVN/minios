@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'N' không thoả ràng buộc 'T: Ord2' của 'f' — thêm 'impl Ord2 for N { ... }'

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: lát cắt chuỗi 's[a..b]' cấp phát chuỗi mới trên heap nên không dùng được ở chế độ '--freestanding'

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: tham số 1 của 'take' cần 'S' nhưng nhận '*S' — có phải '*p'?

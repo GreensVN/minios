@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: min(): tham số 1 phải là số, nhận 'str'

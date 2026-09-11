@@ -10,7 +10,7 @@ KEYWORDS = {
     "fn", "let", "mut", "struct", "enum", "if", "else", "while", "for",
     "return", "match", "defer", "asm", "import", "true", "false",
     "comptime", "break", "continue", "as", "null", "sizeof", "alignof", "in",
-    "loop", "impl", "const", "extern",
+    "loop", "impl", "const", "extern", "trait", "try",
 }
 # 'step' là từ khoá NGỮ CẢNH: chỉ có nghĩa sau 'for i in a..b' (parser kiểm tra
 # id 'step' ở đúng vị trí đó) — ngoài ra vẫn là định danh bình thường
@@ -64,6 +64,11 @@ class Lexer:
         return self.src[j] if j < len(self.src) else ""
 
     def advance(self):
+        # Ở CUỐI NGUỒN trả chuỗi rỗng thay vì IndexError. Nguồn bị cắt cụt giữa
+        # một literal (vd "'" ở ký tự cuối file) từng làm trình biên dịch CRASH
+        # bằng traceback Python thay vì báo lỗi từ vựng tử tế.
+        if self.i >= len(self.src):
+            return ""
         c = self.src[self.i]
         self.i += 1
         if c == "\n":
@@ -249,13 +254,20 @@ class Lexer:
         self.advance()  # bỏ "
         buf = []
         while self.i < len(self.src) and self.peek() != '"':
+            # Xuống dòng giữa chuỗi gần như luôn là quên dấu '"' đóng. Báo ngay
+            # tại DÒNG MỞ chuỗi thay vì chạy tiếp tới cuối file rồi trỏ vào EOF.
+            if self.peek() == "\n":
+                raise LexError(
+                    "chuỗi không được đóng trước khi xuống dòng — thiếu '\"' "
+                    "(chuỗi nhiều dòng: dùng '\\n' hoặc nối nhiều chuỗi)",
+                    line, col)
             c = self.advance()
             if c == "\\":
                 buf.append(self.read_escape())
             else:
                 buf.append(c)
         if self.i >= len(self.src):
-            self.error("chuỗi không được đóng")
+            raise LexError("chuỗi không được đóng", line, col)
         self.advance()  # bỏ "
         self.add("str", "".join(buf), line, col)
 
@@ -266,7 +278,7 @@ class Lexer:
             ch = self.read_escape()
         else:
             ch = self.advance()
-        if self.peek() != "'":
+        if ch == "" or self.peek() != "'":
             self.error("ký tự không được đóng")
         self.advance()
         self.add("char", ch, line, col)
@@ -275,7 +287,10 @@ class Lexer:
         c = self.advance()
         if c == "x":  # \xNN hex (đúng 2 chữ số)
             h = ""
-            while len(h) < 2 and self.peek() in "0123456789abcdefABCDEF":
+            # CHÚ Ý: '"" in "0123..."' là True trong Python, nên phải kiểm
+            # peek() khác rỗng — nếu không, nguồn kết thúc giữa '\x' sẽ khiến
+            # vòng lặp chạy vô hạn (treo trình biên dịch).
+            while len(h) < 2 and self.peek() and self.peek() in "0123456789abcdefABCDEF":
                 h += self.advance()
             if not h:
                 self.error("escape \\x cần ít nhất một chữ số hex")
@@ -285,7 +300,7 @@ class Lexer:
                 self.error("escape \\u cần dạng \\u{XXXX}")
             self.advance()  # {
             h = ""
-            while self.peek() in "0123456789abcdefABCDEF":
+            while self.peek() and self.peek() in "0123456789abcdefABCDEF":
                 h += self.advance()
             if self.peek() != "}":
                 self.error("escape \\u{...} thiếu '}'")
@@ -296,8 +311,18 @@ class Lexer:
             if cp > 0x10FFFF:
                 self.error(f"điểm mã Unicode vượt giới hạn: U+{cp:X}")
             return chr(cp)
-        return {
+        table = {
             "n": "\n", "t": "\t", "r": "\r", "0": "\0",
             "\\": "\\", '"': '"', "'": "'", "a": "\a", "b": "\b",
             "f": "\f", "v": "\v", "e": "\x1b",
-        }.get(c, c)
+        }
+        if c not in table:
+            # Escape KHÔNG biết trước đây bị nuốt âm thầm ('\q' -> 'q'), nên gõ
+            # nhầm '\d' hay quên nhân đôi '\' trong đường dẫn Windows đều lặng lẽ
+            # sai. Từ chối, và nhắc cách viết dấu gạch chéo ngược theo nghĩa đen.
+            shown = repr(c)[1:-1] if c else "<hết file>"
+            self.error(
+                f"escape không hợp lệ: '\\{shown}' — escape hợp lệ: "
+                f"\\n \\t \\r \\0 \\a \\b \\f \\v \\e \\\\ \\\" \\' "
+                f"\\xNN \\u{{XXXX}} (muốn một dấu '\\' theo nghĩa đen thì viết '\\\\')")
+        return table[c]

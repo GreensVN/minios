@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: các nhánh của 'match' phải cùng kiểu: nhánh 1 cho 'int' nhưng nhánh 2 cho 'str'

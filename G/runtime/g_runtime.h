@@ -13,6 +13,17 @@
 #ifndef G_RUNTIME_H
 #define G_RUNTIME_H
 
+/* ---- G_INL: 'static inline' bình thường, NHƯNG dịch được thành định nghĩa
+ * ngoài-dòng khi cần. Backend LLVM sinh object không thấy hàm 'static inline'
+ * của header, nên nó biên dịch một shim với '-DG_RUNTIME_OUTLINE=1' để cùng
+ * header này phát ra ký hiệu thật. Một nguồn, hai cách dùng — không phải chép
+ * tay danh sách hàm (danh sách chép tay chắc chắn sẽ trôi lệch). */
+#if defined(G_RUNTIME_OUTLINE)
+#define G_INL
+#else
+#define G_INL static inline
+#endif
+
 /* Header tuân thủ freestanding (C11 §4) — an toàn ở mọi chế độ. */
 #include <stdint.h>
 #include <stddef.h>
@@ -29,16 +40,16 @@
  * cụ thể do codegen sinh: '*(volatile T*)p'. (Xem builtin vol_read/vol_write.) */
 
 /* ---- Thao tác bit an toàn (bao bọc __builtin_*; UB-trên-0 được xử lý) ---- */
-static inline int g_popcount(uint64_t x) { return __builtin_popcountll(x); }
-static inline int g_clz(uint64_t x) { return x ? __builtin_clzll(x) : 64; }
-static inline int g_ctz(uint64_t x) { return x ? __builtin_ctzll(x) : 64; }
-static inline uint16_t g_bswap16(uint16_t x) { return __builtin_bswap16(x); }
-static inline uint32_t g_bswap32(uint32_t x) { return __builtin_bswap32(x); }
-static inline uint64_t g_bswap64(uint64_t x) { return __builtin_bswap64(x); }
-static inline uint64_t g_rotl64(uint64_t x, unsigned n) {
+G_INL int g_popcount(uint64_t x) { return __builtin_popcountll(x); }
+G_INL int g_clz(uint64_t x) { return x ? __builtin_clzll(x) : 64; }
+G_INL int g_ctz(uint64_t x) { return x ? __builtin_ctzll(x) : 64; }
+G_INL uint16_t g_bswap16(uint16_t x) { return __builtin_bswap16(x); }
+G_INL uint32_t g_bswap32(uint32_t x) { return __builtin_bswap32(x); }
+G_INL uint64_t g_bswap64(uint64_t x) { return __builtin_bswap64(x); }
+G_INL uint64_t g_rotl64(uint64_t x, unsigned n) {
     n &= 63u; return n ? ((x << n) | (x >> (64 - n))) : x;
 }
-static inline uint64_t g_rotr64(uint64_t x, unsigned n) {
+G_INL uint64_t g_rotr64(uint64_t x, unsigned n) {
     n &= 63u; return n ? ((x >> n) | (x << (64 - n))) : x;
 }
 
@@ -48,36 +59,36 @@ static inline uint64_t g_rotr64(uint64_t x, unsigned n) {
  * được. Trên kiến trúc khác x86, các hàm đặc quyền là no-op an toàn để mã vẫn
  * biên dịch (cổng I/O không tồn tại ngoài x86). */
 #if defined(__x86_64__) || defined(__i386__)
-static inline void g_hlt(void)   { __asm__ __volatile__("hlt"); }
-static inline void g_cli(void)   { __asm__ __volatile__("cli"); }
-static inline void g_sti(void)   { __asm__ __volatile__("sti"); }
-static inline void g_pause(void) { __asm__ __volatile__("pause"); }
-static inline void g_nop(void)   { __asm__ __volatile__("nop"); }
-static inline void g_breakpoint(void) { __asm__ __volatile__("int3"); }
-static inline uint64_t g_rdtsc(void) {
+G_INL void g_hlt(void)   { __asm__ __volatile__("hlt"); }
+G_INL void g_cli(void)   { __asm__ __volatile__("cli"); }
+G_INL void g_sti(void)   { __asm__ __volatile__("sti"); }
+G_INL void g_pause(void) { __asm__ __volatile__("pause"); }
+G_INL void g_nop(void)   { __asm__ __volatile__("nop"); }
+G_INL void g_breakpoint(void) { __asm__ __volatile__("int3"); }
+G_INL uint64_t g_rdtsc(void) {
     uint32_t lo, hi;
     __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-static inline void g_outb(uint16_t port, uint8_t val) {
+G_INL void g_outb(uint16_t port, uint8_t val) {
     __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
 }
-static inline void g_outw(uint16_t port, uint16_t val) {
+G_INL void g_outw(uint16_t port, uint16_t val) {
     __asm__ __volatile__("outw %0, %1" : : "a"(val), "Nd"(port));
 }
-static inline void g_outl(uint16_t port, uint32_t val) {
+G_INL void g_outl(uint16_t port, uint32_t val) {
     __asm__ __volatile__("outl %0, %1" : : "a"(val), "Nd"(port));
 }
-static inline uint8_t g_inb(uint16_t port) {
+G_INL uint8_t g_inb(uint16_t port) {
     uint8_t r; __asm__ __volatile__("inb %1, %0" : "=a"(r) : "Nd"(port)); return r;
 }
-static inline uint16_t g_inw(uint16_t port) {
+G_INL uint16_t g_inw(uint16_t port) {
     uint16_t r; __asm__ __volatile__("inw %1, %0" : "=a"(r) : "Nd"(port)); return r;
 }
-static inline uint32_t g_inl(uint16_t port) {
+G_INL uint32_t g_inl(uint16_t port) {
     uint32_t r; __asm__ __volatile__("inl %1, %0" : "=a"(r) : "Nd"(port)); return r;
 }
-static inline void g_io_wait(void) {  /* trễ ~1us bằng ghi vào cổng không dùng */
+G_INL void g_io_wait(void) {  /* trễ ~1us bằng ghi vào cổng không dùng */
     __asm__ __volatile__("outb %%al, $0x80" : : "a"((uint8_t)0));
 }
 /* ---- Thanh ghi điều khiển / TLB / cache / MSR (đặc quyền, ring 0) ----
@@ -85,51 +96,64 @@ static inline void g_io_wait(void) {  /* trễ ~1us bằng ghi vào cổng khôn
  * /ghi MSR (vd EFER, APIC base). Dùng 'unsigned long' (đúng độ rộng word: 32-bit
  * trên i386, 64-bit trên x86_64) rồi mở rộng về uint64_t cho giao diện G đồng
  * nhất. CR2 chỉ-đọc (địa chỉ lỗi trang) nên không có g_write_cr2. */
-static inline uint64_t g_read_cr0(void) { unsigned long v; __asm__ __volatile__("mov %%cr0, %0" : "=r"(v)); return (uint64_t)v; }
-static inline uint64_t g_read_cr2(void) { unsigned long v; __asm__ __volatile__("mov %%cr2, %0" : "=r"(v)); return (uint64_t)v; }
-static inline uint64_t g_read_cr3(void) { unsigned long v; __asm__ __volatile__("mov %%cr3, %0" : "=r"(v)); return (uint64_t)v; }
-static inline uint64_t g_read_cr4(void) { unsigned long v; __asm__ __volatile__("mov %%cr4, %0" : "=r"(v)); return (uint64_t)v; }
-static inline void g_write_cr0(uint64_t v) { __asm__ __volatile__("mov %0, %%cr0" : : "r"((unsigned long)v) : "memory"); }
-static inline void g_write_cr3(uint64_t v) { __asm__ __volatile__("mov %0, %%cr3" : : "r"((unsigned long)v) : "memory"); }
-static inline void g_write_cr4(uint64_t v) { __asm__ __volatile__("mov %0, %%cr4" : : "r"((unsigned long)v) : "memory"); }
-static inline void g_invlpg(void* addr) { __asm__ __volatile__("invlpg (%0)" : : "r"(addr) : "memory"); }
-static inline void g_wbinvd(void) { __asm__ __volatile__("wbinvd" : : : "memory"); }
-static inline uint64_t g_rdmsr(uint32_t msr) {
+G_INL uint64_t g_read_cr0(void) { unsigned long v; __asm__ __volatile__("mov %%cr0, %0" : "=r"(v)); return (uint64_t)v; }
+G_INL uint64_t g_read_cr2(void) { unsigned long v; __asm__ __volatile__("mov %%cr2, %0" : "=r"(v)); return (uint64_t)v; }
+G_INL uint64_t g_read_cr3(void) { unsigned long v; __asm__ __volatile__("mov %%cr3, %0" : "=r"(v)); return (uint64_t)v; }
+G_INL uint64_t g_read_cr4(void) { unsigned long v; __asm__ __volatile__("mov %%cr4, %0" : "=r"(v)); return (uint64_t)v; }
+G_INL void g_write_cr0(uint64_t v) { __asm__ __volatile__("mov %0, %%cr0" : : "r"((unsigned long)v) : "memory"); }
+G_INL void g_write_cr3(uint64_t v) { __asm__ __volatile__("mov %0, %%cr3" : : "r"((unsigned long)v) : "memory"); }
+G_INL void g_write_cr4(uint64_t v) { __asm__ __volatile__("mov %0, %%cr4" : : "r"((unsigned long)v) : "memory"); }
+G_INL void g_invlpg(void* addr) { __asm__ __volatile__("invlpg (%0)" : : "r"(addr) : "memory"); }
+G_INL void g_wbinvd(void) { __asm__ __volatile__("wbinvd" : : : "memory"); }
+G_INL uint64_t g_rdmsr(uint32_t msr) {
     uint32_t lo, hi;
     __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
     return ((uint64_t)hi << 32) | lo;
 }
-static inline void g_wrmsr(uint32_t msr, uint64_t val) {
+G_INL void g_wrmsr(uint32_t msr, uint64_t val) {
     uint32_t lo = (uint32_t)val, hi = (uint32_t)(val >> 32);
     __asm__ __volatile__("wrmsr" : : "a"(lo), "d"(hi), "c"(msr));
 }
 #else
-static inline void g_hlt(void)   { for (;;) {} }
-static inline void g_cli(void)   {}
-static inline void g_sti(void)   {}
-static inline void g_pause(void) { __asm__ __volatile__("" ::: "memory"); }
-static inline void g_nop(void)   {}
-static inline void g_breakpoint(void) {}
-static inline uint64_t g_rdtsc(void) { return 0; }
-static inline void g_outb(uint16_t port, uint8_t val) { (void)port; (void)val; }
-static inline void g_outw(uint16_t port, uint16_t val) { (void)port; (void)val; }
-static inline void g_outl(uint16_t port, uint32_t val) { (void)port; (void)val; }
-static inline uint8_t  g_inb(uint16_t port) { (void)port; return 0; }
-static inline uint16_t g_inw(uint16_t port) { (void)port; return 0; }
-static inline uint32_t g_inl(uint16_t port) { (void)port; return 0; }
-static inline void g_io_wait(void) {}
-/* Ngoài x86: control register/TLB/MSR không tồn tại — no-op an toàn để biên dịch. */
-static inline uint64_t g_read_cr0(void) { return 0; }
-static inline uint64_t g_read_cr2(void) { return 0; }
-static inline uint64_t g_read_cr3(void) { return 0; }
-static inline uint64_t g_read_cr4(void) { return 0; }
-static inline void g_write_cr0(uint64_t v) { (void)v; }
-static inline void g_write_cr3(uint64_t v) { (void)v; }
-static inline void g_write_cr4(uint64_t v) { (void)v; }
-static inline void g_invlpg(void* addr) { (void)addr; }
-static inline void g_wbinvd(void) {}
-static inline uint64_t g_rdmsr(uint32_t msr) { (void)msr; return 0; }
-static inline void g_wrmsr(uint32_t msr, uint64_t val) { (void)msr; (void)val; }
+/* ---- NGOÀI x86 ----
+ * Trước đây khối này định nghĩa MỌI intrinsic x86 thành no-op im lặng, nên
+ * 'outb(0x3F8, c)' trên aarch64 biên dịch sạch rồi KHÔNG LÀM GÌ — một driver
+ * chết lặng, không cảnh báo. Nay:
+ *   - thứ CÓ tương đương thật (spin hint, hlt-như-wfi) thì cài đúng;
+ *   - thứ KHÔNG tồn tại (cổng I/O, CR, MSR) thì KHÔNG định nghĩa nữa.
+ * Checker của G chặn chúng theo NĂNG LỰC TARGET (compiler/target.py) trước khi
+ * tới đây; nếu vì lý do nào đó vẫn lọt xuống, lỗi liên kết C còn tốt hơn nhiều
+ * so với một no-op âm thầm. */
+#if defined(__aarch64__)
+G_INL void g_hlt(void)   { __asm__ __volatile__("wfi"); }
+G_INL void g_pause(void) { __asm__ __volatile__("yield"); }
+G_INL void g_breakpoint(void) { __asm__ __volatile__("brk #0"); }
+G_INL uint64_t g_rdtsc(void) {
+    uint64_t v; __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v)); return v;
+}
+G_INL void g_cli(void) { __asm__ __volatile__("msr daifset, #2"); }
+G_INL void g_sti(void) { __asm__ __volatile__("msr daifclr, #2"); }
+#elif defined(__riscv) && __riscv_xlen == 64
+G_INL void g_hlt(void)   { __asm__ __volatile__("wfi"); }
+G_INL void g_pause(void) { __asm__ __volatile__("" ::: "memory"); }
+G_INL void g_breakpoint(void) { __asm__ __volatile__("ebreak"); }
+G_INL uint64_t g_rdtsc(void) {
+    uint64_t v; __asm__ __volatile__("rdcycle %0" : "=r"(v)); return v;
+}
+G_INL void g_cli(void) { __asm__ __volatile__("csrci sstatus, 2"); }
+G_INL void g_sti(void) { __asm__ __volatile__("csrsi sstatus, 2"); }
+#else
+/* Kiến trúc không rõ: chỉ giữ những gì diễn đạt được bằng C thuần. */
+G_INL void g_hlt(void)   { for (;;) {} }
+G_INL void g_pause(void) { __asm__ __volatile__("" ::: "memory"); }
+G_INL void g_breakpoint(void) {}
+G_INL uint64_t g_rdtsc(void) { return 0; }
+G_INL void g_cli(void) {}
+G_INL void g_sti(void) {}
+#endif
+G_INL void g_nop(void) { __asm__ __volatile__("" ::: "memory"); }
+/* CỐ Ý không định nghĩa: g_inb/g_outb/... (cổng I/O), g_read_crN/g_write_crN,
+ * g_rdmsr/g_wrmsr, g_invlpg/g_wbinvd — chúng KHÔNG tồn tại ngoài x86. */
 #endif
 
 /* ===================================================================== */
@@ -188,10 +212,11 @@ _Noreturn static inline void g_todo(const char* w) { (void)w; g_cli(); for (;;) 
 #include <math.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdarg.h>
 
 /* Mã màu ANSI — chỉ bật khi stderr là terminal (đường ống/redirect -> chuỗi
  * rỗng, giữ output sạch để so khớp test). Kiểm tra isatty một lần rồi nhớ. */
-static inline const char* g_tcolor(const char* code) {
+G_INL const char* g_tcolor(const char* code) {
     static int tty = -1;
     if (tty < 0) tty = isatty(fileno(stderr));
     return tty ? code : "";
@@ -223,8 +248,8 @@ _Noreturn static inline void g_todo(const char* where) {
  * in tổng kết và trả về SỐ ca trượt (dùng làm mã thoát của 'main' rất tiện). */
 static int g_test_pass = 0;
 static int g_test_fail = 0;
-static inline void g_test_record(bool ok) { if (ok) g_test_pass++; else g_test_fail++; }
-static inline int g_test_summary(void) {
+G_INL void g_test_record(bool ok) { if (ok) g_test_pass++; else g_test_fail++; }
+G_INL int g_test_summary(void) {
     int total = g_test_pass + g_test_fail;
     if (g_test_fail == 0)
         fprintf(stderr, "\n%s✓ %d/%d ca test đều đạt%s\n",
@@ -248,7 +273,7 @@ static inline int g_test_summary(void) {
 /* ---- Tiện ích chuỗi (cấp phát trên heap; nhớ g_free khi xong) ----
  * G coi 'str' là 'const char*'. Các hàm dưới đây trả về chuỗi mới trên heap
  * (trừ hàm chỉ đọc). Thiết kế an toàn null: chuỗi NULL coi như rỗng. */
-static inline const char* g_str_dup(const char* s) {
+G_INL const char* g_str_dup(const char* s) {
     if (!s) s = "";
     size_t n = strlen(s);
     char* p = (char*)malloc(n + 1);
@@ -256,7 +281,7 @@ static inline const char* g_str_dup(const char* s) {
     return p;
 }
 
-static inline const char* g_str_concat(const char* a, const char* b) {
+G_INL const char* g_str_concat(const char* a, const char* b) {
     if (!a) a = "";
     if (!b) b = "";
     size_t na = strlen(a), nb = strlen(b);
@@ -268,7 +293,7 @@ static inline const char* g_str_concat(const char* a, const char* b) {
 }
 
 /* Cắt chuỗi con [start, start+len) — chỉ số/độ dài được kẹp vào biên hợp lệ. */
-static inline const char* g_substr(const char* s, ptrdiff_t start, ptrdiff_t len) {
+G_INL const char* g_substr(const char* s, ptrdiff_t start, ptrdiff_t len) {
     if (!s) s = "";
     ptrdiff_t n = (ptrdiff_t)strlen(s);
     if (start < 0) start = 0;
@@ -282,54 +307,110 @@ static inline const char* g_substr(const char* s, ptrdiff_t start, ptrdiff_t len
     return p;
 }
 
-static inline bool g_str_eq(const char* a, const char* b) {
+G_INL bool g_str_eq(const char* a, const char* b) {
     if (a == b) return true;
     if (!a || !b) return false;
     return strcmp(a, b) == 0;
 }
 
 /* Vị trí xuất hiện đầu tiên của 'needle' trong 'hay', hoặc -1. */
-static inline ptrdiff_t g_str_index(const char* hay, const char* needle) {
+G_INL ptrdiff_t g_str_index(const char* hay, const char* needle) {
     if (!hay || !needle) return -1;
     const char* p = strstr(hay, needle);
     return p ? (ptrdiff_t)(p - hay) : -1;
 }
 
-static inline bool g_str_contains(const char* hay, const char* needle) {
+G_INL bool g_str_contains(const char* hay, const char* needle) {
     return g_str_index(hay, needle) >= 0;
 }
 
-static inline bool g_str_starts_with(const char* s, const char* pre) {
+G_INL bool g_str_starts_with(const char* s, const char* pre) {
     if (!s || !pre) return false;
     size_t np = strlen(pre);
     return strncmp(s, pre, np) == 0;
 }
 
-static inline bool g_str_ends_with(const char* s, const char* suf) {
+G_INL bool g_str_ends_with(const char* s, const char* suf) {
     if (!s || !suf) return false;
     size_t ns = strlen(s), nf = strlen(suf);
     return nf <= ns && memcmp(s + ns - nf, suf, nf) == 0;
 }
 
-static inline int64_t g_parse_int(const char* s) {
+G_INL int64_t g_parse_int(const char* s) {
     if (!s) return 0;
     return (int64_t)strtoll(s, NULL, 10);
 }
 
-static inline double g_parse_float(const char* s) {
+G_INL double g_parse_float(const char* s) {
     if (!s) return 0.0;
     return strtod(s, NULL);
 }
 
 /* Chuyển số nguyên thành chuỗi mới trên heap (cơ số 10). */
-static inline const char* g_int_to_str(int64_t v) {
+G_INL const char* g_int_to_str(int64_t v) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%lld", (long long)v);
     return g_str_dup(buf);
 }
 
+/* Biểu diễn NHỊ PHÂN của một số nguyên (cho placeholder '{b}' trên số, kiểu
+ * Rust '{:b}'). Trả về con trỏ vào bộ đệm xoay vòng tĩnh (đủ cho một lời gọi
+ * printf có tới 8 placeholder nhị phân) — không cần g_free. 'bits' = bề rộng
+ * kiểu để số âm in dạng bù hai đúng bề rộng (như Rust), 0 = tối giản. */
+G_INL const char* g_bin_str(uint64_t v, int bits) {
+    static char bufs[8][72];
+    static unsigned idx = 0;
+    char* buf = bufs[idx++ & 7];
+    int n = bits > 0 ? bits : 64;
+    if (bits > 0 && bits < 64) v &= (((uint64_t)1 << bits) - 1);
+    int i = 0;
+    if (bits <= 0) {                     /* bỏ số 0 dẫn đầu (không âm) */
+        if (v == 0) { buf[0] = '0'; buf[1] = 0; return buf; }
+        while (n > 1 && !((v >> (n - 1)) & 1)) n--;
+    }
+    for (int b = n - 1; b >= 0; b--) buf[i++] = ((v >> b) & 1) ? '1' : '0';
+    buf[i] = 0;
+    return buf;
+}
+
+/* Định dạng MỘT giá trị theo 'fmt' vào bộ đệm xoay vòng tĩnh (không cần g_free).
+ * Dùng cho cờ căn giữa '{:^N}': printf không căn giữa được, nên G kết xuất giá
+ * trị ra chuỗi trước rồi đệm hai bên bằng g_center(). */
+#ifndef G_FREESTANDING
+G_INL const char* g_fmt1(const char* fmt, ...) {
+    static char bufs[8][256];
+    static unsigned idx = 0;
+    char* buf = bufs[idx++ & 7];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(bufs[0]), fmt, ap);
+    va_end(ap);
+    return buf;
+}
+#endif
+
+/* Căn GIỮA một chuỗi trong bề rộng 'w' (cho cờ định dạng '{:^N}' kiểu Rust —
+ * printf không có căn giữa). Phần dư lẻ được thêm vào bên PHẢI, giống Rust.
+ * Trả về con trỏ vào bộ đệm xoay vòng tĩnh (không cần g_free); chuỗi dài hơn
+ * 'w' được trả nguyên vẹn (không cắt), như printf với width tối thiểu. */
+G_INL const char* g_center(const char* s, int w) {
+    static char bufs[8][256];
+    static unsigned idx = 0;
+    if (!s) s = "";
+    int n = 0;
+    while (s[n]) n++;
+    if (w <= n || w >= 256) return s;
+    char* buf = bufs[idx++ & 7];
+    int left = (w - n) / 2, i = 0;
+    for (int k = 0; k < left; k++) buf[i++] = ' ';
+    for (int k = 0; k < n; k++) buf[i++] = s[k];
+    while (i < w) buf[i++] = ' ';
+    buf[i] = 0;
+    return buf;
+}
+
 /* Đảo ngược chuỗi -> chuỗi mới (heap). */
-static inline const char* g_str_rev(const char* s) {
+G_INL const char* g_str_rev(const char* s) {
     if (!s) s = "";
     size_t n = strlen(s);
     char* p = (char*)malloc(n + 1);
@@ -340,7 +421,7 @@ static inline const char* g_str_rev(const char* s) {
 }
 
 /* Chuyển sang CHỮ HOA / chữ thường (ASCII) -> chuỗi mới (heap). */
-static inline const char* g_str_upper(const char* s) {
+G_INL const char* g_str_upper(const char* s) {
     if (!s) s = "";
     size_t n = strlen(s);
     char* p = (char*)malloc(n + 1);
@@ -352,7 +433,7 @@ static inline const char* g_str_upper(const char* s) {
     p[n] = '\0';
     return p;
 }
-static inline const char* g_str_lower(const char* s) {
+G_INL const char* g_str_lower(const char* s) {
     if (!s) s = "";
     size_t n = strlen(s);
     char* p = (char*)malloc(n + 1);
@@ -366,7 +447,7 @@ static inline const char* g_str_lower(const char* s) {
 }
 
 /* Lặp chuỗi 's' đúng 'k' lần -> chuỗi mới (heap). k<=0 -> chuỗi rỗng. */
-static inline const char* g_str_repeat(const char* s, ptrdiff_t k) {
+G_INL const char* g_str_repeat(const char* s, ptrdiff_t k) {
     if (!s) s = "";
     if (k < 0) k = 0;
     size_t n = strlen(s);
@@ -378,7 +459,7 @@ static inline const char* g_str_repeat(const char* s, ptrdiff_t k) {
 }
 
 /* Đếm số lần ký tự 'c' xuất hiện trong chuỗi. */
-static inline ptrdiff_t g_str_count(const char* s, char c) {
+G_INL ptrdiff_t g_str_count(const char* s, char c) {
     if (!s) return 0;
     ptrdiff_t cnt = 0;
     for (; *s; s++) if (*s == c) cnt++;
@@ -386,7 +467,7 @@ static inline ptrdiff_t g_str_count(const char* s, char c) {
 }
 
 /* Cắt khoảng trắng ASCII đầu/cuối -> chuỗi mới (heap). */
-static inline const char* g_str_trim(const char* s) {
+G_INL const char* g_str_trim(const char* s) {
     if (!s) s = "";
     const char* a = s;
     while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r'
@@ -402,8 +483,48 @@ static inline const char* g_str_trim(const char* s) {
     return p;
 }
 
+/* ---- Bọc kiểu cho method dựng sẵn của 'str' ('s.len()', 's.sub(a,b)'...) ----
+ * Kiểu trả về khớp đúng kiểu G khai báo trong _STR_METHODS (usize/int/char),
+ * để printf và phép gán không cần ép kiểu thủ công. */
+G_INL size_t g_str_len_i(const char* s) { return s ? strlen(s) : 0; }
+G_INL bool   g_str_is_empty(const char* s) { return !s || !s[0]; }
+G_INL int    g_str_index_i(const char* h, const char* n) {
+    return (int)g_str_index(h, n);
+}
+G_INL int    g_str_count_i(const char* s, char c) {
+    return (int)g_str_count(s, c);
+}
+G_INL const char* g_str_repeat_i(const char* s, int k) {
+    return g_str_repeat(s, (ptrdiff_t)k);
+}
+G_INL const char* g_substr_i(const char* s, int start, int len) {
+    return g_substr(s, (ptrdiff_t)start, (ptrdiff_t)len);
+}
+/* Lát cắt chuỗi s[lo..hi) -> chuỗi mới (heap). Cận được kẹp vào [0, len] và
+ * hi < lo cho ra chuỗi rỗng, nên không bao giờ đọc ngoài vùng nhớ. */
+G_INL const char* g_str_slice(const char* s, long long lo, long long hi) {
+    if (!s) s = "";
+    long long n = (long long)strlen(s);
+    if (lo < 0) lo = 0;
+    if (hi > n) hi = n;
+    if (hi < lo) hi = lo;
+    size_t len = (size_t)(hi - lo);
+    char* p = (char*)malloc(len + 1);
+    if (!p) return NULL;
+    memcpy(p, s + lo, len);
+    p[len] = '\0';
+    return p;
+}
+
+/* Ký tự tại vị trí i, có KIỂM biên (i ngoài [0, len] -> '\0' thay vì đọc rác). */
+G_INL char g_str_at(const char* s, int i) {
+    if (!s || i < 0) return '\0';
+    size_t n = strlen(s);
+    return ((size_t)i > n) ? '\0' : s[i];
+}
+
 /* Thay mọi ký tự 'from' bằng 'to' -> chuỗi mới (heap). */
-static inline const char* g_str_replace_char(const char* s, char from, char to) {
+G_INL const char* g_str_replace_char(const char* s, char from, char to) {
     if (!s) s = "";
     size_t n = strlen(s);
     char* p = (char*)malloc(n + 1);
@@ -416,7 +537,7 @@ static inline const char* g_str_replace_char(const char* s, char from, char to) 
 /* ---- Đọc đầu vào từ stdin (cấp phát heap -> nhớ g_free với g_read_line) ----
  * Trước đây G không có cách đọc đầu vào nào — các hàm này mở khoá chương trình
  * tương tác (đọc dòng/số). Thiết kế an toàn: EOF -> NULL/0. */
-static inline const char* g_read_line(void) {
+G_INL const char* g_read_line(void) {
     size_t cap = 64, len = 0;
     char* buf = (char*)malloc(cap);
     if (!buf) return NULL;
@@ -436,32 +557,32 @@ static inline const char* g_read_line(void) {
 }
 
 /* Đọc một số nguyên (bỏ qua khoảng trắng dẫn đầu). Thất bại/EOF -> 0. */
-static inline int64_t g_read_int(void) {
+G_INL int64_t g_read_int(void) {
     long long v = 0;
     if (scanf("%lld", &v) != 1) return 0;
     return (int64_t)v;
 }
 
 /* Đọc một số thực. Thất bại/EOF -> 0.0. */
-static inline double g_read_float(void) {
+G_INL double g_read_float(void) {
     double v = 0.0;
     if (scanf("%lf", &v) != 1) return 0.0;
     return v;
 }
 
 /* Đã hết đầu vào (EOF) chưa? */
-static inline bool g_eof(void) { return feof(stdin) != 0; }
+G_INL bool g_eof(void) { return feof(stdin) != 0; }
 
 /* ---- Sinh số giả ngẫu nhiên & thời gian (tiện cho ví dụ/thuật toán) ---- */
 /* Hạt giống phụ thuộc thời gian (kết hợp time + clock để khác nhau mỗi lần chạy). */
-static inline uint64_t g_time_seed(void) {
+G_INL uint64_t g_time_seed(void) {
     uint64_t t = (uint64_t)time(NULL);
     uint64_t c = (uint64_t)clock();
     return (t * 0x9E3779B97F4A7C15ULL) ^ (c << 21) ^ (c >> 7) ^ 0xD1B54A32D192ED03ULL;
 }
 
 /* Thời gian CPU đã dùng (giây) — đo hiệu năng. */
-static inline double g_clock_secs(void) {
+G_INL double g_clock_secs(void) {
     return (double)clock() / (double)CLOCKS_PER_SEC;
 }
 
@@ -480,5 +601,230 @@ static inline double g_clock_secs(void) {
 #define G_U64_MAX  18446744073709551615ULL
 
 #endif /* G_FREESTANDING */
+
+/* ================= FFI ĐỘNG (nạp thư viện lúc CHẠY) ================
+ * 'extern fn' là FFI TĨNH: ký hiệu phải có lúc liên kết. Đôi khi không đủ —
+ * plugin, thư viện tuỳ chọn, hay ABI chỉ biết lúc chạy. Bộ này bọc dlopen/dlsym.
+ *
+ * CỐ Ý tối giản và KHÔNG an toàn kiểu: G không thể kiểm chữ ký của một ký hiệu
+ * nạp lúc chạy, nên người dùng phải tự ép con trỏ hàm cho đúng. Đây là ranh
+ * giới 'unsafe' — được ghi rõ trong docs/FFI.md thay vì giả vờ an toàn.
+ *
+ * Chỉ có ở chế độ HOSTED: freestanding không có bộ nạp động. */
+#ifndef G_FREESTANDING
+G_INL void* g_dl_open(const char* path) {
+#ifdef _WIN32
+    (void)path; return NULL;      /* Windows: cần LoadLibraryA, chưa hỗ trợ */
+#else
+    extern void* dlopen(const char*, int);
+    /* 2 = RTLD_NOW, 256 = RTLD_GLOBAL trên glibc/musl/macOS */
+    return dlopen(path, 2);
+#endif
+}
+G_INL void* g_dl_sym(void* h, const char* name) {
+#ifdef _WIN32
+    (void)h; (void)name; return NULL;
+#else
+    extern void* dlsym(void*, const char*);
+    return dlsym(h, name);
+#endif
+}
+G_INL int g_dl_close(void* h) {
+#ifdef _WIN32
+    (void)h; return 0;
+#else
+    extern int dlclose(void*);
+    return h ? dlclose(h) : 0;
+#endif
+}
+G_INL const char* g_dl_error(void) {
+#ifdef _WIN32
+    return "FFI động chưa hỗ trợ trên Windows";
+#else
+    extern char* dlerror(void);
+    const char* e = dlerror();
+    return e ? e : "";
+#endif
+}
+#endif /* !G_FREESTANDING */
+
+/* ================= ALLOCATOR — bảng hàm thay thế được ==============
+ * 'alloc/free/realloc' của G đi qua struct này thay vì gọi thẳng malloc, nên
+ * cùng một đoạn mã chạy được ở hosted (libc), kernel (arena tự cấp), và
+ * embedded (vùng nhớ cố định).
+ *
+ * Vì sao struct-vtable chứ không phải trait: G chưa có trait. Struct cho đúng
+ * khả năng cần ngay, hoạt động ở freestanding, và bọc lại bằng trait sau này
+ * mà không đổi bố cục. */
+typedef struct GAllocator {
+    void* ctx;
+    void* (*alloc_fn)(void* ctx, size_t n, size_t sz);
+    void  (*free_fn)(void* ctx, void* p);
+    void* (*realloc_fn)(void* ctx, void* p, size_t n, size_t sz);
+} GAllocator;
+
+G_INL void* g_a_alloc(GAllocator a, size_t n, size_t sz) {
+    return a.alloc_fn ? a.alloc_fn(a.ctx, n, sz) : NULL;
+}
+G_INL void g_a_free(GAllocator a, void* p) {
+    if (a.free_fn) a.free_fn(a.ctx, p);
+}
+G_INL void* g_a_realloc(GAllocator a, void* p, size_t n, size_t sz) {
+    return a.realloc_fn ? a.realloc_fn(a.ctx, p, n, sz) : NULL;
+}
+
+/* ---- Arena: cấp phát dồn, giải phóng MỘT LƯỢT ----
+ * 'free' của arena là no-op có chủ ý: arena chết cùng bộ đệm nền. Đây là mô
+ * hình cấp phát chuẩn cho kernel/trình biên dịch — không cần theo dõi từng ô. */
+typedef struct GArena {
+    unsigned char* buf;
+    size_t cap;
+    size_t off;
+} GArena;
+
+G_INL void* g_arena_alloc(void* ctx, size_t n, size_t sz) {
+    GArena* a = (GArena*)ctx;
+    if (!a || !a->buf) return NULL;
+    /* Tràn khi nhân: n*sz có thể wrap -> kiểm trước, đừng cấp phát thiếu. */
+    if (sz && n > (size_t)-1 / sz) return NULL;
+    size_t need = n * sz;
+    size_t al = sizeof(void*);
+    size_t start = (a->off + al - 1) & ~(al - 1);
+    if (start > a->cap || need > a->cap - start) return NULL;
+    a->off = start + need;
+    unsigned char* p = a->buf + start;
+    for (size_t i = 0; i < need; i++) p[i] = 0;   /* zero như calloc */
+    return p;
+}
+G_INL void g_arena_free(void* ctx, void* p) { (void)ctx; (void)p; }
+G_INL void* g_arena_realloc(void* ctx, void* p, size_t n, size_t sz) {
+    /* Arena không thu hồi: cấp mới rồi chép. Người gọi biết đây là arena. */
+    void* q = g_arena_alloc(ctx, n, sz);
+    if (q && p) {
+        size_t need = n * sz;
+        memcpy(q, p, need);
+    }
+    return q;
+}
+G_INL GAllocator g_arena_allocator(GArena* a) {
+    GAllocator r;
+    r.ctx = (void*)a;
+    r.alloc_fn = g_arena_alloc;
+    r.free_fn = g_arena_free;
+    r.realloc_fn = g_arena_realloc;
+    return r;
+}
+
+#ifndef G_FREESTANDING
+G_INL void* g_heap_alloc(void* ctx, size_t n, size_t sz) {
+    (void)ctx; return calloc(n, sz);
+}
+G_INL void g_heap_free(void* ctx, void* p) { (void)ctx; free(p); }
+G_INL void* g_heap_realloc(void* ctx, void* p, size_t n, size_t sz) {
+    (void)ctx;
+    if (sz && n > (size_t)-1 / sz) return NULL;
+    return realloc(p, n * sz);
+}
+G_INL GAllocator g_heap_allocator(void) {
+    GAllocator r;
+    r.ctx = NULL;
+    r.alloc_fn = g_heap_alloc;
+    r.free_fn = g_heap_free;
+    r.realloc_fn = g_heap_realloc;
+    return r;
+}
+#endif /* !G_FREESTANDING */
+
+/* ================= SLICE — con trỏ béo (ptr + len) ==================
+ * 'slice<T>' của G hạ thành một struct nhỏ { T* ptr; size_t len; } truyền theo
+ * GIÁ TRỊ. Khác '[]T' (con trỏ trần, mất độ dài) và khác '[N]T' (mảng tĩnh).
+ *
+ * Vì sao là struct chứ không phải hai tham số rời: để độ dài KHÔNG THỂ bị tách
+ * khỏi con trỏ. Đó chính là lỗi mà slice sinh ra để loại bỏ.
+ *
+ * Typedef cho từng kiểu phần tử do codegen phát (G_SLICE_DEF), vì C không có
+ * generic. Kiểm biên dùng chung g_bounds_fail với mảng tĩnh.
+ * Hoạt động cả ở chế độ freestanding (không cần libc). */
+#define G_SLICE_DEF(T, NAME) \
+    typedef struct NAME { T* ptr; size_t len; } NAME
+
+/* ---- Kiểm tra biên & chia 0 lúc chạy (kiểu Rust) ----
+ * Codegen bọc 'a[i]' trên MẢNG TĨNH (cỡ biết lúc biên dịch) và '/', '%' số
+ * nguyên bằng các macro này; -DG_NO_CHECKS (gc --no-checks) tắt hoàn toàn.
+ * Freestanding: g_panic = dừng CPU (định nghĩa bên trên). */
+_Noreturn static inline void g_bounds_fail(long long i, long long n, const char* where) {
+#ifndef G_FREESTANDING
+    fprintf(stderr, "\033[1;31mG panic:\033[0m chỉ số %lld vượt biên mảng cỡ %lld tại %s\n",
+            i, n, where);
+    exit(101);
+#else
+    (void)i; (void)n; (void)where; g_cli(); for (;;) g_hlt();
+#endif
+}
+_Noreturn static inline void g_div_zero_fail(const char* where) {
+#ifndef G_FREESTANDING
+    fprintf(stderr, "\033[1;31mG panic:\033[0m chia cho 0 tại %s\n", where);
+    exit(101);
+#else
+    (void)where; g_cli(); for (;;) g_hlt();
+#endif
+}
+_Noreturn static inline void g_str_at_fail(long long i, long long n, const char* where) {
+#ifndef G_FREESTANDING
+    fprintf(stderr, "\033[1;31mG panic:\033[0m chỉ số %lld vượt biên chuỗi dài %lld tại %s\n",
+            i, n, where);
+    exit(101);
+#else
+    (void)i; (void)n; (void)where; g_cli(); for (;;) g_hlt();
+#endif
+}
+/* 's.at(i)' CÓ kiểm biên: chỉ số ngoài [0, len) là panic, giống 'a[i]' trên mảng
+ * tĩnh. Trước đây trả '\0' âm thầm nên lỗi off-by-one lọt qua không dấu vết. */
+G_INL char g_str_at_chk(const char* s, int i, const char* where) {
+    long long n = s ? (long long)strlen(s) : 0;
+    if (i < 0 || (long long)i >= n) g_str_at_fail((long long)i, n, where);
+    return s[i];
+}
+
+#ifdef G_NO_CHECKS
+#define g_idx(i, n, where)      (i)
+#define g_str_at_c(s, i, where) g_str_at((s), (i))
+#define g_chk_div(a, op, b, where) ((a) op (b))
+#else
+#define g_idx(i, n, where) \
+    ({ __auto_type _gi = (i); \
+       if (__builtin_expect((unsigned long long)_gi >= (unsigned long long)(n), 0)) \
+           g_bounds_fail((long long)_gi, (long long)(n), where); \
+       _gi; })
+#define g_chk_div(a, op, b, where) \
+    ({ __auto_type _gb = (b); \
+       if (__builtin_expect(_gb == 0, 0)) g_div_zero_fail(where); \
+       (a) op _gb; })
+#define g_str_at_c(s, i, where) g_str_at_chk((s), (i), (where))
+#endif
+
+/* Chỉ số slice có kiểm biên: dùng ĐỘ DÀI MANG THEO trong chính slice, nên
+ * không thể "quên" truyền len như khi dùng con trỏ trần. */
+#ifdef G_NO_CHECKS
+#define g_sidx(s, i, where)      (i)
+#else
+#define g_sidx(s, i, where) \
+    ({ __auto_type _gsi = (i); \
+       if (__builtin_expect((unsigned long long)_gsi >= \
+                            (unsigned long long)((s).len), 0)) \
+           g_bounds_fail((long long)_gsi, (long long)((s).len), where); \
+       _gsi; })
+#endif
+
+/* Cắt lát một slice: s[lo..hi). Kẹp biên rồi báo lỗi nếu vượt — không bao giờ
+ * tạo ra slice trỏ ra ngoài vùng nhớ gốc. */
+#define g_sslice(SLICE_T, s, lo, hi, where) \
+    ({ __auto_type _gs = (s); \
+       long long _glo = (long long)(lo), _ghi = (long long)(hi); \
+       if (_glo < 0) _glo = 0; \
+       if (_ghi > (long long)_gs.len) _ghi = (long long)_gs.len; \
+       if (_ghi < _glo) _ghi = _glo; \
+       (SLICE_T){ _gs.ptr + _glo, (size_t)(_ghi - _glo) }; })
+
 
 #endif /* G_RUNTIME_H */

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: thuộc tính '@packed' bị lặp lại

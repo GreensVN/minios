@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: placeholder '{b}' cần bool (in true/false) hoặc số nguyên (in nhị phân) nhưng đối số kiểu 'f64'

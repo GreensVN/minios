@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: placeholder '{name}' không hợp lệ: khoá 'name' không phải specifier (hợp lệ: {}, {d}, {x}, {f}, {s}, {c}, {b}, {p}... hoặc '{:cờ}') — G không nội suy tên biến trong chuỗi; viết '{}' và truyền 'name' làm đối số

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: trả về địa chỉ của biến cục bộ 's' — bộ nhớ này bị huỷ khi hàm kết thúc (con trỏ treo). Cấp phát heap (g_alloc) hoặc nhận con trỏ tới bộ đệm đầu ra làm tham số

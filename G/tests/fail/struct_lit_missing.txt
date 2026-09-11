@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: struct 'S' còn thiếu trường: b, c — phải khởi tạo đủ mọi trường (C sẽ âm thầm gán 0)

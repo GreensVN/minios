@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: toán hạng của '&&' không thể là giá trị kiểu 'void' — hàm không trả về giá trị

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'try' cần một giá trị kiểu Result (struct có 'ok', 'val', 'err'), nhận 'int'

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: arena_allocator(buf): cần bộ đệm byte ('mut slice<u8>' hoặc '[N]u8'), nhận '[4]int'

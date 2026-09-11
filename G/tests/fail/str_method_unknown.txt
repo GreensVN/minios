@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'str' không có method 'lenn' — có phải 'len'? (method của str: at, concat, contains, count, ends_with, eq, index_of, is_empty, len, lower, repeat, rev, starts_with, sub, to_float, to_int, trim, upper)

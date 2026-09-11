@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class GType:
-    kind: str            # void bool int float char str ptr array struct enum func null unknown
+    kind: str            # void bool int float char str ptr array slice struct enum func null unknown
     name: str = ""       # tên int (i32...) / struct / enum
     bits: int = 0
     signed: bool = True
@@ -16,6 +16,7 @@ class GType:
     n: object = None     # array: số phần tử (int hoặc 'dyn')
     params: tuple = ()   # func
     ret: object = None   # func
+    mutable_slice: bool = False   # slice: cho phép GHI qua nó?
 
     # ---------- thuộc tính ----------
     def is_numeric(self):
@@ -27,12 +28,18 @@ class GType:
     def is_pointerish(self):
         return self.kind in ("ptr", "str", "null")
 
+    def is_slice(self):
+        return self.kind == "slice"
+
     def __str__(self):
         if self.kind == "ptr":
             return "*" + str(self.elem)
         if self.kind == "array":
             sz = "" if self.n == "dyn" else str(self.n)
             return f"[{sz}]{self.elem}"
+        if self.kind == "slice":
+            return f"slice<{self.elem}>" if not self.mutable_slice \
+                else f"mut slice<{self.elem}>"
         if self.kind in ("struct", "enum"):
             return self.name
         if self.kind in ("int", "float") and self.name:
@@ -61,8 +68,13 @@ U16 = GType("int", "u16", 16, False)
 U32 = GType("int", "u32", 32, False)
 U64 = GType("int", "u64", 64, False)
 INT = GType("int", "int", 32, True)
+# 'usize'/'isize' theo BỀ RỘNG CON TRỎ của target. Giá trị dưới đây là mặc định
+# 64-bit; trên target 32-bit (vd wasm32) chúng được thay bằng bản 32-bit qua
+# 'sized_primitives(ptr_bits)'. KHÔNG hardcode 64 ở nơi khác — dùng bảng đó.
 USIZE = GType("int", "usize", 64, False)
 ISIZE = GType("int", "isize", 64, True)
+USIZE32 = GType("int", "usize", 32, False)
+ISIZE32 = GType("int", "isize", 32, True)
 F32 = GType("float", "f32", 32)
 F64 = GType("float", "f64", 64)
 
@@ -75,12 +87,49 @@ PRIMITIVES = {
 }
 
 
+def sized_primitives(ptr_bits: int) -> dict:
+    """Bảng kiểu nguyên thuỷ cho một bề rộng con trỏ cụ thể.
+
+    Chỉ 'usize'/'isize' phụ thuộc target; các kiểu bề rộng CỐ ĐỊNH (i32, u64...)
+    giống nhau ở mọi nơi — đó là lý do chúng tồn tại."""
+    if ptr_bits >= 64:
+        return PRIMITIVES
+    tbl = dict(PRIMITIVES)
+    tbl["usize"] = USIZE32
+    tbl["isize"] = ISIZE32
+    return tbl
+
+
+def int_bounds(ptr_bits: int) -> dict:
+    """Biên giá trị hợp lệ của từng kiểu nguyên, theo bề rộng con trỏ."""
+    b = {
+        "i8": (-(1 << 7), (1 << 7) - 1),
+        "i16": (-(1 << 15), (1 << 15) - 1),
+        "i32": (-(1 << 31), (1 << 31) - 1),
+        "int": (-(1 << 31), (1 << 31) - 1),
+        "i64": (-(1 << 63), (1 << 63) - 1),
+        "u8": (0, (1 << 8) - 1),
+        "u16": (0, (1 << 16) - 1),
+        "u32": (0, (1 << 32) - 1),
+        "u64": (0, (1 << 64) - 1),
+    }
+    n = ptr_bits if ptr_bits in (32, 64) else 64
+    b["isize"] = (-(1 << (n - 1)), (1 << (n - 1)) - 1)
+    b["usize"] = (0, (1 << n) - 1)
+    return b
+
+
 def ptr_of(elem):
     return GType("ptr", elem=elem)
 
 
 def array_of(elem, n):
     return GType("array", elem=elem, n=n)
+
+
+def slice_of(elem, mutable=False):
+    """slice<T> — con trỏ BÉO: (ptr, len). Khác '[]T' (con trỏ trần, mất độ dài)."""
+    return GType("slice", elem=elem, mutable_slice=mutable)
 
 
 # ---------- ánh xạ sang C ----------
@@ -93,7 +142,29 @@ _C_NAME = {
 }
 
 
+def slice_c_name(elem: GType) -> str:
+    """Tên struct C cho slice<T> — MỘT nguồn chân lý cho cả hai backend.
+
+    Trước đây codegen và backend c-ir mỗi bên tự ghép tên với thứ tự thay thế
+    khác nhau, nên 'slice<str>' ra 'GSlice_str' ở chỗ này và
+    'GSlice_const_charp' ở chỗ kia — typedef không khớp lúc dùng."""
+    base = c_type(elem)
+    if base == "const char*":
+        return "GSlice_str"
+    ident = base.replace("*", "p").replace(" ", "_")
+    return f"GSlice_{ident}"
+
+
+#: Struct DỰNG SẴN của G -> tên C tương ứng trong runtime. Chúng không có
+#: A.StructDef nên backend phải biết ánh xạ này.
+BUILTIN_STRUCT_C = {"Allocator": "GAllocator"}
+
+
 def c_type(t: GType) -> str:
+    if t.kind == "slice":
+        return slice_c_name(t.elem)
+    if t.kind == "struct" and t.name in BUILTIN_STRUCT_C:
+        return BUILTIN_STRUCT_C[t.name]
     if t.kind == "ptr":
         return c_type(t.elem) + "*"
     if t.kind == "array":

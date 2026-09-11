@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: điều kiện 'if' không thể là giá trị kiểu 'slice<int>' — muốn kiểm tra rỗng dùng 'len(s) == 0'

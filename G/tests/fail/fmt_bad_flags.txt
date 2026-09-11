@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: cờ định dạng ':-5' trong '{:-5}' không hợp lệ (dạng: [<|>|^][+| ][#][0][độ_rộng][.độ_chính_xác][chữ_kiểu], vd '{:>8}', '{:08.3f}', '{:#x}')

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: arena_allocator(buf): bộ đệm phải khả biến ('let mut') — arena ghi vào nó

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: hàm 'f' cần 2 tham số nhưng nhận 1

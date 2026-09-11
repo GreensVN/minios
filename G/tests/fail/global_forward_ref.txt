@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: giá trị khởi tạo của 'A' dùng global 'B' khai báo SAU nó — lúc đó 'B' chưa được khởi tạo (đọc 0). Đổi thứ tự khai báo

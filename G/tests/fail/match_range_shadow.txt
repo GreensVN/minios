@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: pattern '5' đã nằm trong khoảng ở nhánh 1 — nhánh này không bao giờ chạy

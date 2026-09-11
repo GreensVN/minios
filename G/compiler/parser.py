@@ -45,9 +45,13 @@ class Parser:
         j = self.pos + off
         return self.toks[j] if j < len(self.toks) else self.toks[-1]
 
-    def error(self, msg):
+    def error(self, msg, show_token=True):
+        """Báo lỗi cú pháp tại token hiện tại. 'show_token=False' cho các thông
+        báo đã tự đủ nghĩa (kèm gợi ý sửa) — phụ chú '(gặp ...)' khi đó chỉ trỏ
+        vào token đứng SAU chỗ sai và gây nhiễu."""
         t = self.cur()
-        raise ParseError(f"{msg} (gặp {t.kind} {t.value!r})", t.line, t.col)
+        suffix = f" (gặp {t.kind} {t.value!r})" if show_token else ""
+        raise ParseError(f"{msg}{suffix}", t.line, t.col)
 
     def advance(self) -> Token:
         t = self.toks[self.pos]
@@ -109,11 +113,26 @@ class Parser:
             if self.is_kw("import"):
                 if attrs:
                     self.error("'import' không nhận thuộc tính @")
-                self.advance()
+                itok = self.advance()
+                # Lưu kèm DÒNG/CỘT: lỗi "không tìm thấy module" trước đây luôn
+                # trỏ về dòng 1, tức chỉ vào một import khác khi file có nhiều
+                # import.
                 if self.check("str"):
-                    prog.imports.append(self.advance().value)
+                    iname = self.advance().value
                 else:
-                    prog.imports.append(self.expect("id").value)
+                    iname = self.expect("id").value
+                    # 'import mod/a' — đường dẫn có '/' phải đặt trong ngoặc kép;
+                    # nếu không, lexer thấy '/' là phép chia và báo "cần khai báo
+                    # cấp cao", chẳng gợi ý gì cho người dùng.
+                    if self.is_op("/"):
+                        parts = [iname]
+                        while self.accept("op", "/"):
+                            parts.append(self.expect("id").value)
+                        guess = "/".join(parts)
+                        self.error(
+                            f"đường dẫn module có '/' phải đặt trong ngoặc kép: "
+                            f'import "{guess}.g"', show_token=False)
+                prog.imports.append((iname, itok.line, itok.col))
                 self.skip_semis()
             elif self.is_kw("fn") or self.is_kw("comptime"):
                 prog.items.append(self._with_attrs(self.parse_fn(), attrs))
@@ -130,6 +149,10 @@ class Parser:
                 if attrs:
                     self.error("'enum' không nhận thuộc tính @")
                 prog.items.append(self.parse_enum())
+            elif self.is_kw("trait"):
+                if attrs:
+                    self.error("'trait' không nhận thuộc tính @")
+                prog.items.append(self.parse_trait())
             elif self.is_kw("impl"):
                 if attrs:
                     self.error("'impl' không nhận thuộc tính @ (đặt @ trên method)")
@@ -167,44 +190,89 @@ class Parser:
                 pass
         return item
 
-    def parse_fn(self, recv=None) -> A.Function:
+    def parse_fn(self, recv=None, no_body=False) -> A.Function:
         t = self.cur()
         is_comptime = bool(self.accept("kw", "comptime"))
         is_extern = bool(self.accept("kw", "extern"))
         self.expect("kw", "fn")
         name = self.expect("id").value
+        # Tham số KIỂU: 'fn max<T>(a: T, b: T) -> T'. Hàm generic được NHÂN BẢN
+        # theo từng bộ kiểu cụ thể (monomorphization) trong checker, nên IR và
+        # backend không cần biết generic là gì.
+        type_params = []
+        type_bounds = {}
+        if self.is_op("<"):
+            self.advance()
+            while not self.is_op(">"):
+                tp = self.expect("id").value
+                type_params.append(tp)
+                # Ràng buộc trait: 'fn f<T: Ord>' hoặc 'T: Ord + Show'.
+                if self.accept("op", ":"):
+                    bs = [self.expect("id").value]
+                    while self.accept("op", "+"):
+                        bs.append(self.expect("id").value)
+                    type_bounds[tp] = bs
+                if not self.accept("op", ","):
+                    break
+            if not self.is_op(">"):
+                self.error("danh sách tham số kiểu cần đóng bằng '>' "
+                           "(vd 'fn f<T>(...)')", show_token=False)
+            self.advance()
+            if not type_params:
+                self.error("'fn " + name + "<>' cần ít nhất một tham số kiểu",
+                           show_token=False)
         self.expect("op", "(")
         params = []
         while not self.is_op(")"):
-            # 'mut' tuỳ chọn trước tên tham số (gồm 'mut self'): tham số trong G vốn
-            # đã là ô nhớ khả biến, nên 'mut' ở đây chỉ mang tính tài liệu (báo hiệu
-            # 'method này sửa self' / 'tham số này bị ghi'). Chấp nhận & bỏ qua.
-            self.accept("kw", "mut")
+            # 'mut' trước tên tham số (gồm 'mut self') cho phép GHI vào tham số
+            # bên trong hàm — nhất quán với 'let'/'let mut'. Không có 'mut' thì
+            # tham số là binding bất biến (bản sao của đối số vẫn chỉ đọc).
+            pmut = bool(self.accept("kw", "mut"))
             pname = self.expect("id").value
             # 'self' trong method có thể không cần kiểu
             if pname == "self" and recv and not self.is_op(":"):
-                params.append(A.Param("self", A.Type(recv, ptr=1)))
+                params.append(A.Param("self", A.Type(recv, ptr=1), pmut))
             else:
                 self.expect("op", ":")
-                params.append(A.Param(pname, self.parse_type()))
+                params.append(A.Param(pname, self.parse_type(), pmut))
             if not self.accept("op", ","):
                 break
         self.expect("op", ")")
         ret = A.Type("void")
         if self.accept("op", "->"):
             ret = self.parse_type()
-        if is_extern or self.is_op(";"):
+        # Trong 'trait', method chỉ có CHỮ KÝ: thân là tuỳ chọn (kết thúc bằng
+        # ';', xuống dòng, hoặc '}' đóng trait).
+        if is_extern or self.is_op(";") or (no_body and not self.is_op("{")):
             self.skip_semis()
             body = None
         else:
             body = self.parse_block()
-        return A.Function(name, params, ret, body, is_comptime, is_extern,
+        # Truyền bằng TỪ KHOÁ: thêm một trường vào A.Function sẽ làm lệch mọi
+        # đối số vị trí phía sau (đã từng khiến 'is_extern' nhận nhầm giá trị
+        # của 'is_comptime' -> extern fn bị đổi tên và lỗi liên kết).
+        return A.Function(name, params, ret, body,
+                          type_params=type_params, type_bounds=type_bounds,
+                          is_comptime=is_comptime, is_extern=is_extern,
                           recv=recv, **self.pos_of(t))
 
     def parse_struct(self) -> A.StructDef:
         t = self.cur()
         self.expect("kw", "struct")
         name = self.expect("id").value
+        # 'struct Pair<A, B> { ... }' — struct generic, nhân bản theo bộ kiểu
+        # cụ thể giống hàm generic.
+        type_params = []
+        if self.is_op("<"):
+            self.advance()
+            while not self.is_op(">"):
+                type_params.append(self.expect("id").value)
+                if not self.accept("op", ","):
+                    break
+            self.expect("op", ">")
+            if not type_params:
+                self.error(f"'struct {name}<>' cần ít nhất một tham số kiểu",
+                           show_token=False)
         self.expect("op", "{")
         fields = []
         self.skip_semis()
@@ -215,7 +283,8 @@ class Parser:
             self.accept("op", ",")
             self.skip_semis()
         self.expect("op", "}")
-        return A.StructDef(name, fields, **self.pos_of(t))
+        return A.StructDef(name, fields, type_params=type_params,
+                           **self.pos_of(t))
 
     def parse_enum(self) -> A.EnumDef:
         t = self.cur()
@@ -235,9 +304,62 @@ class Parser:
         self.expect("op", "}")
         return A.EnumDef(name, variants, **self.pos_of(t))
 
+    def parse_trait(self) -> A.TraitDef:
+        """'trait Eq { fn eq(self, o: Self) -> bool }' — chỉ CHỮ KÝ, không thân."""
+        t = self.expect("kw", "trait")
+        name = self.expect("id").value
+        self.expect("op", "{")
+        methods = []
+        self.skip_semis()
+        while not self.is_op("}"):
+            m = self.parse_fn(recv=name, no_body=True)
+            if m.body is not None:
+                self.error(f"method '{name}.{m.name}' trong trait chỉ khai báo "
+                           f"CHỮ KÝ (không có thân) — thân nằm ở 'impl {name} "
+                           f"for <Kiểu>'", show_token=False)
+            methods.append(m)
+            self.skip_semis()
+        self.expect("op", "}")
+        if not methods:
+            self.error(f"trait '{name}' rỗng — cần ít nhất một method",
+                       show_token=False)
+        return A.TraitDef(name, methods, **self.pos_of(t))
+
     def parse_impl(self) -> A.Impl:
         t = self.expect("kw", "impl")
+        # 'impl<T, E> Result<T, E> { ... }' — impl cho struct GENERIC. Tham số
+        # kiểu khai báo sau 'impl' rồi dùng lại trong tên kiểu.
+        impl_tparams = []
+        if self.is_op("<"):
+            self.advance()
+            while not self.is_op(">"):
+                impl_tparams.append(self.expect("id").value)
+                if not self.accept("op", ","):
+                    break
+            self.expect("op", ">")
         struct = self.expect("id").value
+        # 'impl Trait for Kiểu { ... }'
+        trait = None
+        if self.check("id", "for") or (self.is_kw("for")):
+            self.advance()
+            trait = struct
+            struct = self.expect("id").value
+        # Bỏ qua đối số kiểu trên tên kiểu ('Result<T, E>') — khuôn được nhân
+        # bản theo tham số của chính 'impl<...>'.
+        if self.is_op("<") and self._looks_like_type_args():
+            self.advance()
+            depth = 0
+            while True:
+                if self.is_op("<"):
+                    depth += 1
+                elif self.is_op(">"):
+                    if depth == 0:
+                        self.advance()
+                        break
+                    depth -= 1
+                elif self.check("eof"):
+                    break
+                self.advance()
         self.expect("op", "{")
         methods = []
         self.skip_semis()
@@ -245,8 +367,11 @@ class Parser:
             mattrs = self.parse_attrs()
             methods.append(self._with_attrs(self.parse_fn(recv=struct), mattrs))
             self.skip_semis()
+        # (recv luôn là KIỂU nhận, kể cả trong 'impl Trait for Kiểu')
         self.expect("op", "}")
-        return A.Impl(struct, methods, **self.pos_of(t))
+        im = A.Impl(struct, methods, trait=trait, **self.pos_of(t))
+        im.type_params = impl_tparams
+        return im
 
     def parse_global(self) -> A.GlobalVar:
         t = self.cur()
@@ -255,6 +380,15 @@ class Parser:
         if not is_const:
             self.expect("kw", "let")
         mutable = bool(self.accept("kw", "mut"))
+        # Destructuring chỉ dùng được trong THÂN HÀM (nó khử đường thành nhiều
+        # câu lệnh, mà cấp cao nhất chỉ nhận khai báo). Báo rõ thay vì để lỗi
+        # "cần khai báo cấp cao (gặp op '{')".
+        if (self.cur().kind == "id" and self.at(1).value == "{"
+                and self._looks_like_destructure()):
+            self.error(
+                f"'let {self.cur().value}{{...}}' (destructuring) chỉ dùng được "
+                f"bên trong hàm — ở cấp cao nhất hãy khai báo từng global một",
+                show_token=False)
         name = self.expect("id").value
         typ = None
         if self.accept("op", ":"):
@@ -314,8 +448,45 @@ class Parser:
             ty = A.Type("fn", ptr=ptr, elem_ptr=elem_ptr, is_fn=True,
                         fn_params=fparams, fn_ret=fret, **self.pos_of(t))
         else:
+            # 'slice<T>' / 'mut slice<T>' — con trỏ béo (ptr + len). Giữ '[]T'
+            # nguyên nghĩa cũ (con trỏ trần) để mã hiện có không đổi hành vi.
+            smut = False
+            if self.is_kw("mut") and self.at(1).kind == "id" \
+                    and self.at(1).value == "slice":
+                self.advance()
+                smut = True
+            if self.check("id", "slice") and self.at(1).value == "<":
+                self.advance()                      # 'slice'
+                self.expect("op", "<")
+                inner = self.parse_type()
+                if not self.is_op(">"):
+                    self.error("kiểu slice cần đóng bằng '>' (vd 'slice<int>')",
+                               show_token=False)
+                self.advance()                      # '>'
+                ty = A.Type("slice", ptr=ptr, elem_ptr=elem_ptr,
+                            slice_elem=inner, slice_mut=smut, **self.pos_of(t))
+                if dims:
+                    ty.dims = dims
+                    ty.array = dims[0]
+                return ty
+            if smut:
+                self.error("'mut' ở vị trí kiểu chỉ dùng với slice "
+                           "(vd 'mut slice<int>')", show_token=False)
             name = self.expect("id").value
-            ty = A.Type(name, ptr=ptr, elem_ptr=elem_ptr, **self.pos_of(t))
+            targs = None
+            if self.is_op("<") and self._looks_like_type_args():
+                self.advance()
+                targs = []
+                while not self.is_op(">"):
+                    targs.append(self.parse_type())
+                    if not self.accept("op", ","):
+                        break
+                if not self.is_op(">"):
+                    self.error(f"đối số kiểu của '{name}' cần đóng bằng '>'",
+                               show_token=False)
+                self.advance()
+            ty = A.Type(name, type_args=targs, ptr=ptr, elem_ptr=elem_ptr,
+                        **self.pos_of(t))
         if dims:
             ty.dims = dims
             ty.array = dims[0]            # chiều ngoài cùng (giữ tương thích)
@@ -327,7 +498,13 @@ class Parser:
         stmts = []
         self.skip_semis()
         while not self.is_op("}") and not self.check("eof"):
-            stmts.append(self.parse_stmt())
+            st = self.parse_stmt()
+            # A.Multi (destructuring) làm PHẲNG ngay vào block cha: các pass sau
+            # (checker/codegen/phân tích luồng) không cần biết tới nó.
+            if isinstance(st, A.Multi):
+                stmts.extend(st.stmts)
+            else:
+                stmts.append(st)
             self.skip_semis()
         self.expect("op", "}")
         return stmts
@@ -381,12 +558,16 @@ class Parser:
         self.skip_semis()
         return A.ExprStmt(expr)
 
-    def parse_let(self) -> A.Let:
+    def parse_let(self):
         t = self.cur()
         is_const = bool(self.accept("kw", "const"))
         if not is_const:
             self.expect("kw", "let")
         mutable = bool(self.accept("kw", "mut")) and not is_const
+        # ----- destructuring struct: 'let P{x, y} = v' / 'let P{x: a} = v' -----
+        if (self.cur().kind == "id" and self.at(1).value == "{"
+                and self._looks_like_destructure()):
+            return self._parse_destructure(t, mutable, is_const)
         name = self.expect("id").value
         typ = None
         if self.accept("op", ":"):
@@ -395,7 +576,50 @@ class Parser:
         if self.accept("op", "="):
             value = self.parse_expr()
         self.skip_semis()
-        return A.Let(name, typ, value, mutable, **self.pos_of(t))
+        return A.Let(name, typ, value, mutable, is_const=is_const, **self.pos_of(t))
+
+    def _looks_like_destructure(self):
+        """Phân biệt 'let P{x, y} = v' (destructuring) với 'let s = P{x: 1}'.
+        Ở vị trí NGAY SAU 'let', một 'Tên {' luôn là pattern: dạng khởi tạo phải
+        có '=' trước struct literal."""
+        i = 2                       # bỏ qua 'Tên' '{'
+        if self.at(i).value == "}":
+            return True
+        return self.at(i).kind == "id" and self.at(i + 1).value in (",", "}", ":")
+
+    def _parse_destructure(self, t, mutable, is_const):
+        """'let P{x, y} = v' -> một Let ẩn giữ v, rồi mỗi trường một Let.
+        Giá trị được vật hoá đúng MỘT lần (v có thể có tác dụng phụ)."""
+        sname = self.expect("id").value
+        self.expect("op", "{")
+        binds = []                  # (tên_trường, tên_biến)
+        self.skip_semis()
+        while not self.is_op("}"):
+            fname = self.expect("id").value
+            vname = fname
+            if self.accept("op", ":"):        # 'x: tên_khác'
+                vname = self.expect("id").value
+            binds.append((fname, vname))
+            self.accept("op", ",")
+            self.skip_semis()
+        self.expect("op", "}")
+        if not binds:
+            self.error(f"'let {sname}{{}}' không rút trích trường nào — bỏ câu "
+                       f"lệnh này, hoặc liệt kê các trường cần lấy",
+                       show_token=False)
+        if not self.accept("op", "="):
+            self.error(f"'let {sname}{{...}}' cần '=' và một giá trị để rút trích")
+        value = self.parse_expr()
+        self.skip_semis()
+        pos = self.pos_of(t)
+        tmp = f"__gds{t.line}_{t.col}"
+        stmts = [A.Let(tmp, None, value, False, **pos)]
+        stmts[0].destructure_of = sname
+        for fname, vname in binds:
+            fa = A.FieldAccess(A.Ident(tmp, line=t.line, col=t.col), fname,
+                               t.line, t.col)
+            stmts.append(A.Let(vname, None, fa, mutable, is_const=is_const, **pos))
+        return A.Multi(stmts, **pos)
 
     def parse_if(self) -> A.If:
         self.expect("kw", "if")
@@ -421,6 +645,10 @@ class Parser:
         # for i in a..b | a..=b [step N]   (vòng lặp theo khoảng)
         inclusive = self.accept("op", "..=")
         if inclusive or self.accept("op", ".."):
+            if mutable:
+                raise ParseError("biến đếm của 'for i in a..b' luôn bất biến (là biến "
+                                 "đếm của vòng lặp) — bỏ 'mut'; cần sửa thì 'let mut "
+                                 "j = i' trong thân vòng lặp", t.line, t.col)
             end = self.parse_expr()
             step = self.parse_expr() if self.accept("id", "step") else None
             self.no_struct_lit = saved
@@ -456,12 +684,85 @@ class Parser:
             if self.is_op("{"):
                 body = self.parse_block()
             else:
-                body = [self.parse_stmt()]
+                one = self.parse_stmt()
+                body = one.stmts if isinstance(one, A.Multi) else [one]
             arms.append((pats, guard, body))
             self.accept("op", ",")
             self.skip_semis()
         self.expect("op", "}")
         return A.Match(subject, arms, **self.pos_of(t))
+
+    def _parse_value_block(self, what):
+        """Thân của một nhánh if/match Ở VỊ TRÍ BIỂU THỨC: '{ expr }' (đúng MỘT
+        biểu thức, không phải câu lệnh). Chuỗi câu lệnh cần 'if' dạng lệnh."""
+        self.expect("op", "{")
+        self.skip_semis()
+        if self.is_op("}"):
+            self.error(f"nhánh {what} ở vị trí biểu thức phải cho một GIÁ TRỊ — "
+                       f"khối '{{ }}' rỗng không có giá trị")
+        saved = self.no_struct_lit
+        self.no_struct_lit = False
+        e = self.parse_expr()
+        self.no_struct_lit = saved
+        self.skip_semis()
+        if not self.is_op("}"):
+            self.error(f"nhánh {what} ở vị trí biểu thức chỉ được chứa MỘT biểu "
+                       f"thức (không phải câu lệnh) — dùng '{what}' dạng câu lệnh "
+                       f"nếu cần nhiều lệnh")
+        self.expect("op", "}")
+        return e
+
+    def parse_if_expr(self) -> A.IfExpr:
+        """'let v = if c { a } else { b }' — nhánh 'else' BẮT BUỘC (biểu thức
+        luôn phải có giá trị); hạ về toán tử ba ngôi C."""
+        t = self.cur()
+        self.expect("kw", "if")
+        cond = self.parse_cond()
+        then = self._parse_value_block("if")
+        if not self.accept("kw", "else"):
+            self.error("'if' ở vị trí biểu thức bắt buộc có 'else' (mọi nhánh "
+                       "phải cho một giá trị)")
+        if self.is_kw("if"):
+            els = self.parse_if_expr()
+        else:
+            els = self._parse_value_block("else")
+        # Hạ thẳng về toán tử ba ngôi: cùng ngữ nghĩa (đánh giá lười một nhánh),
+        # và tái dùng toàn bộ kiểm kiểu/sinh mã đã có của '?:'.
+        return A.Ternary(cond, then, els, t.line, t.col)
+
+    def parse_match_expr(self) -> A.MatchExpr:
+        """'let v = match x { p => val, ... }' — mỗi nhánh cho một GIÁ TRỊ."""
+        t = self.cur()
+        self.expect("kw", "match")
+        subject = self.parse_cond()
+        self.expect("op", "{")
+        arms = []
+        self.skip_semis()
+        while not self.is_op("}"):
+            if self.accept("id", "_"):
+                pats = None
+            else:
+                pats = [self.parse_match_pattern()]
+                while self.accept("op", "|"):
+                    pats.append(self.parse_match_pattern())
+            guard = None
+            if self.accept("kw", "if"):
+                guard = self.parse_cond()
+            self.expect("op", "=>")
+            if self.is_op("{"):
+                value = self._parse_value_block("match")
+            else:
+                saved = self.no_struct_lit
+                self.no_struct_lit = False
+                value = self.parse_expr()
+                self.no_struct_lit = saved
+            arms.append((pats, guard, value))
+            self.accept("op", ",")
+            self.skip_semis()
+        self.expect("op", "}")
+        if not arms:
+            self.error("'match' ở vị trí biểu thức cần ít nhất một nhánh")
+        return A.MatchExpr(subject, arms, t.line, t.col)
 
     def parse_match_pattern(self):
         """Một pattern trong match: biểu thức đơn, hoặc khoảng lo..hi / lo..=hi."""
@@ -581,19 +882,83 @@ class Parser:
             elif self.accept("op", "["):
                 saved = self.no_struct_lit
                 self.no_struct_lit = False
+                # 's[a..b]' / 's[a..=b]' — lát cắt chuỗi (kiểu Rust). Cận có thể
+                # khuyết: 's[..n]', 's[n..]', 's[..]'.
+                if self.is_op("..") or self.is_op("..="):
+                    inc = bool(self.accept("op", "..="))
+                    if not inc:
+                        self.advance()          # '..'
+                    lo = None
+                    hi = None if self.is_op("]") else self.parse_expr()
+                    self.no_struct_lit = saved
+                    self.expect("op", "]")
+                    e = A.Slice(e, lo, hi, inc, t.line, t.col)
+                    continue
                 idx = self.parse_expr()
+                if self.is_op("..") or self.is_op("..="):
+                    inc = bool(self.accept("op", "..="))
+                    if not inc:
+                        self.advance()
+                    hi = None if self.is_op("]") else self.parse_expr()
+                    self.no_struct_lit = saved
+                    self.expect("op", "]")
+                    e = A.Slice(e, idx, hi, inc, t.line, t.col)
+                    continue
                 self.no_struct_lit = saved
                 self.expect("op", "]")
                 e = A.Index(e, idx, t.line, t.col)
             elif self.accept("op", "."):
                 fld = self.expect("id").value
                 e = A.FieldAccess(e, fld, t.line, t.col)
+            elif (self.is_op("<") and isinstance(e, A.Ident)
+                  and self._looks_like_call_type_args()):
+                # 'f<int>(x)' — đối số kiểu TƯỜNG MINH tại nơi gọi. Chỉ nhận khi
+                # sau '>' là '(' , nếu không 'a < b' sẽ bị hiểu nhầm.
+                self.advance()
+                targs = []
+                while not self.is_op(">"):
+                    targs.append(self.parse_type())
+                    if not self.accept("op", ","):
+                        break
+                self.expect("op", ">")
+                self.expect("op", "(")
+                saved = self.no_struct_lit
+                self.no_struct_lit = False
+                args = []
+                while not self.is_op(")"):
+                    args.append(self.parse_expr())
+                    if not self.accept("op", ","):
+                        break
+                self.no_struct_lit = saved
+                self.expect("op", ")")
+                e = A.Call(e, args, t.line, t.col)
+                e.type_args = targs
+            elif self.is_kw("try"):
+                self.advance()
+                e = A.TryExpr(e, t.line, t.col)
+            elif self.is_op("::"):
+                # 'Type::item' — đường dẫn kiểu Rust, đồng nghĩa 'Type.item'
+                # (biến thể enum hoặc method tĩnh). Trước đây '::' được lexer
+                # nhận nhưng không parser nào dùng, nên 'Color::Red' báo "cần
+                # biểu thức" rất khó hiểu. Chỉ hợp lệ sau một TÊN trần.
+                if not isinstance(e, A.Ident):
+                    self.error("'::' chỉ dùng sau tên một kiểu "
+                               "(vd 'Color::Red', 'Counter::new()') — "
+                               "truy cập trường/method của một giá trị dùng '.'")
+                self.advance()
+                fld = self.expect("id").value
+                e = A.FieldAccess(e, fld, t.line, t.col)
+                e.via_path = True
             else:
                 break
         return e
 
     def parse_primary(self):
         t = self.cur()
+        if self.is_kw("if"):
+            return self.parse_if_expr()
+        if self.is_kw("match"):
+            return self.parse_match_expr()
         if t.kind == "int":
             self.advance(); return A.IntLit(t.value, t.line, t.col)
         if t.kind == "float":
@@ -635,6 +1000,14 @@ class Parser:
             elems = []
             while not self.is_op("]"):
                 elems.append(self.parse_expr())
+                # '[v; N]' — mảng N phần tử cùng giá trị (kiểu Rust). N phải là
+                # hằng số nguyên (kích thước mảng biết lúc biên dịch).
+                if len(elems) == 1 and self.is_op(";"):
+                    self.advance()
+                    count = self.parse_expr()
+                    self.no_struct_lit = saved
+                    self.expect("op", "]")
+                    return A.ArrayLit(elems, t.line, t.col, repeat=count)
                 if not self.accept("op", ","):
                     break
             self.no_struct_lit = saved
@@ -650,11 +1023,96 @@ class Parser:
             return e
         if t.kind == "id":
             self.advance()
+            # 'Pair<int, str>{ a: 1, b: "x" }' — struct literal GENERIC. Chỉ
+            # nhận khi sau '>' là '{' (nếu không 'a < b' bị nuốt nhầm).
+            if (not self.no_struct_lit and self.is_op("<")
+                    and self._looks_like_generic_lit()):
+                self.advance()
+                targs = []
+                while not self.is_op(">"):
+                    targs.append(self.parse_type())
+                    if not self.accept("op", ","):
+                        break
+                self.expect("op", ">")
+                lit = self.parse_struct_lit(t.value, t)
+                lit.type_args = targs
+                return lit
             if (not self.no_struct_lit and self.is_op("{")
                     and self._looks_like_struct_lit()):
                 return self.parse_struct_lit(t.value, t)
             return A.Ident(t.value, line=t.line, col=t.col)
         self.error("cần biểu thức")
+
+    def _looks_like_generic_lit(self):
+        """'Name<...>{' — struct literal generic (yêu cầu '{' ngay sau '>')."""
+        i = 1
+        depth = 0
+        while i < 24:
+            tk = self.at(i)
+            if tk.kind == "eof":
+                return False
+            v = tk.value
+            if v == "<":
+                depth += 1
+            elif v == ">":
+                if depth == 0:
+                    return self.at(i + 1).value == "{"
+                depth -= 1
+            elif tk.kind in ("id", "int") or v in ("*", ",", "[", "]"):
+                pass
+            else:
+                return False
+            i += 1
+        return False
+
+    def _looks_like_call_type_args(self):
+        """'f<int>(' — đối số kiểu ở nơi GỌI. Yêu cầu có '(' ngay sau '>' để
+        không nuốt nhầm 'a < b' (so sánh) thành đối số kiểu."""
+        i = 1
+        depth = 0
+        while i < 24:
+            tk = self.at(i)
+            if tk.kind == "eof":
+                return False
+            v = tk.value
+            if v == "<":
+                depth += 1
+            elif v == ">":
+                if depth == 0:
+                    return self.at(i + 1).value == "("
+                depth -= 1
+            elif tk.kind == "id" or v in ("*", ",", "[", "]") or tk.kind == "int":
+                pass
+            else:
+                return False
+            i += 1
+        return False
+
+    def _looks_like_type_args(self):
+        """Phân biệt 'Foo<int>' (đối số kiểu) với 'a < b' (so sánh).
+
+        Chỉ coi là đối số kiểu khi ngay sau '<' là một TÊN/kiểu rồi tới ',' hoặc
+        '>'. Ở VỊ TRÍ KIỂU thì '<' không thể là so sánh, nhưng hàm này cũng được
+        dùng từ vị trí biểu thức nên phải thận trọng."""
+        i = 1                                   # bỏ qua '<'
+        depth = 0
+        while i < 24:
+            t = self.at(i)
+            if t.kind == "eof":
+                return False
+            v = t.value
+            if v == "<":
+                depth += 1
+            elif v == ">":
+                if depth == 0:
+                    return True
+                depth -= 1
+            elif t.kind == "id" or v in ("*", ",", "[", "]") or t.kind == "int":
+                pass
+            else:
+                return False
+            i += 1
+        return False
 
     def _looks_like_struct_lit(self):
         # 'Name {}' (rỗng) hoặc 'Name { field: ...}' — phân biệt với khối lệnh.

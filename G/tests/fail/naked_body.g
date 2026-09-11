@@ -1,0 +1,2 @@
+@naked fn g() { let x: int = 1 }
+fn main() -> int { return 0 }

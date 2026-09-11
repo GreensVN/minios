@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: số phần tử của '[v; N]' phải là HẰNG số nguyên biết lúc biên dịch (cỡ mảng tĩnh) — dùng g_alloc cho cỡ động

@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: placeholder '{0}' không hợp lệ: khoá '0' không phải specifier (hợp lệ: {}, {d}, {x}, {f}, {s}, {c}, {b}, {p}... hoặc '{:cờ}') — G không hỗ trợ placeholder đánh số; dùng '{}' theo thứ tự

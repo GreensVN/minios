@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: toán hạng của '&&' là CON TRỎ HÀM (luôn khác null nên luôn đúng) — có phải bạn quên dấu ngoặc: 'f()'?

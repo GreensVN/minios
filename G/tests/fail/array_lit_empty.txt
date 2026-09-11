@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: mảng literal rỗng '[]' không suy luận được kiểu/cỡ — khai báo kiểu tường minh và điền phần tử (vd 'let a: [4]int = [0, 0, 0, 0]') hoặc dùng g_alloc cho mảng động

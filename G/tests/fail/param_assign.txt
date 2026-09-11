@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: không thể gán cho tham số 'x' (bất biến) — khai báo 'mut x: ...' trong danh sách tham số nếu hàm cần ghi vào nó

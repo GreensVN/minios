@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'alloc' không dùng được ở chế độ '--freestanding'

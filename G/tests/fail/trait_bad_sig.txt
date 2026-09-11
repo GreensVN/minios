@@ -1,0 +1,1 @@
+lỗi kiểu/ngữ nghĩa: 'N.show' trả về 'int' nhưng trait 'Sh' yêu cầu 'str'

@@ -1,0 +1,1 @@
+lỗi cú pháp: đường dẫn module có '/' phải đặt trong ngoặc kép: import "mod/a.g"
