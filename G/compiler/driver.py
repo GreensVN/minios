@@ -260,7 +260,7 @@ def build_llvm(args, extra, llvm_ir, prog, tgt):
             return 0
         shim = os.path.join(d, "shim.c")
         with open(shim, "w") as f:
-            f.write(_LLVM_SHIM)
+            f.write(_llvm_shim())
         if args.compile_obj:
             out = args.output or "out.o"
             shutil.copy(obj, out)
@@ -285,11 +285,29 @@ def build_llvm(args, extra, llvm_ir, prog, tgt):
 
 #: Shim C cho backend LLVM: runtime của G là header 'static inline' nên object
 #: LLVM không thấy được. Vài hàm ngoài-dòng ở đây là đủ.
-_LLVM_SHIM = """
+def _llvm_shim() -> str:
+    """Shim C cho backend LLVM.
+
+    Runtime của G là header toàn 'static inline' nên object LLVM KHÔNG thấy các
+    ký hiệu đó. Thay vì chép tay danh sách hàm (chắc chắn sẽ trôi lệch mỗi lần
+    runtime đổi), ta biên dịch CHÍNH header ấy ở chế độ 'G_RUNTIME_OUTLINE' —
+    macro G_INL khi đó rỗng nên mọi hàm được phát ra ngoài-dòng. Một nguồn duy
+    nhất, không có danh sách song song.
+    """
+    return """
+#define G_RUNTIME_OUTLINE 1
 #include "g_runtime.h"
+/* Vài thứ mã sinh ra gọi bằng tên riêng (hàm _Noreturn không bọc trực tiếp
+   được, và stdout/stderr là macro nên phải lấy qua hàm). */
 void* g_get_stream(int which) { return which ? (void*)stderr : (void*)stdout; }
-/* Runtime của G toàn 'static inline' -> object LLVM không thấy. Xuất ra
-   ngoài dòng những thứ mã sinh ra tham chiếu. */
+void g_panic_ext(const char* m) { g_panic(m); }
+void g_bounds_fail_ext(long long i, long long n, const char* w)
+    { g_bounds_fail(i, n, w); }
+void g_div_zero_fail_ext(const char* w) { g_div_zero_fail(w); }
+void* g_dl_open_ext(const char* p) { return g_dl_open(p); }
+void* g_dl_sym_ext(void* h, const char* n) { return g_dl_sym(h, n); }
+int   g_dl_close_ext(void* h) { return g_dl_close(h); }
+const char* g_dl_error_ext(void) { return g_dl_error(); }
 int g_ll_popcount(unsigned long long v) { return __builtin_popcountll(v); }
 int g_ll_clz(unsigned long long v) { return v ? __builtin_clzll(v) : 64; }
 int g_ll_ctz(unsigned long long v) { return v ? __builtin_ctzll(v) : 64; }
@@ -298,17 +316,6 @@ unsigned long long g_ll_rotl(unsigned long long v, unsigned n) { return g_rotl64
 unsigned long long g_ll_rotr(unsigned long long v, unsigned n) { return g_rotr64(v, n); }
 void* g_ll_calloc(unsigned long long n) { return calloc((size_t)n, 1); }
 void  g_ll_free(void* p) { free(p); }
-/* Kiểm biên/chia-0: runtime khai báo _Noreturn static inline nên phải bọc. */
-void g_bounds_fail_ext(long long i, long long n, const char* w) {
-    g_bounds_fail(i, n, w);
-}
-void g_div_zero_fail_ext(const char* w) { g_div_zero_fail(w); }
-void g_panic_ext(const char* m) { g_panic(m); }
-/* FFI động: runtime khai báo static inline nên object LLVM không thấy. */
-void* g_dl_open_ext(const char* p) { return g_dl_open(p); }
-void* g_dl_sym_ext(void* h, const char* n) { return g_dl_sym(h, n); }
-int   g_dl_close_ext(void* h) { return g_dl_close(h); }
-const char* g_dl_error_ext(void) { return g_dl_error(); }
 """
 
 

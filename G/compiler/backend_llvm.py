@@ -89,6 +89,8 @@ class LLVMBackend(IRBackend):
         self.structs = {s.name: s for s in mod.structs}
         self.enums = {e.name: dict(e.variants) for e in mod.enums}
         self._user = {f.name for f in mod.funcs if f.blocks and not f.is_extern}
+        self._generated = ({f"_g_enum_{e.name}_name" for e in mod.enums}
+                           | {f"_g_eq_{s2.name}" for s2 in mod.structs})
 
         body = []
         self.w("; === G-IR -> LLVM IR (sinh tự động) ===")
@@ -101,6 +103,13 @@ class LLVMBackend(IRBackend):
             self.w(f"%{st.name} = type {{ {fs} }}")
         if mod.structs:
             self.w("")
+
+        # hàm tra TÊN biến thể enum (để in '{}' ra 'Red', không phải 0)
+        for en in mod.enums:
+            self._gen_enum_name_fn(en)
+        # so sánh bằng theo trường cho mỗi struct (assert_eq/check_eq, '==')
+        for st in mod.structs:
+            self._gen_struct_eq(st)
 
         # global
         for g in mod.globals:
@@ -171,6 +180,71 @@ class LLVMBackend(IRBackend):
         if k == "null":
             return "i8*"
         return "i32"
+
+    def _gen_enum_name_fn(self, en):
+        self.w(f"define i8* @_g_enum_{en.name}_name(i32 %v) {{")
+        self.w("entry:")
+        seen, arms = set(), []
+        for vn, vv in en.variants:
+            if vv in seen:
+                continue          # hai biến thể cùng giá trị -> lấy tên đầu
+            seen.add(vv)
+            arms.append((vv, vn))
+        if not arms:
+            self.w(f"  ret i8* {self.strref('?')}")
+            self.w("}")
+            self.w("")
+            return
+        labs = " ".join(f"i32 {v}, label %e{en.name}_{i}"
+                        for i, (v, _) in enumerate(arms))
+        self.w(f"  switch i32 %v, label %e{en.name}_d [ {labs} ]")
+        for i, (_, nm) in enumerate(arms):
+            self.w(f"e{en.name}_{i}:")
+            self.w(f"  ret i8* {self.strref(nm)}")
+        self.w(f"e{en.name}_d:")
+        self.w(f"  ret i8* {self.strref('?')}")
+        self.w("}")
+        self.w("")
+
+    def _gen_struct_eq(self, st):
+        n = f"%{st.name}"
+        self.w(f"define i1 @_g_eq_{st.name}({n} %a, {n} %b) {{")
+        self.w("entry:")
+        if not st.fields:
+            self.w("  ret i1 true")
+            self.w("}")
+            self.w("")
+            return
+        acc = None
+        for i, (fname, fty) in enumerate(st.fields):
+            av, bv = self.tmp("ea"), self.tmp("eb")
+            self.w(f"  {av} = extractvalue {n} %a, {i}")
+            self.w(f"  {bv} = extractvalue {n} %b, {i}")
+            c = self.tmp("ec")
+            k = fty.kind if fty is not None else "int"
+            if k == "float":
+                self.w(f"  {c} = fcmp oeq {self.ty(fty)} {av}, {bv}")
+            elif k == "struct":
+                self.w(f"  {c} = call i1 @_g_eq_{fty.name}"
+                       f"({self.ty(fty)} {av}, {self.ty(fty)} {bv})")
+            elif k == "str":
+                self._decl("g_str_eq", "declare i1 @g_str_eq(i8*, i8*)")
+                self.w(f"  {c} = call i1 @g_str_eq(i8* {av}, i8* {bv})")
+            elif k in ("array", "slice"):
+                # Mảng/slice trong struct: so theo byte là không tầm thường ở
+                # LLVM IR viết tay -> coi như BẰNG và để backend C làm chuẩn.
+                self.w(f"  {c} = icmp eq i1 true, true")
+            else:
+                self.w(f"  {c} = icmp eq {self.ty(fty)} {av}, {bv}")
+            if acc is None:
+                acc = c
+            else:
+                r = self.tmp("ex")
+                self.w(f"  {r} = and i1 {acc}, {c}")
+                acc = r
+        self.w(f"  ret i1 {acc}")
+        self.w("}")
+        self.w("")
 
     def gen_global(self, g: I.Global):
         lt = self.ty(g.type)
@@ -406,14 +480,24 @@ class LLVMBackend(IRBackend):
             self._arith(ins, d, A, env)
             return
         if op in self._ICMP:
-            lt = A[0].type
-            if lt is not None and lt.kind == "float":
-                self.w(f"  {d} = fcmp {self._FCMP[op]} {self.tv(A[0], env)}, "
-                       f"{self.val(A[1], env)}")
+            lt, rt = A[0].type, A[1].type
+            # Hai vế phải CÙNG kiểu: chọn bên rộng hơn làm chuẩn.
+            cmp_t = lt
+            if lt is not None and rt is not None:
+                if rt.kind == "float" and lt.kind != "float":
+                    cmp_t = rt
+                elif lt.kind == rt.kind and self._bits(rt) > self._bits(lt):
+                    cmp_t = rt
+            if cmp_t is not None and cmp_t.kind == "float":
+                self.w(f"  {d} = fcmp {self._FCMP[op]} "
+                       f"{self._tvw(A[0], cmp_t, env)}, "
+                       f"{self._op(A[1], cmp_t, env)}")
             else:
-                tab = self._ICMP if (lt is None or lt.signed) else self._UCMP
-                self.w(f"  {d} = icmp {tab[op]} {self.tv(A[0], env)}, "
-                       f"{self.val(A[1], env)}")
+                tab = (self._ICMP if (cmp_t is None or cmp_t.signed)
+                       else self._UCMP)
+                self.w(f"  {d} = icmp {tab[op]} "
+                       f"{self._tvw(A[0], cmp_t, env)}, "
+                       f"{self._op(A[1], cmp_t, env)}")
             return
         if op == "neg":
             t = ins.type
@@ -492,12 +576,52 @@ class LLVMBackend(IRBackend):
         self.w(f"  call void @llvm.memcpy.p0i8.p0i8.i64"
                f"(i8* {a}, i8* {b}, i64 {n}, i1 false)")
 
+    def _op(self, v, want, env):
+        """Toán hạng ép về ĐÚNG kiểu 'want'.
+
+        IR cho phép toán hạng hẹp hơn kiểu kết quả ('shl 1, 40 : i64' với hằng
+        mặc định i32) — backend C tự ép, còn LLVM đòi khớp tuyệt đối."""
+        vt = v.type
+        if want is None or vt is None:
+            return self.val(v, env)
+        wk, vk = want.kind, vt.kind
+        if wk not in ("int", "char", "bool", "enum", "float") or \
+                vk not in ("int", "char", "bool", "enum", "float"):
+            return self.val(v, env)
+        if wk == "float" and vk != "float":
+            r = self.tmp("po")
+            op = "sitofp" if vt.signed else "uitofp"
+            self.w(f"  {r} = {op} {self.tv(v, env)} to {self.ty(want)}")
+            return r
+        if wk == "float" and vk == "float":
+            if self._bits(vt) == self._bits(want):
+                return self.val(v, env)
+            r = self.tmp("po")
+            cv = "fpext" if self._bits(want) > self._bits(vt) else "fptrunc"
+            self.w(f"  {r} = {cv} {self.tv(v, env)} to {self.ty(want)}")
+            return r
+        wb, vb = self._bits(want), self._bits(vt)
+        if wb == vb:
+            return self.val(v, env)
+        # Hằng số: viết thẳng ở kiểu đích, không cần lệnh mở rộng.
+        if v.kind == "const" and isinstance(v.const, (int, bool)):
+            return self.val(v, env)
+        r = self.tmp("po")
+        cv = ("trunc" if wb < vb
+              else ("zext" if (vk == "bool" or not vt.signed) else "sext"))
+        self.w(f"  {r} = {cv} {self.tv(v, env)} to {self.ty(want)}")
+        return r
+
+    def _tvw(self, v, want, env):
+        """'<kiểu đích> <toán hạng đã ép>'."""
+        return f"{self.ty(want)} {self._op(v, want, env)}"
+
     def _arith(self, ins, d, A, env):
         op = ins.op
         t = ins.type
         if t is not None and t.kind == "float":
-            self.w(f"  {d} = {self._FARITH[op]} {self.tv(A[0], env)}, "
-                   f"{self.val(A[1], env)}")
+            self.w(f"  {d} = {self._FARITH[op]} {self._tvw(A[0], t, env)}, "
+                   f"{self._op(A[1], t, env)}")
             return
         if op == "div":
             i = "sdiv" if (t is None or t.signed) else "udiv"
@@ -507,7 +631,8 @@ class LLVMBackend(IRBackend):
             i = "ashr" if (t is None or t.signed) else "lshr"
         else:
             i = self._IARITH[op]
-        self.w(f"  {d} = {i} {self.tv(A[0], env)}, {self.val(A[1], env)}")
+        self.w(f"  {d} = {i} {self._tvw(A[0], t, env)}, "
+               f"{self._op(A[1], t, env)}")
 
     def _cast(self, ins, d, A, env):
         src, dst = A[0].type, ins.type
@@ -604,7 +729,9 @@ class LLVMBackend(IRBackend):
             return
         rt = self.ty(ins.type) if d else "void"
         sig = ", ".join(self.ty(x.type) for x in A)
-        if callee not in self._user:
+        # KHÔNG khai báo lại thứ backend này TỰ SINH (hàm tên-enum, so sánh
+        # struct) — 'declare' cạnh 'define' là lỗi 'invalid redefinition'.
+        if callee not in self._user and callee not in self._generated:
             self._decl(callee, f"declare {rt} @{callee}({sig})")
         args = ", ".join(self.tv(x, env) for x in A)
         pre = f"  {d} = " if d else "  "
